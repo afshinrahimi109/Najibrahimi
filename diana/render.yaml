@@ -1,5 +1,6 @@
 # 🐠 Diana روی Render.com — پلن رایگان (Free Web Service)
 # کافیست این مخزن را در render.com ایمپورت کنید؛ بقیه خودکار است.
+# 🌐 آدرس ثابت رایگان: https://diana-assistant.onrender.com
 services:
   - type: web
     name: diana-assistant
@@ -11,3 +12,9 @@ services:
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
+      - key: DIANA_USER
+        value: "diana"
+      # 🔒 sync:false یعنی هنگام ساخت سرویس از شما خواسته میشود رمز را وارد کنید
+      # (هرگز رمز را داخل گیت نگذارید) — server.py با آن Basic Auth را فعال میکند.
+      - key: DIANA_TOKEN
+        sync: false
