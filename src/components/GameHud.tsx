@@ -42,7 +42,10 @@ export const GameHud: React.FC<Props> = ({
 }) => {
   const [muted, setMuted] = useState(soundFX.muted);
   const [showTouchPad, setShowTouchPad] = useState(
-    typeof window !== 'undefined' && ('ontouchstart' in window || window.innerWidth < 820)
+    typeof window !== 'undefined' &&
+      ('ontouchstart' in window ||
+        window.location.hostname === 'kcraft.local' ||
+        window.innerWidth < 900)
   );
 
   const activeSlot = hud.hotbar[hud.hotbarIndex];
@@ -198,8 +201,14 @@ export const GameHud: React.FC<Props> = ({
               className="dpad-btn up"
               onMouseDown={() => onMobileMove(0, 1, false)}
               onMouseUp={() => onMobileMove(0, 0, false)}
-              onTouchStart={() => onMobileMove(0, 1, false)}
-              onTouchEnd={() => onMobileMove(0, 0, false)}
+              onTouchStart={(e) => {
+                e.preventDefault();
+                onMobileMove(0, 1, false);
+              }}
+              onTouchEnd={(e) => {
+                e.preventDefault();
+                onMobileMove(0, 0, false);
+              }}
             >
               ▲
             </button>
@@ -208,8 +217,14 @@ export const GameHud: React.FC<Props> = ({
                 className="dpad-btn"
                 onMouseDown={() => onMobileMove(1, 0, false)}
                 onMouseUp={() => onMobileMove(0, 0, false)}
-                onTouchStart={() => onMobileMove(1, 0, false)}
-                onTouchEnd={() => onMobileMove(0, 0, false)}
+                onTouchStart={(e) => {
+                  e.preventDefault();
+                  onMobileMove(1, 0, false);
+                }}
+                onTouchEnd={(e) => {
+                  e.preventDefault();
+                  onMobileMove(0, 0, false);
+                }}
               >
                 ▶
               </button>
@@ -217,8 +232,14 @@ export const GameHud: React.FC<Props> = ({
                 className="dpad-btn jump"
                 onMouseDown={() => onMobileMove(0, 0, true)}
                 onMouseUp={() => onMobileMove(0, 0, false)}
-                onTouchStart={() => onMobileMove(0, 0, true)}
-                onTouchEnd={() => onMobileMove(0, 0, false)}
+                onTouchStart={(e) => {
+                  e.preventDefault();
+                  onMobileMove(0, 0, true);
+                }}
+                onTouchEnd={(e) => {
+                  e.preventDefault();
+                  onMobileMove(0, 0, false);
+                }}
               >
                 پرش
               </button>
@@ -226,8 +247,14 @@ export const GameHud: React.FC<Props> = ({
                 className="dpad-btn"
                 onMouseDown={() => onMobileMove(-1, 0, false)}
                 onMouseUp={() => onMobileMove(0, 0, false)}
-                onTouchStart={() => onMobileMove(-1, 0, false)}
-                onTouchEnd={() => onMobileMove(0, 0, false)}
+                onTouchStart={(e) => {
+                  e.preventDefault();
+                  onMobileMove(-1, 0, false);
+                }}
+                onTouchEnd={(e) => {
+                  e.preventDefault();
+                  onMobileMove(0, 0, false);
+                }}
               >
                 ◀
               </button>
@@ -236,8 +263,14 @@ export const GameHud: React.FC<Props> = ({
               className="dpad-btn down"
               onMouseDown={() => onMobileMove(0, -1, false)}
               onMouseUp={() => onMobileMove(0, 0, false)}
-              onTouchStart={() => onMobileMove(0, -1, false)}
-              onTouchEnd={() => onMobileMove(0, 0, false)}
+              onTouchStart={(e) => {
+                e.preventDefault();
+                onMobileMove(0, -1, false);
+              }}
+              onTouchEnd={(e) => {
+                e.preventDefault();
+                onMobileMove(0, 0, false);
+              }}
             >
               ▼
             </button>

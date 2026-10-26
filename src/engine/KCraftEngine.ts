@@ -148,6 +148,9 @@ export class KCraftEngine {
   private draggingLook = false;
   private lastMouseX = 0;
   private lastMouseY = 0;
+  private lookTouchId: number | null = null;
+  private lastTouchX = 0;
+  private lastTouchY = 0;
   private pointerLocked = false;
 
   private currentRayHit: RaycastHit | null = null;
@@ -231,7 +234,14 @@ export class KCraftEngine {
     fpDir.position.set(2, 4, 3);
     this.fpScene.add(fpAmb, fpDir);
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+    try {
+      this.renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        powerPreference: 'high-performance',
+      });
+    } catch {
+      this.renderer = new THREE.WebGLRenderer({ antialias: false });
+    }
     this.renderer.setSize(w, h);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.autoClear = false;
@@ -815,6 +825,10 @@ export class KCraftEngine {
     dom.addEventListener('mousedown', this.onMouseDown);
     window.addEventListener('mouseup', this.onMouseUp);
     window.addEventListener('mousemove', this.onMouseMove);
+    dom.addEventListener('touchstart', this.onTouchStart, { passive: false });
+    dom.addEventListener('touchmove', this.onTouchMove, { passive: false });
+    dom.addEventListener('touchend', this.onTouchEnd);
+    dom.addEventListener('touchcancel', this.onTouchEnd);
     dom.addEventListener('wheel', this.onWheel, { passive: true });
     dom.addEventListener('contextmenu', this.onContextMenu);
   }
@@ -973,6 +987,42 @@ export class KCraftEngine {
       this.lastMouseY = e.clientY;
       if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
         this.rotateCameraBy(dx * sens * 1.4, dy * sens * 1.4);
+      }
+    }
+  };
+
+  private onTouchStart = (e: TouchEvent): void => {
+    if (!this.started || this.activeModal !== 'none') return;
+    if (this.lookTouchId === null && e.changedTouches.length > 0) {
+      const t = e.changedTouches[0];
+      this.lookTouchId = t.identifier;
+      this.lastTouchX = t.clientX;
+      this.lastTouchY = t.clientY;
+    }
+  };
+
+  private onTouchMove = (e: TouchEvent): void => {
+    if (!this.started || this.activeModal !== 'none') return;
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const t = e.changedTouches[i];
+      if (t.identifier === this.lookTouchId) {
+        e.preventDefault();
+        const dx = t.clientX - this.lastTouchX;
+        const dy = t.clientY - this.lastTouchY;
+        this.lastTouchX = t.clientX;
+        this.lastTouchY = t.clientY;
+        const sens = 0.0052;
+        this.rotateCameraBy(dx * sens, dy * sens);
+        break;
+      }
+    }
+  };
+
+  private onTouchEnd = (e: TouchEvent): void => {
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      if (e.changedTouches[i].identifier === this.lookTouchId) {
+        this.lookTouchId = null;
+        break;
       }
     }
   };
