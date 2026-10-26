@@ -1,0 +1,13 @@
+# 🐠 Diana روی Render.com — پلن رایگان (Free Web Service)
+# کافیست این مخزن را در render.com ایمپورت کنید؛ بقیه خودکار است.
+services:
+  - type: web
+    name: diana-assistant
+    env: python
+    plan: free
+    rootDir: diana
+    buildCommand: "echo 'Diana needs no build — pure Python stdlib'"
+    startCommand: "python3 server.py"
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
