@@ -1,0 +1,8 @@
+# داده‌های زمان اجرا (حافظه، تنظیمات و فایل‌های ساخته‌شده) — خصوصی و محلی می‌مانند
+data/memory.json
+data/settings.json
+data/vault/*
+data/sandbox/*
+!data/vault/.gitkeep
+!data/sandbox/.gitkeep
+__pycache__/

@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>دیانا 🐠 | ماهی زنده هوشمند و ارتش ۱۲۰ ایجنت</title>
+<meta name="description" content="دیانا — سیستم چندعامله زنده با مغز ارکستراتور و ۱۲۰ ایجنت متخصص؛ ماهی سه‌بعدی سخنگو که واقعاً کار انجام می‌ده.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐠</text></svg>">
+<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;700;800;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+</script>
+</head>
+<body>
+
+<div class="sea-bg"><div class="bubble b1"></div><div class="bubble b2"></div><div class="bubble b3"></div><div class="bubble b4"></div><div class="bubble b5"></div><div class="bubble b6"></div></div>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-fish">🐠</div>
+    <div>
+      <div class="brand-name">دیانا <span class="crown">👑</span></div>
+      <div class="brand-sub">مغز زنده چندعامله • ۱۲۰ ایجنت متخصص • نسخه وب 🌐</div>
+    </div>
+  </div>
+  <nav class="main-nav" id="mainNav">
+    <button class="nav-btn active" data-page="home">🏠 آکواریوم</button>
+    <button class="nav-btn" data-page="command">🧠 مرکز فرماندهی <span class="live-dot" id="cmdLiveDot" hidden></span></button>
+    <button class="nav-btn" data-page="agents">👥 ارتش ایجنت‌ها</button>
+    <button class="nav-btn" data-page="missions">📋 مأموریت‌ها</button>
+    <button class="nav-btn" data-page="vault">🗄️ گاوصندوق و حافظه</button>
+    <button class="nav-btn" data-page="settings">⚙️ تنظیمات</button>
+  </nav>
+  <div class="status-pill" id="statusPill" title="وضعیت مغز دیانا">
+    <span class="pulse-dot"></span><span id="brainModeText">در حال بیدار شدن...</span>
+  </div>
+</header>
+
+<main>
+  <!-- ================= صفحه آکواریوم ================= -->
+  <section class="page active" id="page-home">
+    <div class="home-grid">
+      <div class="aquarium-card glass">
+        <div id="fishWrap">
+          <canvas id="fishCanvas"></canvas>
+          <div id="fish2dFallback" hidden>
+            <div class="fish2d">🐠</div>
+            <p>حالت دوبعدی (WebGL در دسترس نیست)</p>
+          </div>
+          <div id="speechBubble" class="speech-bubble" hidden></div>
+          <div class="aqua-hud">
+            <span class="hud-chip" id="fishMood">🐠 دیانا سرحاله</span>
+            <span class="hud-chip" id="activeAgentsChip">⚡ ایجنت فعال: ۰</span>
+            <span class="hud-chip hint">🍤 رو آکواریوم کلیک کن تا به دیانا غذا بدی!</span>
+          </div>
+        </div>
+        <div class="home-stats" id="homeStats">
+          <div class="stat"><span class="stat-num" id="statMissions">۰</span><span class="stat-label">مأموریت انجام‌شده</span></div>
+          <div class="stat"><span class="stat-num">۱۲۰</span><span class="stat-label">ایجنت متخصص</span></div>
+          <div class="stat"><span class="stat-num" id="statFacts">۰</span><span class="stat-label">خاطره ذخیره‌شده</span></div>
+          <div class="stat"><span class="stat-num" id="statFiles">۰</span><span class="stat-label">فایل در گاوصندوق</span></div>
+        </div>
+        <div class="dims">
+          <span>🌌 سیستم پنج‌بُعدی دیانا:</span>
+          <b>بُعد ۱-۳: آکواریوم سه‌بعدی زنده</b> • <b>بُعد ۴: زمان و حافظه ماندگار</b> • <b>بُعد ۵: احساس و شخصیت زنده</b>
+        </div>
+      </div>
+
+      <div class="chat-card glass">
+        <div class="chat-head">
+          <div class="chat-title">💬 گفتگو با دیانا</div>
+          <div class="chat-actions">
+            <button class="icon-btn" id="voiceQuickToggle" title="صدای دیانا روشن/خاموش">🔊</button>
+            <button class="icon-btn" id="clearChatBtn" title="پاک کردن نمای گفتگو">🧹</button>
+          </div>
+        </div>
+        <div class="quick-chips" id="quickChips">
+          <button class="chip">سلام دیانا! اسمم رو یاد بگیر</button>
+          <button class="chip">درباره سیاه‌چاله‌ها تحقیق کن و گزارش بده 🔬</button>
+          <button class="chip">برنامه‌ای بنویس که اعداد اول تا ۱۰۰ رو پیدا کنه 💻</button>
+          <button class="chip">یه عکس از قلعه‌ای روی کوه در غروب بساز 🎨</button>
+          <button class="chip">حساب کن ۴۵ × ۱۲ + ۷ 🧮</button>
+          <button class="chip">برنامه سفر سه‌روزه به شیراز بچین ✈️</button>
+          <button class="chip">یه داستان کوتاه درباره یه ماهی شجاع بنویس 📚</button>
+          <button class="chip">چه کارهایی بلدی؟</button>
+        </div>
+        <div class="chat-messages" id="chatMessages"></div>
+        <div class="chat-input-row">
+          <button class="icon-btn mic" id="micBtn" title="گفتن با صدا🎤">🎤</button>
+          <textarea id="chatInput" rows="1" placeholder="به دیانا پیام بده یا مأموریت تعریف کن... (Enter = ارسال)"></textarea>
+          <button class="send-btn" id="sendBtn" title="ارسال">➤</button>
+        </div>
+        <div class="chat-foot" id="chatFoot">دیانا می‌تونه اشتباه کنه؛ ولی ارزیاب کیفیتش همیشه بیداره ✅</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= مرکز فرماندهی ================= -->
+  <section class="page" id="page-command">
+    <div class="page-head">
+      <h2>🧠 مرکز فرماندهی ارکستراتور</h2>
+      <p>اینجا زنده می‌بینی مغز دیانا چطور هدف رو تجزیه می‌کنه، متخصص‌ها موازی کار می‌کنن، ارزیاب کیفیت نمره می‌ده و نتیجه نهایی ترکیب می‌شه.</p>
+    </div>
+    <div class="glass mission-launcher">
+      <input type="text" id="cmdGoalInput" placeholder="🎯 یه مأموریت بزرگ تعریف کن؛ مثلاً: درباره هوش مصنوعی تحقیق کن و بعد یه مقاله کامل بنویس">
+      <button class="primary-btn" id="cmdStartBtn">🚀 شروع مأموریت</button>
+    </div>
+    <div class="command-grid">
+      <div class="glass brain-panel">
+        <div class="brain-orb" id="brainOrb"><span>🧠</span><div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div></div>
+        <div class="brain-state" id="brainState">ارکستراتور در حالت آماده‌باش 💤</div>
+        <div class="progress-wrap"><div class="progress-bar" id="cmdProgress"></div></div>
+        <div class="mission-meta" id="cmdMeta">هنوز مأموریتی شروع نشده. از بالا یا از صفحه آکواریوم فرمان بده فرمانده!</div>
+        <h4 class="log-title">📡 جریان زنده مغز (Orchestrator Log)</h4>
+        <div class="brain-log" id="cmdLog"></div>
+      </div>
+      <div class="glass agents-live-panel">
+        <h4>⚡ متخصص‌های در حال اجرای مأموریت</h4>
+        <div class="live-agents" id="cmdAgents">
+          <div class="empty-box">وقتی مأموریتی شروع بشه، کارت هر متخصص اینجا روشن می‌شه و امتیاز ارزیاب روش میاد 🐠</div>
+        </div>
+        <h4 class="report-title">🎁 گزارش نهایی ترکیب‌شده توسط دیانا</h4>
+        <div class="report-box markdown" id="cmdReport"><div class="empty-box">گزارش نهایی مأموریت اینجا نمایش داده می‌شه و خودکار در گاوصندوق ذخیره می‌شه 📁</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= ارتش ایجنت‌ها ================= -->
+  <section class="page" id="page-agents">
+    <div class="page-head">
+      <h2>👥 ارتش ۱۲۰ ایجنت متخصص دیانا</h2>
+      <p>۱۲ دپارتمان × ۱۰ متخصص حرفه‌ای برای تمام کارهای مجازی و روزمره. روی هر ایجنت کلیک کن و مستقیم بهش مأموریت بده!</p>
+    </div>
+    <div class="glass agents-toolbar">
+      <input type="text" id="agentSearch" placeholder="🔍 جستجو در ارتش... (مثلاً: شعر، کد، سفر، لوگو)">
+      <div class="dept-filters" id="deptFilters"></div>
+      <div class="agents-count" id="agentsCount"></div>
+    </div>
+    <div class="agents-grid" id="agentsGrid"></div>
+  </section>
+
+  <!-- ================= مأموریت‌ها ================= -->
+  <section class="page" id="page-missions">
+    <div class="page-head">
+      <h2>📋 تاریخچه مأموریت‌ها</h2>
+      <p>همه مأموریت‌هایی که دیانا و ارتشش برایت انجام داده‌ن، با برنامه ارکستراتور و گزارش کامل.</p>
+    </div>
+    <div class="missions-layout">
+      <div class="glass missions-list" id="missionsList"></div>
+      <div class="glass mission-detail markdown" id="missionDetail"><div class="empty-box">یه مأموریت رو از لیست انتخاب کن تا گزارش کاملش اینجا بیاد 📋</div></div>
+    </div>
+  </section>
+
+  <!-- ================= گاوصندوق و حافظه ================= -->
+  <section class="page" id="page-vault">
+    <div class="page-head">
+      <h2>🗄️ گاوصندوق و حافظه بلندمدت دیانا</h2>
+      <p>تمام فایل‌هایی که دیانا ساخته، خاطراتی که از تو به سپرده و یادآوری‌ها — همه روی هاست خودت ذخیره‌ان و هیچ‌جا نمی‌رن.</p>
+    </div>
+    <div class="vault-grid">
+      <div class="glass">
+        <h4>📁 فایل‌های گاوصندوق</h4>
+        <div id="filesList"></div>
+        <div class="new-file">
+          <input type="text" id="newFileName" placeholder="اسم فایل؛ مثلاً ایده‌ها.txt">
+          <textarea id="newFileContent" rows="3" placeholder="محتوای فایل..."></textarea>
+          <button class="primary-btn small" id="createFileBtn">➕ ساخت فایل</button>
+        </div>
+      </div>
+      <div class="glass">
+        <h4>🧠 حافظه دیانا از تو</h4>
+        <div id="factsList"></div>
+        <div class="new-fact">
+          <input type="text" id="newFactInput" placeholder="یه چیزی به دیانا یاد بده؛ مثلاً: غذای موردعلاقه‌ام قرمه‌سبزیه">
+          <button class="primary-btn small" id="addFactBtn">💾 به خاطر بسپار</button>
+        </div>
+        <h4 class="mt">⏰ یادآوری‌ها</h4>
+        <div id="remindersList"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= تنظیمات ================= -->
+  <section class="page" id="page-settings">
+    <div class="page-head">
+      <h2>⚙️ تنظیمات مغز دیانا</h2>
+      <p>دیانا همین حالا با مغز ابری <b>رایگان و بدون کلید</b> کار می‌کنه. اگه خواستی قوی‌ترش کنی، کلید رایگان Groq یا Gemini رو اینجا بذار.</p>
+    </div>
+    <div class="glass settings-form">
+      <label>👤 اسم تو (فرمانده)</label>
+      <input type="text" id="setName" placeholder="اسمت رو بنویس تا دیانا صدات کنه">
+      <div class="toggle-row">
+        <label>🔊 صدای دیانا (حرف‌زدن با صدا)</label>
+        <button class="toggle on" id="setVoice">روشن</button>
+      </div>
+      <div class="toggle-row">
+        <label>☁️ مغز ابری رایگان از مرورگر (Pollinations — بدون کلید)</label>
+        <button class="toggle on" id="setCloud">روشن</button>
+      </div>
+      <div class="keys-box">
+        <h4>🔑 کلیدهای رایگان اختیاری (برای مغز قوی‌تر)</h4>
+        <label>Groq — رایگان از <a href="https://console.groq.com" target="_blank" rel="noopener">console.groq.com</a></label>
+        <input type="password" id="keyGroq" placeholder="gsk_...">
+        <label>Google Gemini — رایگان از <a href="https://aistudio.google.com" target="_blank" rel="noopener">aistudio.google.com</a></label>
+        <input type="password" id="keyGemini" placeholder="AIza...">
+        <label>OpenRouter — مدل‌های رایگان از <a href="https://openrouter.ai" target="_blank" rel="noopener">openrouter.ai</a></label>
+        <input type="password" id="keyOpenrouter" placeholder="sk-or-...">
+        <p class="keys-note">کلیدها فقط روی سرور/هاست خودت ذخیره می‌شن و جایی ارسال نمی‌شن. خالی گذاشتن = پاک‌کردن کلید.</p>
+      </div>
+      <button class="primary-btn" id="saveSettingsBtn">💾 ذخیره تنظیمات</button>
+      <div class="settings-msg" id="settingsMsg"></div>
+      <div class="about-box">
+        <h4>🐠 درباره دیانا</h4>
+        <p>دیانا یک سیستم چندعامله زنده با معماری ارکستراتور–کارگر است (همان الگوی سیستم تحقیقاتی کلود): مغز رهبر کار را تجزیه می‌کند، ۱۲۰ ایجنت متخصص در ۱۲ دپارتمان به‌صورت موازی با ابزارهای واقعی (اجرای کد، جستجوی وب، ساخت فایل و عکس، محاسبات و حافظه) اجرا می‌کنند، ارزیاب کیفیت خروجی‌ها را نمره می‌دهد و دیانا نتیجه نهایی را ترکیب و با صدا اعلام می‌کند.</p>
+        <p>🌌 پنج بُعد دیانا: <b>سه بُعد فضا</b> (آکواریوم سه‌بعدی و ماهی زنده)، <b>بُعد زمان</b> (حافظه ماندگار روی هاست) و <b>بُعد احساس</b> (شخصیت، حالت‌های روحی و واکنش زنده ماهی به فعالیت ایجنت‌ها).</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- مودال مأموریت مستقیم ایجنت -->
+<div class="modal-backdrop" id="agentModal" hidden>
+  <div class="modal glass">
+    <button class="modal-close" id="modalClose">✖</button>
+    <div id="modalAgentInfo"></div>
+    <textarea id="modalTask" rows="4" placeholder="مأموریت رو برای این متخصص بنویس..."></textarea>
+    <button class="primary-btn" id="modalRun">🚀 اجرای مأموریت با این متخصص</button>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script type="module">
+  try {
+    const m = await import("./fish3d.js");
+    window.DianaFish = m.initDianaFish(document.getElementById("fishCanvas"), document.getElementById("fishWrap"));
+  } catch (e) {
+    console.warn("3D fish failed, fallback to 2D", e);
+    document.getElementById("fish2dFallback").hidden = false;
+    document.getElementById("fishCanvas").style.display = "none";
+    window.DianaFish = { say(){}, setMood(){}, pulseDept(){}, feed(){}, setSpeaking(){} };
+  }
+</script>
+<script src="agents-data.js"></script>
+<script src="browser-backend.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
