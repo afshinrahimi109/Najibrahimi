@@ -1,0 +1,23 @@
+# 🔐 رله VPN شخصی (VLESS/WebSocket) — دیپلوی روی پلن رایگان Render
+# بدون کارت بانکی، آدرس ثابت: https://<name>.onrender.com
+# مسیر Blueprint در داشبورد Render را بگذار: vpn/render.yaml
+services:
+  - type: web
+    name: free-vpn-relay
+    env: python
+    plan: free
+    rootDir: vpn
+    buildCommand: "echo 'zero dependencies — pure Python stdlib'"
+    startCommand: "python3 server.py"
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      # sync:false یعنی هنگام ساخت سرویس از تو مقدارش پرسیده میشود
+      # (هرگز رمزها را داخل گیت نگذار) — مقادیر را gen_config.py میسازد.
+      - key: VPN_UUID
+        sync: false
+      - key: VPN_TOKEN
+        sync: false
+      - key: VPN_IDLE_TIMEOUT
+        value: "45"
