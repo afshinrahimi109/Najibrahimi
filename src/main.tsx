@@ -5,6 +5,7 @@ import '@fontsource/vazirmatn/arabic-700.css';
 import '@fontsource/vazirmatn/latin-400.css';
 import '@fontsource/vazirmatn/latin-700.css';
 import './styles/app.css';
+import './styles/mobile-controls.css';
 import { App } from './App';
 
 // Polyfill CanvasRenderingContext2D.roundRect for older Android/iOS WebViews

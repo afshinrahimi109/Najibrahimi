@@ -13,6 +13,7 @@ interface MobileControlsProps {
   controlStyle: ControlStyle;
   isFlying: boolean;
   sprinting: boolean;
+  secondaryActionLabel: string;
   onMoveVector: (mx: number, mz: number) => void;
   onSetJump: (jumping: boolean) => void;
   onSetFlyDown: (down: boolean) => void;
@@ -26,6 +27,7 @@ export const MobileControls: React.FC<MobileControlsProps> = ({
   controlStyle,
   isFlying,
   sprinting,
+  secondaryActionLabel,
   onMoveVector,
   onSetJump,
   onSetFlyDown,
@@ -44,6 +46,9 @@ export const MobileControls: React.FC<MobileControlsProps> = ({
   const [pressedDir, setPressedDir] = useState<string | null>(null);
 
   const MAX_RADIUS = 42;
+  const pulse = () => {
+    if (typeof navigator !== 'undefined' && 'vibrate' in navigator) navigator.vibrate?.(9);
+  };
 
   const updateStickFromPoint = (clientX: number, clientY: number) => {
     const el = baseRef.current;
@@ -267,7 +272,7 @@ export const MobileControls: React.FC<MobileControlsProps> = ({
             }}
           >
             <IconVoxelBuild size={28} />
-            <span>ساخت</span>
+            <span>{secondaryActionLabel}</span>
           </button>
 
           <button
