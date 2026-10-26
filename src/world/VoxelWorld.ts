@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { BLOCK_IDS } from '../data/items';
-import { BlockId } from '../types/game';
+import { BlockId, WorldBiomeId } from '../types/game';
 import { BlockTextureSystem } from './BlockTextures';
 
 export const CHUNK_SIZE = 16;
@@ -135,6 +135,7 @@ const FACE_DEFS = [
 export class VoxelWorld {
   public readonly data: Uint8Array;
   public readonly worldGroup: THREE.Group;
+  public currentBiome: WorldBiomeId = 'hanok_valley';
   private readonly texSys: BlockTextureSystem;
   private readonly chunkMeshes: Map<string, ChunkMeshPair> = new Map();
 
@@ -143,6 +144,19 @@ export class VoxelWorld {
     this.data = new Uint8Array(WORLD_WIDTH * WORLD_HEIGHT * WORLD_DEPTH);
     this.worldGroup = new THREE.Group();
     this.generateTerrainAndKoreanVillage();
+    this.rebuildAllChunks();
+  }
+
+  public rebuildForBiome(biome: WorldBiomeId): void {
+    this.currentBiome = biome;
+    this.data.fill(BLOCK_IDS.AIR);
+    if (biome === 'seoul_night') {
+      this.generateSeoulNeonWorld();
+    } else if (biome === 'jeju_island') {
+      this.generateJejuVolcanicWorld();
+    } else {
+      this.generateTerrainAndKoreanVillage();
+    }
     this.rebuildAllChunks();
   }
 
@@ -216,6 +230,233 @@ export class VoxelWorld {
       }
     }
     return 17;
+  }
+
+  private generateSeoulNeonWorld(): void {
+    const plazaY = 16;
+    for (let z = 0; z < WORLD_DEPTH; z++) {
+      for (let x = 0; x < WORLD_WIDTH; x++) {
+        // Han River channel across z: 58..69
+        const isRiver = z >= 58 && z <= 69;
+        // Namsan Hill in north (z < 20)
+        const distNamsan = Math.hypot(x - 48, z - 14);
+        let h = plazaY;
+        if (isRiver) {
+          h = 10 + Math.floor(Math.abs(z - 63.5) * 0.45);
+        } else if (distNamsan < 16) {
+          h = plazaY + Math.floor((1 - distNamsan / 16) * 12);
+        } else {
+          h = plazaY + Math.floor(fbm2D(x + 200, z + 200) * 3 - 1);
+          if (Math.hypot(x - 48, z - 44) < 22) h = plazaY;
+        }
+
+        for (let y = 0; y <= h; y++) {
+          if (y === 0) this.setBlockRaw(x, y, z, BLOCK_IDS.STONE);
+          else if (y === h) {
+            if (isRiver) this.setBlockRaw(x, y, z, BLOCK_IDS.SAND);
+            else if (distNamsan < 15 || z > 72) this.setBlockRaw(x, y, z, BLOCK_IDS.GRASS);
+            else this.setBlockRaw(x, y, z, BLOCK_IDS.BRICK);
+          } else {
+            const r = hash2D(x * 5 + y * 9, z * 13 + y * 3, 777);
+            this.setBlockRaw(
+              x,
+              y,
+              z,
+              y <= 10 && r > 0.968
+                ? BLOCK_IDS.DIAMOND_ORE
+                : y <= 14 && r > 0.94
+                ? BLOCK_IDS.GOLD_ORE
+                : BLOCK_IDS.STONE
+            );
+          }
+        }
+        if (h < WATER_LEVEL) {
+          for (let y = h + 1; y <= WATER_LEVEL; y++) {
+            this.setBlockRaw(x, y, z, BLOCK_IDS.WATER);
+          }
+        }
+      }
+    }
+
+    // Namsan Seoul Tower on the northern hill (48, z=14)
+    const nBase = this.getSurfaceY(48, 14);
+    for (let y = 0; y < 18; y++) {
+      const block =
+        y === 12 || y === 13
+          ? BLOCK_IDS.NEON_CYAN
+          : y === 14
+          ? BLOCK_IDS.NEON_MAGENTA
+          : y > 14
+          ? BLOCK_IDS.GOLD_BLOCK
+          : BLOCK_IDS.COBBLESTONE;
+      for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (y > 14 && (dx !== 0 || dz !== 0)) continue;
+          if (y < 12 && Math.abs(dx) + Math.abs(dz) > 1) continue;
+          this.setBlockRaw(48 + dx, nBase + y, 14 + dz, block);
+        }
+      }
+    }
+
+    // K-Pop Open-Air Stage at Center-North Plaza (x: 42..54, z: 31..38)
+    for (let z = 31; z <= 38; z++) {
+      for (let x = 42; x <= 54; x++) {
+        this.setBlockRaw(x, plazaY + 1, z, BLOCK_IDS.BASALT);
+        if (x === 42 || x === 54 || z === 31) {
+          this.setBlockRaw(x, plazaY + 2, z, (x + z) % 2 === 0 ? BLOCK_IDS.NEON_CYAN : BLOCK_IDS.NEON_MAGENTA);
+        }
+      }
+    }
+    // Neon Stage Backdrop Screen
+    for (let y = plazaY + 2; y <= plazaY + 7; y++) {
+      for (let x = 44; x <= 52; x++) {
+        const b =
+          x === 44 || x === 52 || y === plazaY + 7
+            ? BLOCK_IDS.NEON_MAGENTA
+            : (x + y) % 3 === 0
+            ? BLOCK_IDS.NEON_CYAN
+            : BLOCK_IDS.GLASS;
+        this.setBlockRaw(x, y, 31, b);
+      }
+    }
+    this.setBlockRaw(48, plazaY + 2, 34, BLOCK_IDS.CRAFTING_TABLE);
+
+    // 4 Colorful Modern Seoul Neon Buildings flanking the Boulevard
+    const towers = [
+      { x: 28, z: 34, w: 8, d: 8, h: 14, neon: BLOCK_IDS.NEON_CYAN },
+      { x: 61, z: 34, w: 8, d: 8, h: 16, neon: BLOCK_IDS.NEON_MAGENTA },
+      { x: 28, z: 46, w: 7, d: 8, h: 11, neon: BLOCK_IDS.NEON_MAGENTA },
+      { x: 62, z: 46, w: 7, d: 8, h: 12, neon: BLOCK_IDS.NEON_CYAN },
+    ];
+    for (const t of towers) {
+      for (let y = plazaY + 1; y <= plazaY + t.h; y++) {
+        for (let z = t.z; z < t.z + t.d; z++) {
+          for (let x = t.x; x < t.x + t.w; x++) {
+            const edge = x === t.x || x === t.x + t.w - 1 || z === t.z || z === t.z + t.d - 1;
+            if (!edge && y < plazaY + t.h) continue;
+            const corner = (x === t.x || x === t.x + t.w - 1) && (z === t.z || z === t.z + t.d - 1);
+            if (y === plazaY + t.h) this.setBlockRaw(x, y, z, t.neon);
+            else if (corner) this.setBlockRaw(x, y, z, BLOCK_IDS.BASALT);
+            else if (y % 3 === 0) this.setBlockRaw(x, y, z, t.neon);
+            else this.setBlockRaw(x, y, z, BLOCK_IDS.GLASS);
+          }
+        }
+      }
+    }
+
+    // Han River Rainbow Neon Bridge (x: 45..51, z: 57..70)
+    for (let z = 57; z <= 70; z++) {
+      const by = plazaY;
+      const archH = Math.round(Math.sin(((z - 57) / 13) * Math.PI) * 4);
+      for (let x = 45; x <= 51; x++) {
+        this.setBlockRaw(x, by, z, BLOCK_IDS.BASALT);
+        if (x === 45 || x === 51) {
+          this.setBlockRaw(x, by + 1, z, z % 2 === 0 ? BLOCK_IDS.NEON_CYAN : BLOCK_IDS.NEON_MAGENTA);
+          if (archH > 0) {
+            this.setBlockRaw(x, by + 1 + archH, z, z % 2 === 0 ? BLOCK_IDS.NEON_MAGENTA : BLOCK_IDS.NEON_CYAN);
+          }
+        }
+      }
+    }
+
+    // Cherry Blossom Boulevard Trees along Han River Promenade
+    for (const tx of [34, 40, 56, 62, 70]) {
+      const sy = this.getSurfaceY(tx, 54);
+      this.plantTree(tx, sy, 54, true);
+    }
+  }
+
+  private generateJejuVolcanicWorld(): void {
+    const villageY = 16;
+    for (let z = 0; z < WORLD_DEPTH; z++) {
+      for (let x = 0; x < WORLD_WIDTH; x++) {
+        const distEdge = Math.min(x, z, WORLD_WIDTH - 1 - x, WORLD_DEPTH - 1 - z);
+        const distCrater = Math.hypot(x - 48, z - 20);
+        const distVillage = Math.hypot(x - 48, z - 50);
+
+        let h = Math.floor(14 + fbm2D(x + 500, z + 500) * 8);
+        if (distEdge < 10) {
+          // Turquoise Ocean Coastline around Jeju Island!
+          h = Math.floor(10 + (distEdge / 10) * 5);
+        } else if (distCrater < 17) {
+          // Hallasan Volcano Cone with Emerald Summit Lake!
+          if (distCrater < 5.5) {
+            h = 26;
+          } else {
+            h = Math.floor(17 + (1 - Math.abs(distCrater - 7.5) / 10) * 14);
+          }
+        } else if (distVillage < 18) {
+          h = villageY;
+        }
+
+        h = Math.max(5, Math.min(WORLD_HEIGHT - 8, h));
+
+        for (let y = 0; y <= h; y++) {
+          if (y === 0) this.setBlockRaw(x, y, z, BLOCK_IDS.BASALT);
+          else if (y === h) {
+            if (h <= WATER_LEVEL + 1 && distEdge < 12) this.setBlockRaw(x, y, z, BLOCK_IDS.SAND);
+            else if (distCrater < 14 && h > 23) this.setBlockRaw(x, y, z, BLOCK_IDS.BASALT);
+            else this.setBlockRaw(x, y, z, BLOCK_IDS.GRASS);
+          } else if (y >= h - 2) {
+            this.setBlockRaw(x, y, z, distCrater < 15 ? BLOCK_IDS.BASALT : BLOCK_IDS.DIRT);
+          } else {
+            const r = hash2D(x * 11 + y * 7, z * 5 + y * 13, 555);
+            this.setBlockRaw(
+              x,
+              y,
+              z,
+              y <= 12 && r > 0.962
+                ? BLOCK_IDS.DIAMOND_ORE
+                : y <= 17 && r > 0.935
+                ? BLOCK_IDS.GOLD_ORE
+                : BLOCK_IDS.BASALT
+            );
+          }
+        }
+
+        if (h < WATER_LEVEL) {
+          for (let y = h + 1; y <= WATER_LEVEL; y++) {
+            this.setBlockRaw(x, y, z, BLOCK_IDS.WATER);
+          }
+        }
+        // Fill Hallasan Summit Crater Lake (Baengnokdam 백록담)!
+        if (distCrater < 5.2 && h <= 27) {
+          this.setBlockRaw(x, 27, z, BLOCK_IDS.WATER);
+          this.setBlockRaw(x, 28, z, BLOCK_IDS.WATER);
+        }
+      }
+    }
+
+    // Jeju Stone Cottages & Grand Pavilion
+    this.buildGrandHanok(42, villageY + 1, 35, 13, 8);
+    this.buildKoreanMarketStall(33, villageY + 1, 47, true);
+    this.buildKoreanMarketStall(59, villageY + 1, 47, false);
+
+    // Iconic Jeju Dol Hareubang (돌하르방 — Stone Grandfather Statues!)
+    for (const [sx, sz] of [
+      [44, 45],
+      [52, 45],
+      [44, 56],
+      [52, 56],
+    ]) {
+      this.setBlockRaw(sx, villageY + 1, sz, BLOCK_IDS.BASALT);
+      this.setBlockRaw(sx, villageY + 2, sz, BLOCK_IDS.BASALT);
+      this.setBlockRaw(sx, villageY + 3, sz, BLOCK_IDS.COBBLESTONE);
+      this.setBlockRaw(sx, villageY + 4, sz, BLOCK_IDS.BASALT);
+    }
+
+    // Lush Tangerine & Cherry Trees across Jeju Meadows
+    for (const [tx, tz, cherry] of [
+      [36, 40, false],
+      [60, 40, true],
+      [35, 58, true],
+      [61, 58, false],
+      [26, 48, false],
+      [70, 48, true],
+    ] as Array<[number, number, boolean]>) {
+      const sy = this.getSurfaceY(tx, tz);
+      this.plantTree(tx, sy, tz, cherry);
+    }
   }
 
   private generateTerrainAndKoreanVillage(): void {

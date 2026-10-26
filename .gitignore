@@ -4,3 +4,8 @@ dist/
 .cache/
 *.log
 preview-debug-*.png
+
+# Local Android signing/build intermediates
+kcraft-release.jks
+K-Craft-Korea-unsigned.apk
+K-Craft-Korea.apk.idsig
