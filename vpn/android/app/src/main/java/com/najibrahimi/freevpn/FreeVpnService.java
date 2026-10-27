@@ -57,9 +57,14 @@ public class FreeVpnService extends VpnService implements Runnable {
             b.addAddress("10.0.0.2", 32);
             b.addRoute("0.0.0.0", 0);
             b.addDnsServer("1.1.1.1");
+            b.addDnsServer("8.8.8.8");
             b.setMtu(1500);
             // اپ خودمان نباید وارد تونل شود، وگرنه حلقه بیپایان میسازد
-            b.addDisallowedApplication(getPackageName());
+            try {
+                b.addDisallowedApplication(getPackageName());
+            } catch (Exception ignored) {
+                Log.w(TAG, "could not exclude own package from VPN");
+            }
             tun = b.establish();
             if (tun == null) {
                 throw new IllegalStateException("VPN permission was not granted");

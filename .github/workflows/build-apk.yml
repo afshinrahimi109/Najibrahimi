@@ -2,11 +2,15 @@ name: Build FreeVPN Android APK
 
 on:
   push:
-    branches: [ arena/f21d825b-najibrahimi ]
+    branches: [ main, 'arena/**' ]
     paths:
       - 'vpn/android/**'
       - '.github/workflows/build-apk.yml'
   workflow_dispatch:
+
+# لازم است تا workflow بتواند Release بسازد و APK را داخل خود گیتھاب بگذارد
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -49,10 +53,35 @@ jobs:
           sha256sum "$APK"
           cp "$APK" vpn/android/app/build/outputs/apk/debug/FreeVPN.apk
 
-      - name: Upload APK
+      - name: Upload APK (Actions artifact)
         uses: actions/upload-artifact@v4
         with:
           name: freevpn-debug-apk
           path: vpn/android/app/build/outputs/apk/debug/FreeVPN.apk
           if-no-files-found: error
           retention-days: 90
+
+      # این مرحله APK را بهصورت فایل قابلدانلود مستقیم داخل صفحه Releases گیتھاب میگذارد
+      - name: Publish APK to GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APK: vpn/android/app/build/outputs/apk/debug/FreeVPN.apk
+          TAG: v1.0.0
+        run: |
+          set -e
+          NOTES="FreeVPN — اپ VPN اندرویدی ساختهشده از صفر (VpnService + WebSocket/VLESS).
+          ساختهشده از ${GITHUB_SHA::7} روی ${GITHUB_REF_NAME}.
+          راهنما: vpn/android/README.md"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$TAG" "$APK#FreeVPN.apk" --clobber --repo "$GITHUB_REPOSITORY"
+            echo "APK به Release موجود اضافه/جایگزین شد"
+          else
+            gh release create "$TAG" "$APK#FreeVPN.apk" \
+              --target "$GITHUB_REF_NAME" \
+              --title "FreeVPN v1.0.0" \
+              --notes "$NOTES" \
+              --repo "$GITHUB_REPOSITORY"
+            echo "Release جدید ساخته شد"
+          fi
+          echo "DOWNLOAD_URL=https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/FreeVPN.apk"
+          echo "همین لینک را در مرورگر گوشی باز کن تا APK مستقیم دانلود شود."
