@@ -37,3 +37,19 @@
 npm install
 npm run dev
 ```
+
+---
+
+## 🔐 VPN رایگان با آدرس ثابت (ساختهشده از صفر)
+
+اگه دنبال یه VPN رایگان و بدون کارت بانکی هستی که همیشه بهش وصل شی،
+پوشهٔ [`vpn/`](vpn/README.md) رو ببین: یه رله VLESS/WebSocket کاملاً نوشتهشده با
+کتابخانه استاندارد پایتون، همراه کلاینت SOCKS5 مخصوص ترموکس، دیپلوی یککلیک روی
+پلن رایگان Render (آدرس ثابت `*.onrender.com`)، و تستهای انتها به انتها.
+
+```bash
+cd vpn && python3 tests/test_relay.py
+```
+
+همچنین یه اپ اندرویدی VPN اختصاصی (`VpnService` + تونل VLESS، بدون کتابخانه خارجی)
+تو [`vpn/android/`](vpn/android/README.md) هست که GitHub Actions برات APK میسازد.

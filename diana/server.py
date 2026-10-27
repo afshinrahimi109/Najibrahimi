@@ -4,10 +4,13 @@
 فقط کتابخانه استاندارد پایتون: بدون pip install، روی هر هاست رایگان، کامپیوتر و ترموکس اجرا می‌شه.
 اجرا:  python3 server.py   →   http://localhost:8000
 """
+import base64
+import hmac
 import json
 import mimetypes
 import os
 import queue
+import secrets
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,6 +26,18 @@ from memory import Memory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 PORT = int(os.environ.get("PORT", "8000"))
+
+# 🔒 وقتی DIANA_TOKEN تنظیم شود (حالت آنلاین/تونل)، تمام درخواست‌ها نیاز به
+# HTTP Basic Auth دارند. بدون آن سرور مثل قبل فقط محلی و بدون رمز است.
+AUTH_USER = os.environ.get("DIANA_USER", "diana")
+AUTH_TOKEN = os.environ.get("DIANA_TOKEN", "").strip()
+# اگر روی هاست عمومی (Render/Railway/Fly/Heroku) بدون رمز اجرا شد،
+# خودمان یک رمز تصادفی بسازیم تا دیانا بیحفاظ توی اینترنت باز نماند.
+PUBLIC_HOST = any(os.environ.get(k) for k in ("RENDER", "RAILWAY_ENVIRONMENT", "FLY_APP_NAME", "DYNO"))
+AUTO_TOKEN = False
+if not AUTH_TOKEN and PUBLIC_HOST:
+    AUTH_TOKEN = secrets.token_urlsafe(18)
+    AUTO_TOKEN = True
 
 memory = Memory()
 
@@ -50,6 +65,32 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         sys.stderr.write(f"🐠 {self.address_string()} {fmt % args}\n")
+
+    # ---------- 🔒 محافظت در حالت آنلاین ----------
+    def _authorized(self):
+        if not AUTH_TOKEN:
+            return True  # اجرای محلی بدون رمز (رفتار قبلی)
+        header = self.headers.get("Authorization", "")
+        if not header.startswith("Basic "):
+            return False
+        try:
+            raw = base64.b64decode(header[6:].strip(), validate=True)
+        except Exception:
+            return False
+        expected = f"{AUTH_USER}:{AUTH_TOKEN}".encode("utf-8")
+        return hmac.compare_digest(raw, expected)
+
+    def _require_auth(self):
+        if self._authorized():
+            return True
+        body = b'{"error": "unauthorized"}'
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="Diana", charset="UTF-8"')
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return False
 
     # ---------- ابزارها ----------
     def _json(self, obj, status=200):
@@ -88,6 +129,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- GET ----------
     def do_GET(self):
+        if not self._require_auth():
+            return
         path = unquote(urlparse(self.path).path)
         try:
             if path == "/api/events":
@@ -165,6 +208,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- POST / DELETE ----------
     def do_POST(self):
+        if not self._require_auth():
+            return
         path = unquote(urlparse(self.path).path)
         body = self._body_json()
         try:
@@ -209,6 +254,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": str(e)}, 500)
 
     def do_DELETE(self):
+        if not self._require_auth():
+            return
         path = unquote(urlparse(self.path).path)
         try:
             if path.startswith("/api/files/"):
@@ -236,6 +283,9 @@ def main():
     print("🐠 دیانا بیدار شد! سیستم چندعامله با ۱۲۰ ایجنت متخصص آماده‌ست")
     print(f"🌐 آکواریوم دیانا: http://localhost:{PORT}")
     print(f"🧠 مغز ابری: {brain.llm.mode()} | اینترنت سرور: {'✅ وصل' if tools.internet_available() else '📴 قطع — حالت آفلاین فعاله'}")
+    print(f"🔒 دسترسی: {'رمزدار (Basic Auth) — کاربر: ' + AUTH_USER if AUTH_TOKEN else 'بدون رمز (فقط محلی)'}")
+    if AUTO_TOKEN:
+        print(f"⚠️ رمز خودکار ساخته شد — همین حالا از لاگ کپی کن: {AUTH_TOKEN}")
     print("=" * 58)
     try:
         server.serve_forever()

@@ -1,3 +1,11 @@
+# 🔑 رمزها و توکن‌ها — هرگز کامیت نشوند
+.env
+
+# فایلهای خروجی online.py (آدرس عمومی و لاگ تونل)
+data/public-url.txt
+data/tunnel.log
+data/online.log
+
 # داده‌های زمان اجرا (حافظه، تنظیمات و فایل‌های ساخته‌شده) — خصوصی و محلی می‌مانند
 data/memory.json
 data/settings.json
