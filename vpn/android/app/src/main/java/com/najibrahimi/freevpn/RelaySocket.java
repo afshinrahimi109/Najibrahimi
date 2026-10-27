@@ -48,8 +48,9 @@ public class RelaySocket {
         raw.setSoTimeout(120000);
         raw.setTcpNoDelay(true);
         if (tls) {
-            SSLSocket ssl = (SSLSocket) SSLSocketFactory.getDefault()
-                    .createSocket(raw, host, port, true);
+            // getDefault() برمیگرداند SocketFactory؛ برای overload چهارتایی باید cast شود
+            SSLSocketFactory factory = (SSLSocketFactory) SSLSocketFactory.getDefault();
+            SSLSocket ssl = (SSLSocket) factory.createSocket(raw, host, port, true);
             ssl.startHandshake();
             socket = ssl;
         } else {
