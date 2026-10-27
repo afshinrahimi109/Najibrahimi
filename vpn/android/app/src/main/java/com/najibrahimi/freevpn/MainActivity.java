@@ -15,6 +15,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.net.InetAddress;
 import java.net.URLDecoder;
 
 /** رابط کاربری ساده: لینک vless:// را بچسبان، وصل شو. */
@@ -70,6 +71,13 @@ public class MainActivity extends Activity {
             @Override public void onClick(View v) { disconnect(); }
         });
         root.addView(disconnect);
+
+        Button diagnose = new Button(this);
+        diagnose.setText("🔍 تست اتصال (بفهم کجا گیر کرده)");
+        diagnose.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { diagnose(); }
+        });
+        root.addView(diagnose);
 
         status = new TextView(this);
         status.setText("آماده");
@@ -178,6 +186,58 @@ public class MainActivity extends Activity {
         i.setAction(FreeVpnService.ACTION_DISCONNECT);
         startService(i);
         status.setText("⏹ قطع شد");
+    }
+
+    /** تست مرحلهای: DNS هاست → TCP/TLS → WebSocket/VLESS → ترافیک واقعی HTTP. */
+    private void diagnose() {
+        save();
+        final String host = prefs.getString("host", "");
+        final String token = prefs.getString("token", "");
+        final String uuid = prefs.getString("uuid", "");
+        final int port = prefs.getInt("port", 443);
+        final boolean tls = prefs.getBoolean("tls", true);
+        status.setText("🔍 در حال تست… (تا ۳۰ ثانیه)");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final StringBuilder sb = new StringBuilder();
+                RelaySocket r = null;
+                try {
+                    if (host.isEmpty() || token.isEmpty() || uuid.isEmpty()) {
+                        throw new IllegalArgumentException("اول لینک کانفیگ را وارد کن");
+                    }
+                    InetAddress addr = InetAddress.getByName(host);
+                    sb.append("1) DNS هاست سرور OK → ").append(addr.getHostAddress()).append('\n');
+                    r = new RelaySocket(host, port, token, uuid, tls);
+                    r.connect(new byte[] { 1, 1, 1, 1 }, 80, null);
+                    sb.append("2) TCP + TLS + WebSocket + VLESS OK ✅\n");
+                    byte[] req = ("GET / HTTP/1.1\r\nHost: 1.1.1.1\r\n"
+                            + "User-Agent: FreeVPN-Diag\r\nConnection: close\r\n\r\n")
+                            .getBytes("US-ASCII");
+                    r.send(req, req.length);
+                    byte[] buf = new byte[4096];
+                    int n = r.recv(buf);
+                    if (n > 0 && new String(buf, 0, n, "US-ASCII").contains("HTTP/")) {
+                        sb.append("3) ترافیک واقعی از تونل رد شد ✅ (جواب HTTP آمد)\n\n");
+                        sb.append("نتیجه: سرور و تونل سالمند. اگر گیتھاب باز نمیشود، مشکل DNS است:\n");
+                        sb.append("تنظیمات اندروید → Connections → Private DNS → بگذار dns.google");
+                    } else {
+                        sb.append("3) تونل وصل شد ولی جوابی از مقصد نیامد ❌\n");
+                        sb.append("لاگ Render را چک کن (connect failed / reject).");
+                    }
+                } catch (Exception e) {
+                    sb.append("❌ خطا: ").append(e.toString()).append('\n');
+                    sb.append("هر شمارهای که چاپ نشد یعنی همانجا گیر کرده.\n");
+                    sb.append("رایج: TOKEN/UUID اشتباه، سرور خوابیده (۶۰ ثانیه صبر کن)،\n");
+                    sb.append("یا ISP آدرس *.onrender.com را مسدود کرده است.");
+                } finally {
+                    if (r != null) r.close();
+                }
+                final String result = sb.toString();
+                runOnUiThread(new Runnable() {
+                    @Override public void run() { status.setText(result); }
+                });
+            }
+        }, "freevpn-diag").start();
     }
 
     @Override

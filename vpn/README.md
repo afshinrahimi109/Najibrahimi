@@ -117,8 +117,10 @@ https://free-vpn-relay.onrender.com/<TOKEN>/
 اگه نمیخوای Hiddify/v2rayNG نصب کنی، یه **اپ VPN واقعی اندروید** هم از صفر
 تو [`vpn/android/`](android/README.md) نوشتم: `VpnService` + tun2socks مینیمال +
 کلاینت WebSocket/VLESS — بدون هیچ کتابخانهای. workflow گیتھاب Actions اون رو
-کامپایل میکند و APKاش (`FreeVPN.apk`) تو تب **Artifacts** قابل دانلوده.
+کامپایل میکند و APKاش رو مستقیم تو صفحهٔ **Releases** میگذارد:
+🔽 <https://github.com/afshinrahimi109/Najibrahimi/releases/download/v1.0.0/FreeVPN.apk>
 بیلد CI تست شده و پاس است ✅. فقط لینک `vless://` رو توش پیست کن و وصل شو.
+اگه سایتی باز نشد، دکمهٔ **🔍 تست اتصال** داخل اپ دقیقاً میگوید کجا گیر کرده است.
 
 > محدودیت: فقط IPv4/TCP (بدون QUIC/UDP عمومی) — برای پایداری بهتر همچنان
 > Hiddify توصیه میشود.

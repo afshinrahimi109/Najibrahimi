@@ -150,22 +150,32 @@ public class Tun2Socks {
         final int localPort = srcPort;
         pool.execute(new Runnable() {
             @Override public void run() {
-                DatagramSocket ds = null;
-                try {
-                    ds = new DatagramSocket();
-                    service.protect(ds);
-                    ds.setSoTimeout(5000);
-                    ds.send(new DatagramPacket(query, query.length,
-                            InetAddress.getByName("1.1.1.1"), 53));
-                    byte[] buf = new byte[4096];
-                    DatagramPacket resp = new DatagramPacket(buf, buf.length);
-                    ds.receive(resp);
-                    byte[] answer = Arrays.copyOf(resp.getData(), resp.getLength());
-                    writeTun(IpUtils.buildUdp(remoteIp, localIp, 53, localPort, answer));
-                } catch (Exception ignored) {
-                } finally {
-                    if (ds != null) ds.close();
+                // در بعضی شبکهها (مثل ایران) UDP/53 به 1.1.1.1 فیلتر یا مسموم میشود.
+                // چند resolver را پشت سر هم امتحان میکنیم تا DNS گوشی از کار نیفتد.
+                String[] resolvers = { "1.1.1.1", "8.8.8.8", "9.9.9.9", "1.0.0.1" };
+                for (String resolver : resolvers) {
+                    DatagramSocket ds = null;
+                    try {
+                        ds = new DatagramSocket();
+                        service.protect(ds);
+                        ds.setSoTimeout(4000);
+                        ds.send(new DatagramPacket(query, query.length,
+                                InetAddress.getByName(resolver), 53));
+                        byte[] buf = new byte[4096];
+                        DatagramPacket resp = new DatagramPacket(buf, buf.length);
+                        ds.receive(resp);
+                        byte[] answer = Arrays.copyOf(resp.getData(), resp.getLength());
+                        // منبع پاسخ حتماً همان IPای باشد که اپ به آن پرسیده،
+                        // وگرنه اندروید پاسخ DNS را دور میاندازد
+                        writeTun(IpUtils.buildUdp(remoteIp, localIp, 53, localPort, answer));
+                        return;
+                    } catch (Exception ignored) {
+                        // resolver بعدی
+                    } finally {
+                        if (ds != null) ds.close();
+                    }
                 }
+                Log.w(TAG, "all DNS resolvers failed for port " + localPort);
             }
         });
     }

@@ -18,20 +18,47 @@
 
 ---
 
-## ۱. گرفتن APK (رایگان، بدون کامپیوتر)
+## ۱. گرفتن APK — مستقیم از داخل خود گیتھاب (رایگان، بدون کامپیوتر)
 
-وقتی این پوشه پوش بشه، workflow [`build-apk.yml`](../../../.github/workflows/build-apk.yml)
-روی GitHub Actions اجرا میشه و یه APK میسازد. **بیلدش تست شده و سبز است ✅**
-(کامپایل با JDK 17 + Android SDK 34 + Gradle 8.2، آپلود آرتیفکت موفق):
+**سادهترین راه 👈 لینک مستقیم دانلود:**
 
-1. برو تو مخزن گیتھابت ← تب **Actions**.
-2. روی آخرین اجرای **Build FreeVPN Android APK** کلیک کن.
-3. پایین صفحه، تو بخش **Artifacts**، روی `freevpn-debug-apk` کلیک کن → یه فایل ZIP میگیری.
-4. ZIP را تو گوشی باز کن → `FreeVPN.apk` را نصب کن
-   (لازمه گزینه «نصب از منابع ناشناخته / Install unknown apps» را برای مرورگرت روشن کنی).
+🔽 **https://github.com/afshinrahimi109/Najibrahimi/releases/download/v1.0.0/FreeVPN.apk**
 
-اگه خواستی دستی اجرا کنی: Actions ← همون workflow ← **Run workflow**.
-لینک مستقیم صفحهٔ Actions: <https://github.com/afshinrahimi109/Najibrahimi/actions/workflows/build-apk.yml>
+یا برو تو مخزن ← سمت راست صفحه **Releases** ← نسخه `v1.0.0` ← فایل `FreeVPN.apk`.
+دیگه لازم نیست دنبال Artifact بگردی؛ workflow هربار که کد تغییر کنه خودش APK رو
+میسازه و تو همون صفحهٔ Releases آپدیت میکنه.
+
+> چرا قبلاً تو گیتھاب نبود؟ چون workflow فقط روی برنچ قدیمی
+> `arena/f21d825b-najibrahimi` اجرا میشد و بعد از مرج شدن PR دیگه تریگر نمیشد.
+> الان `main` و همهٔ برنچهای `arena/**` هم بیلد میشوند و نتیجه داخل **Releases** میرود.
+
+راه جایگزین (آرتیفکت): تب **Actions** ← آخرین اجرای
+[Build FreeVPN Android APK](https://github.com/afshinrahimi109/Najibrahimi/actions/workflows/build-apk.yml)
+← بخش **Artifacts** ← `freevpn-debug-apk` (ZIP) ← `FreeVPN.apk`.
+
+بعد از دانلود: فایل APK را باز کن و نصب کن
+(لازمه گزینه «نصب از منابع ناشناخته / Install unknown apps» را برای مرورگرت روشن کنی).
+
+## ۱٫۵ ❗ اگه نوشت «بارگیری به تعلیق افتاد / Download paused»
+
+CDN فایلهای Release گیتھاب (`release-assets.githubusercontent.com`) تو بعضی شبکهها
+(از جمله ایران) مسدود یا کند است. صفحهٔ
+[`docs/apk.html`](../../docs/apk.html) چند لینک جایگزین دارد؛ به ترتیب امتحان کن:
+
+1. <https://github.com/afshinrahimi109/Najibrahimi/raw/refs/heads/arena/621700c4-najibrahimi/docs/FreeVPN.apk>
+2. <https://afshinrahimi109.github.io/Najibrahimi/FreeVPN.apk> (GitHub Pages — اول باید تو Settings → Pages فعال شود)
+3. <https://raw.githubusercontent.com/afshinrahimi109/Najibrahimi/arena/621700c4-najibrahimi/docs/FreeVPN.apk>
+4. پروکسی: `https://gh-proxy.com/` را قبل از لینک Release بگذار.
+
+**راه تضمینی (فقط یه فایل متنی، بدون دانلود باینری) — تو Termux:**
+```bash
+curl -fsSL -o i.sh https://raw.githubusercontent.com/afshinrahimi109/Najibrahimi/arena/621700c4-najibrahimi/docs/install-apk.sh && bash i.sh
+```
+این اسکریپت همهٔ لینکها را امتحان میکند، اگر هیچکدام نشد APK را از روی
+نسخهٔ base64 متنی میسازد، sha256 را چک میکند و فایل را برای نصب باز میکند.
+
+> بعد از دانلود حتماً چک کن: `sha256sum FreeVPN.apk` با
+> [`FreeVPN.apk.sha256`](../../docs/FreeVPN.apk.sha256) یکی باشد.
 
 ## ۲. استفاده
 
@@ -58,8 +85,11 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | علامت | راهحل |
 |---|---|
-| APK توی Artifacts نیست | تب Actions را باز کن؛ اگه قرمز شد، لاگش را بفرست تا درستش کنیم. |
+| **سایتها (مثلاً گیتھاب) باز نمیشوند** | دکمهٔ **🔍 تست اتصال** را بزن. شماره ۱ = DNS هاست، ۲ = TCP/TLS/WebSocket/VLESS، ۳ = ترافیک واقعی. هرجا ایستاد، مشکل همانجاست. اگه هر ۳ تا ✅ شد ولی سایت باز نشد → **تنظیمات اندروید → Private DNS → `dns.google`** بگذار (DNS گوشی فیلتر/مسموم شده). |
+| APK توی Releases نیست | لینک بالا را مستقیم باز کن؛ اگه 404 داد، تب Actions را ببین که بیلد قرمز نشده باشه. |
 | «اجازه VPN داده نشد» | دوباره «وصل شو» را بزن و تو پنجره اندروید تأیید کن. |
+| شماره ۱ تست قرمز شد (UnknownHost) | هاست اشتباه است یا DNS گوشی نمیتواند `*.onrender.com` را حل کند. Private DNS را روی `dns.google` بگذار. |
+| شماره ۲ تست قرمز شد | TOKEN/UUID اشتباه، سرور خوابیده (۶۰ث صبر کن)، پورت/اشتباهی TLS، یا ISP آدرس Render را بسته. لاگ Render را چک کن. |
 | وصل میشود ولی سایتها باز نمیشوند | سرور خوابیده (صبر کن)، یا TOKEN/UUID اشتباه است، یا فیلترینگ ISP جلوی `*.onrender.com` را گرفته. |
 | بعضی اپها کار نمیکنند | آن اپ از UDP/QUIC استفاده میکند؛ این اپ فقط TCP را پشتیبانی میکند. از Hiddify استفاده کن. |
 | باتری زود تمام میشود | طبیعی است؛ TUN + TLS مداوم مصرف دارد. |
