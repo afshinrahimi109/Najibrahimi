@@ -1,5 +1,5 @@
-FreeVPN.apk — built from ff64cd9f68aefe5b70673b0e1fb2a96fc8b7a3d8
-branch: arena/621700c4-najibrahimi
-size: 26389 bytes
-sha256: c77e45210f8932848e919dc78dccab4c9473dffd283f250bf8a00c8e29f982fe
+FreeVPN.apk — built from 7932f868826b8014210a274367e1cf698dbd2aac
+branch: main
+size: 26392 bytes
+sha256: 0cadfc146f37402e0dd143b84a66c6ba1d568d0d72f2b9d4e75e770d4a1a453d
 download help: docs/apk.html
