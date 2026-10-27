@@ -1,0 +1,13 @@
+services:
+  telegram-bot:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /app/data/drafts.sqlite3
+    volumes:
+      - drafts:/app/data
+    restart: unless-stopped
+
+volumes:
+  drafts:

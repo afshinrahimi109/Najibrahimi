@@ -54,3 +54,9 @@ cd vpn && python3 tests/test_relay.py
 همچنین یه اپ اندرویدی VPN اختصاصی (`VpnService` + تونل VLESS، بدون کتابخانه خارجی)
 تو [`vpn/android/`](vpn/android/README.md) هست که GitHub Actions برات APK میسازد و
 مستقیم تو [Releases](https://github.com/afshinrahimi109/Najibrahimi/releases/tag/v1.0.0) میگذارد: [دانلود FreeVPN.apk](https://github.com/afshinrahimi109/Najibrahimi/releases/download/v1.0.0/FreeVPN.apk).
+
+---
+
+## 🤖 بات تلگرام ساخت پیش‌نویس ریل
+
+نسخهٔ اولیهٔ بات خصوصی تلگرام برای ساخت و ذخیرهٔ سناریوهای ریل فارسی در پوشهٔ [`telegram-bot/`](telegram-bot/README.md) آماده است. کد Docker/Railway، SQLite، فرمان‌های `/reel` و `/status` و راهنمای امن‌کردن کلیدها داخل آن قرار دارد.
