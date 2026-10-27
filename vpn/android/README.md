@@ -21,15 +21,17 @@
 ## ۱. گرفتن APK (رایگان، بدون کامپیوتر)
 
 وقتی این پوشه پوش بشه، workflow [`build-apk.yml`](../../../.github/workflows/build-apk.yml)
-روی GitHub Actions اجرا میشه و یه APK میسازد:
+روی GitHub Actions اجرا میشه و یه APK میسازد. **بیلدش تست شده و سبز است ✅**
+(کامپایل با JDK 17 + Android SDK 34 + Gradle 8.2، آپلود آرتیفکت موفق):
 
 1. برو تو مخزن گیتھابت ← تب **Actions**.
 2. روی آخرین اجرای **Build FreeVPN Android APK** کلیک کن.
 3. پایین صفحه، تو بخش **Artifacts**، روی `freevpn-debug-apk` کلیک کن → یه فایل ZIP میگیری.
-4. ZIP را تو گوشی باز کن → `app-debug.apk` را نصب کن
+4. ZIP را تو گوشی باز کن → `FreeVPN.apk` را نصب کن
    (لازمه گزینه «نصب از منابع ناشناخته / Install unknown apps» را برای مرورگرت روشن کنی).
 
 اگه خواستی دستی اجرا کنی: Actions ← همون workflow ← **Run workflow**.
+لینک مستقیم صفحهٔ Actions: <https://github.com/afshinrahimi109/Najibrahimi/actions/workflows/build-apk.yml>
 
 ## ۲. استفاده
 

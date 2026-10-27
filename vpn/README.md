@@ -112,6 +112,17 @@ https://free-vpn-relay.onrender.com/<TOKEN>/
 5. توی تنظیمات اپ، DNS را روی **DoH** بگذار (مثلاً `https://1.1.1.1/dns-query`) چون
    سرور ما فعلاً فقط TCP را پشتیبانی می‌کند، نه UDP/DNS روی پورت ۵۳.
 
+### قدم ۴٫۵ (اختیاری) — اپ اندرویدی اختصاصی (APK)
+
+اگه نمیخوای Hiddify/v2rayNG نصب کنی، یه **اپ VPN واقعی اندروید** هم از صفر
+تو [`vpn/android/`](android/README.md) نوشتم: `VpnService` + tun2socks مینیمال +
+کلاینت WebSocket/VLESS — بدون هیچ کتابخانهای. workflow گیتھاب Actions اون رو
+کامپایل میکند و APKاش (`FreeVPN.apk`) تو تب **Artifacts** قابل دانلوده.
+بیلد CI تست شده و پاس است ✅. فقط لینک `vless://` رو توش پیست کن و وصل شو.
+
+> محدودیت: فقط IPv4/TCP (بدون QUIC/UDP عمومی) — برای پایداری بهتر همچنان
+> Hiddify توصیه میشود.
+
 ### قدم ۵ (اختیاری) — کلاینت «کاملاً از صفر» روی خود گوشی
 
 اگه دوست داری سمت گوشی هم کد خودمون باشه (به‌جای v2rayNG)، تو ترموکس:
@@ -206,6 +217,7 @@ vpn/
 ├── wsproto.py         # پیادهسازی مینیمال RFC 6455 WebSocket
 ├── gen_config.py      # ساخت UUID/TOKEN و لینک vless://
 ├── render.yaml        # دیپلوی یککلیک روی پلن رایگان Render
+├── android/           # اپ اندرویدی VpnService از صفر + بیلد APK تو CI
 └── tests/
     └── test_relay.py  # تست انتها به انتها (بدون وابستگی)
 ```

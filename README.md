@@ -50,3 +50,6 @@ npm run dev
 ```bash
 cd vpn && python3 tests/test_relay.py
 ```
+
+همچنین یه اپ اندرویدی VPN اختصاصی (`VpnService` + تونل VLESS، بدون کتابخانه خارجی)
+تو [`vpn/android/`](vpn/android/README.md) هست که GitHub Actions برات APK میسازد.
