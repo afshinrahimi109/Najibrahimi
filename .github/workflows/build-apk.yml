@@ -8,9 +8,10 @@ on:
       - '.github/workflows/build-apk.yml'
   workflow_dispatch:
 
-# لازم است تا workflow بتواند Release بسازد و APK را داخل خود گیتھاب بگذارد
+# لازم است تا workflow بتواند Release بسازد، Pages را فعال کند و docs/ را کامیت کند
 permissions:
   contents: write
+  pages: write
 
 jobs:
   build:
@@ -61,7 +62,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      # این مرحله APK را بهصورت فایل قابلدانلود مستقیم داخل صفحه Releases گیتھاب میگذارد
+      # APK را بهصورت فایل قابلدانلود داخل صفحه Releases گیتھاب میگذارد
       - name: Publish APK to GitHub Releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -71,7 +72,7 @@ jobs:
           set -e
           NOTES="FreeVPN — اپ VPN اندرویدی ساختهشده از صفر (VpnService + WebSocket/VLESS).
           ساختهشده از ${GITHUB_SHA::7} روی ${GITHUB_REF_NAME}.
-          راهنما: vpn/android/README.md"
+          اگر دانلود معلق شد: docs/apk.html لینکهای جایگزین دارد."
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release upload "$TAG" "$APK#FreeVPN.apk" --clobber --repo "$GITHUB_REPOSITORY"
             echo "APK به Release موجود اضافه/جایگزین شد"
@@ -83,5 +84,58 @@ jobs:
               --repo "$GITHUB_REPOSITORY"
             echo "Release جدید ساخته شد"
           fi
-          echo "DOWNLOAD_URL=https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/FreeVPN.apk"
-          echo "همین لینک را در مرورگر گوشی باز کن تا APK مستقیم دانلود شود."
+
+      # CDNـهای Release تو بعضی کشورها مسدود است؛ همان APK را داخل خود مخزن
+      # (docs/) هم میگذاریم تا از raw.githubusercontent.com و *.github.io هم بشود گرفت.
+      - name: Publish mirror files inside repo (docs/)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APK: vpn/android/app/build/outputs/apk/debug/FreeVPN.apk
+        run: |
+          set -e
+          mkdir -p docs
+          cp "$APK" docs/FreeVPN.apk
+          sha256sum docs/FreeVPN.apk | awk '{print $1}' > docs/FreeVPN.apk.sha256
+          base64 -w 76 docs/FreeVPN.apk > docs/FreeVPN.apk.base64.txt
+          {
+            echo "FreeVPN.apk — built from ${GITHUB_SHA}"
+            echo "branch: ${GITHUB_REF_NAME}"
+            echo "size: $(wc -c < docs/FreeVPN.apk) bytes"
+            echo "sha256: $(cat docs/FreeVPN.apk.sha256)"
+            echo "download help: docs/apk.html"
+          } > docs/FreeVPN.apk.info.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/FreeVPN.apk docs/FreeVPN.apk.sha256 docs/FreeVPN.apk.base64.txt docs/FreeVPN.apk.info.txt
+          if git diff --cached --quiet; then
+            echo "mirror files unchanged"
+          else
+            git commit -m "build(apk): publish APK mirrors into docs [skip ci]"
+            git push origin "HEAD:${GITHUB_REF_NAME}" || echo "::warning::could not push docs mirrors"
+          fi
+
+      # Pages روی دامنهٔ *.github.io سرو میدهد که معمولاً از CDNـهای Release در دسترستر است.
+      - name: Ensure GitHub Pages for alternative download
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh api "repos/${GITHUB_REPOSITORY}/pages" > /dev/null 2>&1; then
+            echo "Pages already configured"
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/pages" \
+              -F "source[branch]=${GITHUB_REF_NAME}" -F "source[path]=/docs" \
+              || echo "::warning::Pages could not be enabled automatically (do it in Settings → Pages)"
+          fi
+
+      - name: Build summary
+        env:
+          TAG: v1.0.0
+        run: |
+          echo "### ✅ FreeVPN APK ساخته شد" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Release: https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/FreeVPN.apk" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Pages: https://afshinrahimi109.github.io/Najibrahimi/FreeVPN.apk" >> "$GITHUB_STEP_SUMMARY"
+          echo "- raw: https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/docs/FreeVPN.apk" >> "$GITHUB_STEP_SUMMARY"
+          echo "- sha256: $(cat docs/FreeVPN.apk.sha256)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "اگر دانلود معلق شد، صفحهٔ docs/apk.html لینکهای جایگزین دارد." >> "$GITHUB_STEP_SUMMARY"

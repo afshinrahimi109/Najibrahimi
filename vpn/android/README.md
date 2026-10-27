@@ -39,6 +39,27 @@
 بعد از دانلود: فایل APK را باز کن و نصب کن
 (لازمه گزینه «نصب از منابع ناشناخته / Install unknown apps» را برای مرورگرت روشن کنی).
 
+## ۱٫۵ ❗ اگه نوشت «بارگیری به تعلیق افتاد / Download paused»
+
+CDN فایلهای Release گیتھاب (`release-assets.githubusercontent.com`) تو بعضی شبکهها
+(از جمله ایران) مسدود یا کند است. صفحهٔ
+[`docs/apk.html`](../../docs/apk.html) چند لینک جایگزین دارد؛ به ترتیب امتحان کن:
+
+1. <https://github.com/afshinrahimi109/Najibrahimi/raw/refs/heads/arena/621700c4-najibrahimi/docs/FreeVPN.apk>
+2. <https://afshinrahimi109.github.io/Najibrahimi/FreeVPN.apk> (GitHub Pages — اول باید تو Settings → Pages فعال شود)
+3. <https://raw.githubusercontent.com/afshinrahimi109/Najibrahimi/arena/621700c4-najibrahimi/docs/FreeVPN.apk>
+4. پروکسی: `https://gh-proxy.com/` را قبل از لینک Release بگذار.
+
+**راه تضمینی (فقط یه فایل متنی، بدون دانلود باینری) — تو Termux:**
+```bash
+curl -fsSL -o i.sh https://raw.githubusercontent.com/afshinrahimi109/Najibrahimi/arena/621700c4-najibrahimi/docs/install-apk.sh && bash i.sh
+```
+این اسکریپت همهٔ لینکها را امتحان میکند، اگر هیچکدام نشد APK را از روی
+نسخهٔ base64 متنی میسازد، sha256 را چک میکند و فایل را برای نصب باز میکند.
+
+> بعد از دانلود حتماً چک کن: `sha256sum FreeVPN.apk` با
+> [`FreeVPN.apk.sha256`](../../docs/FreeVPN.apk.sha256) یکی باشد.
+
 ## ۲. استفاده
 
 1. اول سرور را بالا بیار (آموزش [`vpn/README.md`](../README.md) — مسیر ب، قدم ۱ تا ۳).
