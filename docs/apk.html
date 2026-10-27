@@ -3,56 +3,78 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>دانلود FreeVPN.apk</title>
+<title>دانلود FreeVPN.apk — لینکهای جایگزین</title>
 <style>
-body{font-family:Tahoma,Arial,sans-serif;max-width:760px;margin:30px auto;padding:0 18px;line-height:1.9;background:#0d1117;color:#e6edf3}
+body{font-family:Tahoma,Arial,sans-serif;max-width:780px;margin:30px auto;padding:0 18px;line-height:1.9;background:#0d1117;color:#e6edf3}
 h1{font-size:24px} h2{margin-top:34px;font-size:19px}
 a.btn{display:block;background:#238636;color:#fff;text-decoration:none;padding:13px 16px;border-radius:10px;margin:10px 0;font-weight:bold}
-a.btn.alt{background:#1f6feb} a.btn.warn{background:#8b5a00}
+a.btn.alt{background:#1f6feb} a.btn.warn{background:#8b5a00} a.btn.violet{background:#6f42c1}
 pre{background:#161b22;padding:14px;border-radius:10px;overflow-x:auto;direction:ltr;text-align:left;color:#7ee787}
 code{background:#161b22;padding:2px 6px;border-radius:5px;direction:ltr;display:inline-block}
 .note{background:#3d2a12;padding:12px;border-radius:10px}
+.ok{background:#12351f;padding:12px;border-radius:10px}
 small{color:#9da7b3}
 </style>
 </head>
 <body>
 <h1>🔐 دانلود FreeVPN.apk</h1>
 <p>اگه لینک Release گیتھاب تو شبکهٔ تو پیغام «بارگیری به تعلیق افتاد / Download paused» میده،
-دلیلش CDN هاست: فایلهای Release از روی <code>release-assets.githubusercontent.com</code> میان
-که تو خیلی از شبکهها مسدود یا کند است. این صفحه چند مسیر جایگزین دارد — به ترتیب امتحان کن:</p>
+دلیلش CDN است: فایلهای Release از روی <code>release-assets.githubusercontent.com</code> میان
+که تو خیلی از شبکهها مسدود یا کند است. APK الان <b>داخل خود مخزن</b> هم هست،
+پس چند تا دامنهٔ کاملاً متفاوت داری — به ترتیب امتحان کن:</p>
 
-<h2>۱) لینکهای جایگزین (روی گوشی کلیک کن)</h2>
-<a class="btn" href="https://github.com/afshinrahimi109/Najibrahimi/raw/refs/heads/arena/621700c4-najibrahimi/docs/FreeVPN.apk">⬇️ ۱) github.com/raw — پیشنهاد اول</a>
-<a class="btn alt" href="FreeVPN.apk">⬇️ ۲) GitHub Pages (همین سایت)</a>
-<a class="btn alt" href="https://raw.githubusercontent.com/afshinrahimi109/Najibrahimi/arena/621700c4-najibrahimi/docs/FreeVPN.apk">⬇️ ۳) raw.githubusercontent.com</a>
-<a class="btn warn" href="https://gh-proxy.com/https://github.com/afshinrahimi109/Najibrahimi/releases/download/v1.0.0/FreeVPN.apk">⬇️ پروکسی gh-proxy.com</a>
-<a class="btn warn" href="https://ghproxy.net/https://github.com/afshinrahimi109/Najibrahimi/releases/download/v1.0.0/FreeVPN.apk">⬇️ پروکسی ghproxy.net</a>
-<a class="btn alt" href="https://github.com/afshinrahimi109/Najibrahimi/releases/download/v1.0.0/FreeVPN.apk">⬇️ لینک اصلی Release (اگه کار کرد)</a>
+<p class="ok">✅ نسخهٔ فعلی: ۲۶٬۳۸۹ بایت —
+<code>sha256: c77e45210f8932848e919dc78dccab4c9473dffd283f250bf8a00c8e29f982fe</code></p>
 
-<p class="note">⚠️ دکمهٔ ۲ (GitHub Pages) فقط وقتی کار میکند که Pages تو تنظیمات مخزن فعال باشد (Settings → Pages → Deploy from a branch → <code>arena/621700c4-najibrahimi</code> / <code>docs</code>). workflow سعی میکند خودکار فعالش کند. پروکسیها هم سرویس شخص ثالث هستند؛ حتماً بعد از دانلود امضای فایل رو با
-<a href="FreeVPN.apk.sha256" style="color:#7ee787">FreeVPN.apk.sha256</a> چک کن
-(<code>sha256sum FreeVPN.apk</code>). حجم فایل حدود ۲۶ کیلوبایت است.</p>
+<h2>🥇 روش صفر: اگه Termux داری، اصلاً دانلود نکن!</h2>
+<p>چون APK داخل خود گیتھابه، فقط ریپازیتوری رو آپدیت کن و مستقیم نصبش کن
+(این مطمئنترین راه تو ایران است، چون از همون کانالی میاد که <code>git clone</code> ات کار میکند):</p>
+<pre>cd ~/Najibrahimi
+git pull origin arena/621700c4-najibrahimi
+sha256sum docs/FreeVPN.apk
+termux-open docs/FreeVPN.apk</pre>
+<p><small>اگه ریپو رو نداری:
+<code>git clone -b arena/621700c4-najibrahimi --depth 1 https://github.com/afshinrahimi109/Najibrahimi.git ~/Najibrahimi</code></small></p>
 
-<h2>۲) راه تضمینی: فقط یه فایل متنی (بدون دانلود باینری)</h2>
-<p> بعضی شبکهها فقط فایلهای <code>.apk</code> رو قطع میکنن. ما یه نسخهٔ متنیِ base64 هم گذاشتیم؛
-تو <b>Termux</b> این سه خط رو بزن:</p>
-<pre>pkg install curl coreutils -y
-curl -fsSL -o f.b64 https://raw.githubusercontent.com/afshinrahimi109/Najibrahimi/arena/621700c4-najibrahimi/docs/FreeVPN.apk.base64.txt
+<h2>🥈 لینکهای جایگزین (روی گوشی کلیک کن)</h2>
+<a class="btn violet" href="https://codeload.github.com/afshinrahimi109/Najibrahimi/zip/refs/heads/arena/621700c4-najibrahimi">⬇️ ۱) ZIP کل مخزن از codeload.github.com (فقط ۳۶۴ کیلوبایت — تستشده ✅)</a>
+<a class="btn" href="https://cdn.jsdelivr.net/gh/afshinrahimi109/Najibrahimi@arena%2F621700c4-najibrahimi/docs/FreeVPN.apk">⬇️ ۲) jsDelivr CDN</a>
+<a class="btn alt" href="https://github.com/afshinrahimi109/Najibrahimi/raw/refs/heads/arena/621700c4-najibrahimi/docs/FreeVPN.apk">⬇️ ۳) github.com/raw</a>
+<a class="btn alt" href="https://raw.githubusercontent.com/afshinrahimi109/Najibrahimi/arena/621700c4-najibrahimi/docs/FreeVPN.apk">⬇️ ۴) raw.githubusercontent.com</a>
+<a class="btn alt" href="FreeVPN.apk">⬇️ ۵) GitHub Pages (همین سایت)</a>
+<a class="btn warn" href="https://gh-proxy.com/https://github.com/afshinrahimi109/Najibrahimi/releases/download/v1.0.0/FreeVPN.apk">⬇️ ۶) پروکسی gh-proxy.com</a>
+<a class="btn warn" href="https://ghproxy.net/https://github.com/afshinrahimi109/Najibrahimi/releases/download/v1.0.0/FreeVPN.apk">⬇️ ۷) پروکسی ghproxy.net</a>
+<a class="btn alt" href="https://github.com/afshinrahimi109/Najibrahimi/releases/download/v1.0.0/FreeVPN.apk">⬇️ ۸) لینک اصلی Release</a>
+
+<p><small>روش ۱: فایل ZIP رو باز کن → برو تو پوشهٔ
+<code>Najibrahimi-arena-621700c4-najibrahimi/docs/</code> → <code>FreeVPN.apk</code> رو بزن تا نصب شود.</small></p>
+
+<p class="note">⚠️ نکتهها: <b>پروکسیها</b> سرویس شخص ثالث و موقتیاند — حتماً بعدش
+<code>sha256sum FreeVPN.apk</code> رو با امضای بالا چک کن.
+دکمهٔ ۵ (Pages) هم فقط وقتی کار میکند که Pages تو تنظیمات مخزن فعال باشد
+(Settings → Pages → Deploy from a branch → <code>arena/621700c4-najibrahimi</code> / <code>docs</code>)؛
+workflow سعی کرد خودکار فعالش کند ولی گیتھاب اجازه نداد (HTTP 403)، باید دستی بزنی.</p>
+
+<h2>🥉 راه تضمینی: فقط یه فایل متنی (بدون دانلود باینری)</h2>
+<p> بعضی شبکهها فقط فایلهای <code>.apk</code> رو قطع میکنن. یه نسخهٔ متنیِ base64 هم گذاشتیم؛
+تو <b>Termux</b> بزن:</p>
+<pre>curl -fsSL -o f.b64 https://cdn.jsdelivr.net/gh/afshinrahimi109/Najibrahimi@arena%2F621700c4-najibrahimi/docs/FreeVPN.apk.base64.txt
 base64 -d f.b64 > FreeVPN.apk &amp;&amp; sha256sum FreeVPN.apk &amp;&amp; termux-open FreeVPN.apk</pre>
-<p> یا اسکریپت آماده:</p>
+<p> یا اسکریپت آماده (همهٔ لینکها رو خودش امتحان میکند و sha256 رو چک میکند):</p>
 <pre>curl -fsSL -o i.sh https://raw.githubusercontent.com/afshinrahimi109/Najibrahimi/arena/621700c4-najibrahimi/docs/install-apk.sh &amp;&amp; bash i.sh</pre>
-<p><small>اگه نصب نشد: <code>termux-setup-storage</code> رو بزن و فایل رو به <code>~/storage/downloads/</code> کپی کن و از فایلمنیجر بازش کن.</small></p>
+<p><small>اگه نصب نشد: <code>termux-setup-storage</code> رو بزن، فایل رو به
+<code>~/storage/downloads/</code> کپی کن و از فایلمنیجر بازش کن.</small></p>
 
-<h2>۳) نکات ساده ولی مؤثر</h2>
+<h2>🛠 نکات ساده ولی مؤثر</h2>
 <ul>
-<li>دانلودمنیجر اندروید «معلق» میشه چون وسط کار ارتباط قطع میشه. یه دانلودمنیجر با قابلیت <b>Resume</b> نصب کن (مثلاً 1DM / ADM) یا تو ترموکس از <code>curl -C -</code> استفاده کن.</li>
+<li>دانلودمنیجر «معلق» میشه چون وسط کار ارتباط قطع میشه. یه دانلودمنیجر با <b>Resume</b> نصب کن (1DM / ADM) یا تو ترموکس <code>curl -C -</code> بزن.</li>
 <li>یه بار وایفای ↔ دیتای موبایل رو عوض کن؛ بعضی ISPها فقط یه مسیرشون بلاکه.</li>
 <li>مرورگر دیگه (Chrome → Firefox) یا حالت ناشناس رو امتحان کن.</li>
-<li>اگه VPN/پروکسی دیگهای روشنه، موقع دانلود خاموشش کن تا مستقیم وصل بشی.</li>
+<li>اگه VPN/پروکسی دیگهای روشنه، موقع دانلود خاموشش کن.</li>
 </ul>
 
 <p><small>بعد از نصب، لینک <code>vless://</code> سرورت رو تو اپ پیست کن و دکمهٔ
-«🔍 تست اتصال» رو بزن تا بفهمی دقیقاً کجای کار گیر کرده.
+«🔍 تست اتصال» رو بزن تا بفهمی کجای کار گیر کرده.
 راهنما: <a href="https://github.com/afshinrahimi109/Najibrahimi/blob/arena/621700c4-najibrahimi/vpn/android/README.md" style="color:#7ee787">vpn/android/README.md</a></small></p>
 </body>
 </html>
