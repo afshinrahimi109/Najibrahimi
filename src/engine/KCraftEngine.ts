@@ -18,14 +18,19 @@ import {
   BlockId,
   CameraMode,
   CharacterPreset,
+  ControlStyle,
   CraftingRecipe,
   GameMode,
   HudState,
   InventoryItemId,
   InventorySlot,
   KoreanFaceConfig,
+  LiveChatMessage,
   NpcStatusSnapshot,
+  QuestProgress,
+  RadarDot,
   TradeOffer,
+  WorldBiomeId,
 } from '../types/game';
 import { BlockTextureSystem, getBlockTextureSystem } from '../world/BlockTextures';
 import {
@@ -39,6 +44,7 @@ import {
 interface NpcEntity {
   id: string;
   preset: CharacterPreset;
+  portraitUrl: string;
   rig: CharacterRig;
   pos: THREE.Vector3;
   vel: THREE.Vector3;
@@ -54,6 +60,7 @@ interface NpcEntity {
   hurtFlash: number;
   attackCooldown: number;
   swingAnim: number;
+  greetCooldown: number;
 }
 
 interface DroppedPickup {
@@ -80,12 +87,22 @@ interface Particle {
   gravity: number;
 }
 
+const ACCENT_PALETTE = [
+  '#FF7EB6',
+  '#4CE8E0',
+  '#FFD166',
+  '#7AE582',
+  '#9B8CFF',
+  '#FF9F68',
+];
+
 export class KCraftEngine {
   private readonly container: HTMLElement;
   private readonly onHudUpdate: (state: HudState) => void;
 
   public readonly texSys: BlockTextureSystem;
   public readonly world: VoxelWorld;
+  public readonly presetPortraits: Record<string, string> = {};
 
   private scene!: THREE.Scene;
   private camera!: THREE.PerspectiveCamera;
@@ -104,9 +121,10 @@ export class KCraftEngine {
   // Player state
   private playerPos = new THREE.Vector3(48.5, 18.2, 51.5);
   private playerVel = new THREE.Vector3(0, 0, 0);
-  private playerYaw = Math.PI; // Facing north toward the Grand Hanok & NPCs!
+  private playerYaw = Math.PI;
   private playerPitch = -0.06;
   private onGround = false;
+  private isFlying = false;
 
   private playerPreset: CharacterPreset = KOREAN_CHARACTER_PRESETS[0];
   private playerFace: KoreanFaceConfig = { ...KOREAN_CHARACTER_PRESETS[0].face };
@@ -125,14 +143,32 @@ export class KCraftEngine {
   // Gameplay & HUD state
   private started = false;
   private activeModal: ActiveModal = 'start';
+  private worldBiome: WorldBiomeId = 'hanok_valley';
   private cameraMode: CameraMode = 'first_person';
   private gameMode: GameMode = 'survival';
+
+  // Settings
+  private controlStyle: ControlStyle = 'joystick';
+  private lookSensitivity = 1.0;
 
   private health = 20;
   private maxHealth = 20;
   private hunger = 20;
   private maxHunger = 20;
   private hungerTick = 0;
+
+  // RPG Progression & Quests
+  private playerLevel = 1;
+  private playerXp = 0;
+  private goldCoins = 120;
+  private socialInteractions = 0;
+  private itemsCrafted = 0;
+  private talkedNpcSet = new Set<string>();
+  private quests: QuestProgress[] = [];
+
+  // Live Animated Enter/Exit Chat Feed
+  private liveChatFeed: LiveChatMessage[] = [];
+  private villageChatterTimer = 9;
 
   private hotbarIndex = 0;
   private hotbar: Array<InventorySlot | null> = Array(9).fill(null);
@@ -148,6 +184,9 @@ export class KCraftEngine {
   private draggingLook = false;
   private lastMouseX = 0;
   private lastMouseY = 0;
+  private lookTouchId: number | null = null;
+  private lastTouchX = 0;
+  private lastTouchY = 0;
   private pointerLocked = false;
 
   private currentRayHit: RaycastHit | null = null;
@@ -169,7 +208,7 @@ export class KCraftEngine {
   private dokkaebiDefeated = 0;
   private blocksMined = 0;
   private blocksPlaced = 0;
-  private dokkaebiSpawnTimer = 8;
+  private dokkaebiSpawnTimer = 14;
 
   private toastMessage: string | null = null;
   private toastTimeout: number | null = null;
@@ -184,10 +223,13 @@ export class KCraftEngine {
   private hudEmitTimer = 0;
   private disposed = false;
 
-  // Mobile virtual joystick vector
+  // Mobile virtual controller state
   public mobileMoveX = 0;
   public mobileMoveZ = 0;
   public mobileJumping = false;
+  public mobileFlyUp = false;
+  public mobileFlyDown = false;
+  public mobileSprinting = false;
 
   constructor(container: HTMLElement, onHudUpdate: (state: HudState) => void) {
     this.container = container;
@@ -196,6 +238,12 @@ export class KCraftEngine {
     this.texSys = getBlockTextureSystem();
     this.world = new VoxelWorld(this.texSys);
 
+    // Pre-render crisp Korean portraits for all character presets
+    for (const p of KOREAN_CHARACTER_PRESETS) {
+      this.presetPortraits[p.id] = renderCharacterPortraitDataUrl(p.face);
+    }
+
+    this.initQuests();
     this.initScene();
     this.initStarterInventory();
     this.initPlayerRig();
@@ -203,7 +251,6 @@ export class KCraftEngine {
     this.initCherryBlossomParticles();
     this.bindEvents();
 
-    // Ensure safe ground spawn in front of Grand Hanok Plaza
     const spawnY = this.world.getSurfaceY(48, 51);
     this.playerPos.set(48.5, spawnY + 0.05, 51.5);
     this.playerPortraitUrl = renderCharacterPortraitDataUrl(this.playerFace);
@@ -211,6 +258,181 @@ export class KCraftEngine {
     this.emitHudState();
     this.lastFrameTime = performance.now();
     this.loop(this.lastFrameTime);
+  }
+
+  private initQuests(): void {
+    this.quests = [
+      {
+        id: 'q_mine',
+        titleFa: 'کاوشگر معدن چوسان',
+        descFa: '۱۰ بلوک سنگ، چوب یا سنگ‌معدن استخراج کن',
+        category: 'mine',
+        current: 0,
+        target: 10,
+        rewardXp: 80,
+        rewardCoins: 100,
+        rewardItemId: 'diamond',
+        rewardItemCount: 3,
+        claimed: false,
+      },
+      {
+        id: 'q_build',
+        titleFa: 'معمار عمارت هانوک',
+        descFa: '۱۲ بلوک در دهکده کره‌ای یا شهر سئول قرار بده',
+        category: 'build',
+        current: 0,
+        target: 12,
+        rewardXp: 90,
+        rewardCoins: 120,
+        rewardItemId: BLOCK_IDS.NEON_CYAN,
+        rewardItemCount: 16,
+        claimed: false,
+      },
+      {
+        id: 'q_social',
+        titleFa: 'دوستی با اهالی کره‌ای',
+        descFa: 'با ۲ نفر از شخصیت‌های کره‌ای گفت‌وگو یا معامله کن',
+        category: 'social',
+        current: 0,
+        target: 2,
+        rewardXp: 70,
+        rewardCoins: 90,
+        rewardItemId: 'bingsoo',
+        rewardItemCount: 4,
+        claimed: false,
+      },
+      {
+        id: 'q_craft',
+        titleFa: 'استاد کارگاه ساخت‌وساز',
+        descFa: '۲ بار در بخش ساخت‌وساز آیتم یا بلوک بساز',
+        category: 'craft',
+        current: 0,
+        target: 2,
+        rewardXp: 85,
+        rewardCoins: 110,
+        rewardItemId: BLOCK_IDS.GOLD_BLOCK,
+        rewardItemCount: 8,
+        claimed: false,
+      },
+      {
+        id: 'q_combat',
+        titleFa: 'نگهبان افسانه دوکه‌بی',
+        descFa: '۱ جنگجوی دوکه‌بی (도깨비) را شکست بده',
+        category: 'combat',
+        current: 0,
+        target: 1,
+        rewardXp: 150,
+        rewardCoins: 200,
+        rewardItemId: 'diamond',
+        rewardItemCount: 5,
+        claimed: false,
+      },
+    ];
+  }
+
+  private syncQuestProgress(): void {
+    for (const q of this.quests) {
+      const prevDone = q.current >= q.target;
+      if (q.category === 'mine') q.current = Math.min(q.target, this.blocksMined);
+      else if (q.category === 'build') q.current = Math.min(q.target, this.blocksPlaced);
+      else if (q.category === 'social') q.current = Math.min(q.target, this.socialInteractions);
+      else if (q.category === 'craft') q.current = Math.min(q.target, this.itemsCrafted);
+      else if (q.category === 'combat') q.current = Math.min(q.target, this.dokkaebiDefeated);
+
+      if (!prevDone && q.current >= q.target) {
+        soundFX.playQuestComplete();
+        this.pushLiveChat({
+          senderFa: 'دفتر مأموریت سلطنتی',
+          senderKo: '왕실 임무 완료',
+          roleFa: 'پاداش آماده دریافت!',
+          portraitUrl: this.playerPortraitUrl,
+          text: `آفرین! مأموریت «${q.titleFa}» کامل شد! جایزه‌ات را از صفحه مأموریت‌ها بگیر 🎁`,
+          accentColor: '#FFD166',
+          durationMs: 5200,
+        });
+      }
+    }
+  }
+
+  public claimQuestReward(questId: string): void {
+    const q = this.quests.find((item) => item.id === questId);
+    if (!q || q.claimed || q.current < q.target) return;
+    q.claimed = true;
+    this.goldCoins += q.rewardCoins;
+    this.gainXp(q.rewardXp);
+    this.addItemToInventory(q.rewardItemId, q.rewardItemCount);
+    soundFX.playQuestComplete();
+    const rewardMeta = getItemMeta(q.rewardItemId);
+    this.showToast(
+      `پاداش دریافت شد: +${q.rewardCoins} سکه و ${q.rewardItemCount}× ${rewardMeta.nameFa}! ✨`
+    );
+    this.emitHudState();
+  }
+
+  private gainXp(amount: number): void {
+    this.playerXp += amount;
+    let needed = this.getNextLevelXp();
+    while (this.playerXp >= needed) {
+      this.playerXp -= needed;
+      this.playerLevel++;
+      needed = this.getNextLevelXp();
+      soundFX.playQuestComplete();
+      this.pushLiveChat({
+        senderFa: this.playerPreset.nameFa,
+        senderKo: `레벨 ${this.playerLevel}`,
+        roleFa: 'ارتقای سطح قهرمان!',
+        portraitUrl: this.playerPortraitUrl,
+        text: `تبریک! به سطح ${this.playerLevel} رسیدی و سلامت کامل بازیابی شد! 🌟`,
+        accentColor: '#4CE8E0',
+        durationMs: 4800,
+      });
+      this.health = this.maxHealth;
+      this.hunger = this.maxHunger;
+    }
+  }
+
+  private getNextLevelXp(): number {
+    return 100 + (this.playerLevel - 1) * 60;
+  }
+
+  public pushLiveChat(params: {
+    senderFa: string;
+    senderKo: string;
+    roleFa: string;
+    portraitUrl: string;
+    text: string;
+    accentColor?: string;
+    durationMs?: number;
+  }): void {
+    const msg: LiveChatMessage = {
+      id: `chat_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      senderFa: params.senderFa,
+      senderKo: params.senderKo,
+      roleFa: params.roleFa,
+      portraitUrl: params.portraitUrl,
+      text: params.text,
+      accentColor:
+        params.accentColor ??
+        ACCENT_PALETTE[Math.floor(Math.random() * ACCENT_PALETTE.length)],
+      createdAt: Date.now(),
+      durationMs: params.durationMs ?? 4800,
+    };
+
+    // Keep maximum 3 transient messages on screen so HUD never clutters
+    this.liveChatFeed = [...this.liveChatFeed.slice(-2), msg];
+    soundFX.playChatPop();
+    this.emitHudState();
+  }
+
+  private pruneExpiredLiveChats(): void {
+    if (this.liveChatFeed.length === 0) return;
+    const now = Date.now();
+    // Allow 480ms beyond durationMs for smooth CSS exit animation before unmounting
+    const next = this.liveChatFeed.filter((m) => now - m.createdAt < m.durationMs + 480);
+    if (next.length !== this.liveChatFeed.length) {
+      this.liveChatFeed = next;
+      this.emitHudState();
+    }
   }
 
   private initScene(): void {
@@ -223,7 +445,6 @@ export class KCraftEngine {
 
     this.camera = new THREE.PerspectiveCamera(72, w / h, 0.1, 220);
 
-    // Separate overlay scene for crisp non-clipping 1st-person Minecraft arm & tool!
     this.fpScene = new THREE.Scene();
     this.fpCamera = new THREE.PerspectiveCamera(60, w / h, 0.05, 10);
     const fpAmb = new THREE.AmbientLight(0xffffff, 0.85);
@@ -231,20 +452,25 @@ export class KCraftEngine {
     fpDir.position.set(2, 4, 3);
     this.fpScene.add(fpAmb, fpDir);
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+    try {
+      this.renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        powerPreference: 'high-performance',
+      });
+    } catch {
+      this.renderer = new THREE.WebGLRenderer({ antialias: false });
+    }
     this.renderer.setSize(w, h);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.autoClear = false;
     this.container.appendChild(this.renderer.domElement);
 
-    // World lighting
     this.ambientLight = new THREE.AmbientLight(0xffffff, 0.62);
     this.hemiLight = new THREE.HemisphereLight(0xbde4ff, 0x6b8258, 0.42);
     this.sunLight = new THREE.DirectionalLight(0xfff4dc, 0.92);
     this.sunLight.position.set(40, 75, 30);
     this.scene.add(this.ambientLight, this.hemiLight, this.sunLight);
 
-    // Blocky Minecraft Sun & Moon
     this.sunMesh = new THREE.Mesh(
       new THREE.BoxGeometry(9, 9, 9),
       new THREE.MeshBasicMaterial({ color: 0xffe98a })
@@ -257,7 +483,6 @@ export class KCraftEngine {
 
     this.scene.add(this.world.worldGroup);
 
-    // Block Target Selection Wireframe Box
     const edgeGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(1.008, 1.008, 1.008));
     this.highlightBox = new THREE.LineSegments(
       edgeGeo,
@@ -266,7 +491,6 @@ export class KCraftEngine {
     this.highlightBox.visible = false;
     this.scene.add(this.highlightBox);
 
-    // Block Breaking Crack Overlay Cube
     this.crackBox = new THREE.Mesh(
       new THREE.BoxGeometry(1.014, 1.014, 1.014),
       new THREE.MeshBasicMaterial({
@@ -290,25 +514,25 @@ export class KCraftEngine {
       { id: BLOCK_IDS.RED_PILLAR, count: 24 },
       { id: BLOCK_IDS.LANTERN, count: 16 },
       { id: 'kimbap', count: 8 },
-      { id: BLOCK_IDS.OAK_PLANKS, count: 32 },
+      { id: BLOCK_IDS.NEON_CYAN, count: 24 },
     ];
 
     this.inventory = [
       { id: BLOCK_IDS.GRASS, count: 32 },
       { id: BLOCK_IDS.COBBLESTONE, count: 32 },
       { id: BLOCK_IDS.BRICK, count: 32 },
+      { id: BLOCK_IDS.NEON_MAGENTA, count: 24 },
+      { id: BLOCK_IDS.GOLD_BLOCK, count: 16 },
+      { id: BLOCK_IDS.BASALT, count: 24 },
       { id: BLOCK_IDS.CHERRY_LEAVES, count: 24 },
       { id: BLOCK_IDS.GLASS, count: 24 },
       { id: BLOCK_IDS.OAK_LOG, count: 16 },
+      { id: BLOCK_IDS.OAK_PLANKS, count: 32 },
       { id: BLOCK_IDS.CRAFTING_TABLE, count: 2 },
       { id: BLOCK_IDS.TNT, count: 6 },
       { id: 'tteokbokki', count: 5 },
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
+      { id: 'bingsoo', count: 4 },
+      { id: 'honey_tteok', count: 4 },
       null,
       null,
       null,
@@ -319,7 +543,6 @@ export class KCraftEngine {
     this.playerRig = buildKoreanCharacterRig(this.playerFace);
     this.scene.add(this.playerRig.root);
 
-    // Build 1st-person right arm & sleeve
     this.fpArmGroup = new THREE.Group();
     this.fpArmGroup.position.set(0.52, -0.46, -0.72);
 
@@ -375,8 +598,16 @@ export class KCraftEngine {
     }
   }
 
+  private clearAllNpcs(): void {
+    for (const npc of this.npcs) {
+      this.scene.remove(npc.rig.root);
+      npc.rig.dispose();
+    }
+    this.npcs = [];
+  }
+
   private spawnVillageKoreanCharacters(): void {
-    // Spawn all 9 friendly Korean characters around the Hanok Plaza, Market, Bridge & Cave!
+    this.clearAllNpcs();
     const placements: Array<{
       presetId: string;
       x: number;
@@ -386,13 +617,13 @@ export class KCraftEngine {
     }> = [
       { presetId: 'seoyeon', x: 46.5, z: 45.2, yaw: 0.2, heldItem: BLOCK_IDS.CHERRY_LEAVES },
       { presetId: 'minjun', x: 50.5, z: 45.5, yaw: -0.3, heldItem: BLOCK_IDS.LANTERN },
-      { presetId: 'jihoon', x: 48.5, z: 41.0, yaw: 0, heldItem: 'joseon_sword' },
+      { presetId: 'jihoon', x: 48.5, z: 41.5, yaw: 0, heldItem: 'joseon_sword' },
       { presetId: 'halmeoni', x: 38.2, z: 46.5, yaw: Math.PI / 2, heldItem: 'kimbap' },
       { presetId: 'doyun', x: 57.5, z: 46.8, yaw: -Math.PI / 2, heldItem: 'diamond_pickaxe' },
       { presetId: 'haeun', x: 51.8, z: 51.5, yaw: -2.4, heldItem: BLOCK_IDS.HANOK_TILE },
-      { presetId: 'subin', x: 44.2, z: 40.5, yaw: 0.4, heldItem: BLOCK_IDS.HANJI_WALL },
-      { presetId: 'harabeoji', x: 62.5, z: 32.5, yaw: -0.8, heldItem: 'iron_axe' },
-      { presetId: 'taeyang', x: 48.5, z: 57.2, yaw: Math.PI, heldItem: BLOCK_IDS.OAK_LOG },
+      { presetId: 'subin', x: 44.2, z: 41.5, yaw: 0.4, heldItem: 'bingsoo' },
+      { presetId: 'harabeoji', x: 61.5, z: 40.5, yaw: -0.8, heldItem: 'iron_axe' },
+      { presetId: 'taeyang', x: 48.5, z: 55.2, yaw: Math.PI, heldItem: BLOCK_IDS.OAK_LOG },
     ];
 
     for (const spot of placements) {
@@ -432,6 +663,8 @@ export class KCraftEngine {
     const npc: NpcEntity = {
       id: `${preset.id}_${Math.random().toString(36).slice(2, 7)}`,
       preset,
+      portraitUrl:
+        this.presetPortraits[preset.id] ?? renderCharacterPortraitDataUrl(preset.face),
       rig,
       pos,
       vel: new THREE.Vector3(),
@@ -447,6 +680,7 @@ export class KCraftEngine {
       hurtFlash: 0,
       attackCooldown: 0,
       swingAnim: 0,
+      greetCooldown: 2 + Math.random() * 6,
     };
 
     this.npcs.push(npc);
@@ -454,12 +688,12 @@ export class KCraftEngine {
   }
 
   private initCherryBlossomParticles(): void {
-    const count = 220;
+    const count = 240;
     const positions = new Float32Array(count * 3);
     for (let i = 0; i < count; i++) {
-      positions[i * 3] = 20 + Math.random() * 56;
+      positions[i * 3] = 18 + Math.random() * 60;
       positions[i * 3 + 1] = 16 + Math.random() * 18;
-      positions[i * 3 + 2] = 22 + Math.random() * 54;
+      positions[i * 3 + 2] = 20 + Math.random() * 58;
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -475,26 +709,84 @@ export class KCraftEngine {
 
   // ==================== PUBLIC CONTROLS FOR UI ====================
 
+  public selectWorldBiome(biome: WorldBiomeId): void {
+    if (this.worldBiome === biome && this.world.currentBiome === biome) {
+      this.emitHudState();
+      return;
+    }
+    this.worldBiome = biome;
+    this.world.rebuildForBiome(biome);
+
+    if (biome === 'seoul_night') {
+      this.timeOfDay = 0.68; // Neon night illumination
+    } else if (biome === 'jeju_island') {
+      this.timeOfDay = 0.3; // Sunny island afternoon
+    } else {
+      this.timeOfDay = 0.22; // Spring cherry morning
+    }
+
+    this.spawnVillageKoreanCharacters();
+    const spawnY = this.world.getSurfaceY(48, 52);
+    this.playerPos.set(48.5, spawnY + 0.1, 52.5);
+    this.playerVel.set(0, 0, 0);
+    this.playerYaw = Math.PI;
+    this.playerPitch = -0.05;
+
+    const worldTitles: Record<WorldBiomeId, string> = {
+      hanok_valley: 'دهکده سلطنتی هانوک 🌸',
+      seoul_night: 'شب‌های نئونی سئول و رودخانه هان 🌃',
+      jeju_island: 'جزیره آتشفشانی ججو و قله هالاسان 🏝️',
+    };
+    this.showToast(`سرزمین انتخاب شد: ${worldTitles[biome]}`);
+    this.emitHudState();
+  }
+
   public startGame(): void {
     this.started = true;
     this.activeModal = 'none';
+    soundFX.unlockAndStartMusic();
     this.requestCanvasPointerLock();
-    this.showToast(`به دهکده کی‌کرفت خوش آمدی، ${this.playerPreset.nameFa} (${this.playerPreset.nameKo})!`);
     soundFX.playGreetingChime();
+
+    // Welcome animated message from Seoyeon that glides in and leaves automatically!
+    const seoyeon = KOREAN_CHARACTER_PRESETS.find((p) => p.id === 'seoyeon')!;
+    this.pushLiveChat({
+      senderFa: seoyeon.nameFa,
+      senderKo: seoyeon.nameKo,
+      roleFa: seoyeon.roleFa,
+      portraitUrl: this.presetPortraits[seoyeon.id],
+      text: `آنیونگ‌هاسیو ${this.playerPreset.nameFa}! به دنیای کی‌کرفت خوش آمدی، بیا نزدیک ما تا گپ بزنیم! 🌸`,
+      accentColor: '#FF7EB6',
+      durationMs: 5200,
+    });
+
+    this.emitHudState();
+  }
+
+  public returnToMainMenu(): void {
+    this.started = false;
+    this.activeModal = 'start';
+    this.mouseDownLeft = false;
+    this.mobileMoveX = 0;
+    this.mobileMoveZ = 0;
+    this.mobileJumping = false;
+    this.exitPointerLock();
+    soundFX.playUiClick();
     this.emitHudState();
   }
 
   public requestCanvasPointerLock(): void {
     try {
       const el = this.renderer.domElement;
-      if (document.pointerLockElement !== el && el.requestPointerLock) {
+      const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+      if (!isTouch && document.pointerLockElement !== el && el.requestPointerLock) {
         const res = el.requestPointerLock() as unknown as Promise<void> | undefined;
         if (res && typeof res.catch === 'function') {
           res.catch(() => {});
         }
       }
     } catch {
-      // Safe fallback: drag-to-look works automatically when pointer lock is unavailable
+      // Safe fallback
     }
   }
 
@@ -510,8 +802,12 @@ export class KCraftEngine {
 
   public setModal(modal: ActiveModal): void {
     this.activeModal = modal;
+    soundFX.playUiClick();
     if (modal !== 'none') {
       this.mouseDownLeft = false;
+      this.mobileMoveX = 0;
+      this.mobileMoveZ = 0;
+      this.mobileJumping = false;
       this.exitPointerLock();
     } else if (this.started) {
       this.requestCanvasPointerLock();
@@ -519,9 +815,54 @@ export class KCraftEngine {
     this.emitHudState();
   }
 
+  public setControlStyle(style: ControlStyle): void {
+    this.controlStyle = style;
+    soundFX.playUiClick();
+    this.showToast(
+      style === 'joystick'
+        ? 'کنترل حرکت: جوی‌استیک آنالوگ ۳۶۰ درجه فعال شد'
+        : 'کنترل حرکت: دکمه‌های جهتی گیم‌پد سه‌بعدی فعال شد'
+    );
+    this.emitHudState();
+  }
+
+  public setLookSensitivity(val: number): void {
+    this.lookSensitivity = Math.max(0.4, Math.min(2.2, val));
+    this.emitHudState();
+  }
+
+  public toggleMusic(): void {
+    soundFX.setMusicEnabled(!soundFX.musicEnabled);
+    this.emitHudState();
+  }
+
+  public toggleSfx(): void {
+    soundFX.setSfxEnabled(!soundFX.sfxEnabled);
+    this.emitHudState();
+  }
+
+  public toggleFlight(): void {
+    this.isFlying = !this.isFlying;
+    this.playerVel.y = 0;
+    soundFX.playJump();
+    this.showToast(
+      this.isFlying
+        ? 'پرواز آزاد فعال شد! با دکمه‌های بال/پایین اوج بگیر 🕊️'
+        : 'فرود روی زمین — حالت راه رفتن عادی'
+    );
+    this.emitHudState();
+  }
+
+  public toggleMobileSprint(): void {
+    this.mobileSprinting = !this.mobileSprinting;
+    soundFX.playUiClick();
+    this.emitHudState();
+  }
+
   public selectCharacterPreset(preset: CharacterPreset): void {
     this.playerPreset = preset;
     this.playerFace = { ...preset.face };
+    soundFX.playUiClick();
     this.applyPlayerAppearance();
   }
 
@@ -534,7 +875,6 @@ export class KCraftEngine {
     this.playerRig.updateFaceConfig(this.playerFace);
     this.playerPortraitUrl = renderCharacterPortraitDataUrl(this.playerFace);
 
-    // Sync 1st-person sleeve & hand colors with chosen Korean skin & outfit!
     const skinHexMap: Record<string, number> = {
       porcelain: 0xfce3d2,
       warm_ivory: 0xf8d7be,
@@ -569,6 +909,7 @@ export class KCraftEngine {
     const order: CameraMode[] = ['first_person', 'third_back', 'third_front'];
     const next = order[(order.indexOf(this.cameraMode) + 1) % order.length];
     this.cameraMode = next;
+    soundFX.playUiClick();
     const labels: Record<CameraMode, string> = {
       first_person: 'دوربین اول‌شخص ماین‌کرفت',
       third_back: 'دوربین سوم‌شخص (پشت سر)',
@@ -580,11 +921,13 @@ export class KCraftEngine {
 
   public toggleGameMode(): void {
     this.gameMode = this.gameMode === 'survival' ? 'creative' : 'survival';
+    soundFX.playUiClick();
     if (this.gameMode === 'creative') {
       this.health = this.maxHealth;
       this.hunger = this.maxHunger;
-      this.showToast('حالت خلاقیت فعال شد: بلوک بی‌نهایت و شکستن فوری!');
+      this.showToast('حالت خلاقیت فعال شد: بلوک بی‌نهایت، پرواز و شکستن فوری!');
     } else {
+      this.isFlying = false;
       this.showToast('حالت بقا (Survival) فعال شد!');
     }
     this.emitHudState();
@@ -593,10 +936,11 @@ export class KCraftEngine {
   public toggleDayNight(): void {
     const currentlyNight = this.timeOfDay > 0.56 && this.timeOfDay < 0.94;
     this.timeOfDay = currentlyNight ? 0.23 : 0.68;
+    soundFX.playUiClick();
     this.showToast(
       currentlyNight
-        ? 'طلوع آفتاب بهاری در دهکده کره‌ای ☀️'
-        : 'شب فانوس‌های ابریشمی فرا رسید 🏮'
+        ? 'طلوع آفتاب درخشان در سرزمین کره‌ای ☀️'
+        : 'شب فانوس‌ها و نورهای نئونی فرا رسید 🏮'
     );
     this.emitHudState();
   }
@@ -608,8 +952,22 @@ export class KCraftEngine {
     const dist = 9 + Math.random() * 4;
     const sx = Math.max(8, Math.min(WORLD_WIDTH - 8, this.playerPos.x - Math.sin(angle) * dist));
     const sz = Math.max(8, Math.min(WORLD_DEPTH - 8, this.playerPos.z - Math.cos(angle) * dist));
-    this.spawnNpcFromPreset(dokkaebiPreset, sx, sz, angle + Math.PI, 'dokkaebi_club');
-    this.showToast('جنگجوی افسانه‌ای دوکه‌بی (도깨비) وارد میدان شد! ⚔️');
+    const spawned = this.spawnNpcFromPreset(
+      dokkaebiPreset,
+      sx,
+      sz,
+      angle + Math.PI,
+      'dokkaebi_club'
+    );
+    this.pushLiveChat({
+      senderFa: spawned.preset.nameFa,
+      senderKo: spawned.preset.nameKo,
+      roleFa: 'مبارز افسانه‌ای شب',
+      portraitUrl: spawned.portraitUrl,
+      text: 'هاها! جرئت داری در میدان با گرز دوکه‌بی من روبه‌رو بشی؟ ⚔️',
+      accentColor: '#FF5C77',
+      durationMs: 4800,
+    });
     soundFX.playSwordSwing();
     this.emitHudState();
   }
@@ -620,7 +978,8 @@ export class KCraftEngine {
     this.playerVel.set(0, 0, 0);
     this.playerYaw = Math.PI;
     this.playerPitch = -0.05;
-    this.showToast('بازگشت به میدان اصلی عمارت هانوک!');
+    soundFX.playGreetingChime();
+    this.showToast('انتقال سریع به میدان مرکزی!');
     this.emitHudState();
   }
 
@@ -628,6 +987,7 @@ export class KCraftEngine {
     if (index < 0 || index >= 9) return;
     this.hotbarIndex = index;
     this.miningElapsed = 0;
+    soundFX.playUiClick();
     this.refreshHeldItemMeshes();
     this.emitHudState();
   }
@@ -665,6 +1025,9 @@ export class KCraftEngine {
       }
     }
     this.addItemToInventory(recipe.resultId, recipe.resultCount);
+    this.itemsCrafted++;
+    this.gainXp(20);
+    this.syncQuestProgress();
     soundFX.playPickup();
     this.showToast(`ساخته شد: ${recipe.nameFa}`);
     this.emitHudState();
@@ -680,8 +1043,24 @@ export class KCraftEngine {
       this.consumeItem(offer.giveId, offer.giveCount);
     }
     this.addItemToInventory(offer.receiveId, offer.receiveCount);
+    this.socialInteractions++;
+    this.gainXp(25);
+    this.syncQuestProgress();
     soundFX.playGreetingChime();
+
+    const dialogNpc = this.npcs.find((n) => n.id === this.activeDialogNpcId);
     const got = getItemMeta(offer.receiveId).nameFa;
+    if (dialogNpc) {
+      this.pushLiveChat({
+        senderFa: dialogNpc.preset.nameFa,
+        senderKo: dialogNpc.preset.nameKo,
+        roleFa: dialogNpc.preset.roleFa,
+        portraitUrl: dialogNpc.portraitUrl,
+        text: `کامسامنیدا (ممنونم)! این ${offer.receiveCount} عدد «${got}» تقدیم به تو! 🤝`,
+        accentColor: '#7AE582',
+        durationMs: 4600,
+      });
+    }
     this.showToast(`معامله موفق! ${offer.receiveCount} عدد «${got}» دریافت کردی!`);
     this.emitHudState();
   }
@@ -690,17 +1069,62 @@ export class KCraftEngine {
     const npc = this.npcs.find((n) => n.id === entityId);
     if (!npc || npc.preset.isHostile) return;
     npc.isFollowing = !npc.isFollowing;
+    if (!this.talkedNpcSet.has(npc.id)) {
+      this.talkedNpcSet.add(npc.id);
+      this.socialInteractions++;
+      this.syncQuestProgress();
+    }
     soundFX.playGreetingChime();
-    this.showToast(
-      npc.isFollowing
-        ? `${npc.preset.nameFa} (${npc.preset.nameKo}) حالا همراه شماست!`
-        : `${npc.preset.nameFa} در همین حوالی به گشت‌وگذار ادامه می‌دهد.`
-    );
+    this.pushLiveChat({
+      senderFa: npc.preset.nameFa,
+      senderKo: npc.preset.nameKo,
+      roleFa: npc.preset.roleFa,
+      portraitUrl: npc.portraitUrl,
+      text: npc.isFollowing
+        ? 'با کمال میل همراهمت می‌شم! بزنم بریم ماجراجویی! ✨'
+        : 'همین‌جا در دهکده می‌مانم؛ هر وقت خواستی دوباره صدایم کن!',
+      accentColor: '#4CE8E0',
+      durationMs: 4600,
+    });
     this.emitHudState();
   }
 
+  public sendQuickChatToNpc(npcId: string, playerMessageFa: string, npcReplyFa: string): void {
+    const npc = this.npcs.find((n) => n.id === npcId);
+    if (!this.talkedNpcSet.has(npcId)) {
+      this.talkedNpcSet.add(npcId);
+      this.socialInteractions++;
+      this.gainXp(15);
+      this.syncQuestProgress();
+    }
+    // Player message animates in first
+    this.pushLiveChat({
+      senderFa: this.playerPreset.nameFa,
+      senderKo: this.playerPreset.nameKo,
+      roleFa: 'شما',
+      portraitUrl: this.playerPortraitUrl,
+      text: playerMessageFa,
+      accentColor: '#4CE8E0',
+      durationMs: 4200,
+    });
+    // Villager animated reply arrives right after!
+    if (npc) {
+      window.setTimeout(() => {
+        if (this.disposed) return;
+        this.pushLiveChat({
+          senderFa: npc.preset.nameFa,
+          senderKo: npc.preset.nameKo,
+          roleFa: npc.preset.roleFa,
+          portraitUrl: npc.portraitUrl,
+          text: npcReplyFa,
+          accentColor: '#FF7EB6',
+          durationMs: 4800,
+        });
+      }, 650);
+    }
+  }
+
   public triggerPrimaryActionTap(): void {
-    // Useful for mobile/touch button
     this.playerSwingAnim = 1;
     if (this.tryAttackOrInteractEntity(true)) return;
     if (this.currentRayHit) {
@@ -718,6 +1142,8 @@ export class KCraftEngine {
         this.currentRayHit.bz,
         this.currentRayHit.blockId
       );
+    } else {
+      soundFX.playSwordSwing();
     }
   }
 
@@ -763,7 +1189,6 @@ export class KCraftEngine {
     const maxStack = meta.category === 'tool' ? 1 : 99;
     let rem = amount;
 
-    // 1. Stack into existing hotbar / inventory slots
     if (maxStack > 1) {
       for (const list of [this.hotbar, this.inventory]) {
         for (let i = 0; i < list.length && rem > 0; i++) {
@@ -777,7 +1202,6 @@ export class KCraftEngine {
       }
     }
 
-    // 2. Place in empty hotbar / inventory slots
     for (const list of [this.hotbar, this.inventory]) {
       for (let i = 0; i < list.length && rem > 0; i++) {
         if (!list[i]) {
@@ -799,7 +1223,7 @@ export class KCraftEngine {
     this.toastTimeout = window.setTimeout(() => {
       this.toastMessage = null;
       this.emitHudState();
-    }, 3400);
+    }, 3200);
     this.emitHudState();
   }
 
@@ -815,6 +1239,10 @@ export class KCraftEngine {
     dom.addEventListener('mousedown', this.onMouseDown);
     window.addEventListener('mouseup', this.onMouseUp);
     window.addEventListener('mousemove', this.onMouseMove);
+    dom.addEventListener('touchstart', this.onTouchStart, { passive: false });
+    dom.addEventListener('touchmove', this.onTouchMove, { passive: false });
+    dom.addEventListener('touchend', this.onTouchEnd);
+    dom.addEventListener('touchcancel', this.onTouchEnd);
     dom.addEventListener('wheel', this.onWheel, { passive: true });
     dom.addEventListener('contextmenu', this.onContextMenu);
   }
@@ -847,11 +1275,9 @@ export class KCraftEngine {
     this.keys.add(code);
 
     if (!this.started) {
-      if (code === 'Enter') this.startGame();
       return;
     }
 
-    // Digit 1..9 hotbar selection
     if (code.startsWith('Digit')) {
       const num = parseInt(code.replace('Digit', ''), 10);
       if (num >= 1 && num <= 9) {
@@ -872,6 +1298,12 @@ export class KCraftEngine {
       return;
     }
 
+    if (code === 'KeyJ' || code === 'KeyM') {
+      e.preventDefault();
+      this.setModal(this.activeModal === 'quests' ? 'none' : 'quests');
+      return;
+    }
+
     if (code === 'KeyH') {
       e.preventDefault();
       this.setModal(this.activeModal === 'help' ? 'none' : 'help');
@@ -881,6 +1313,8 @@ export class KCraftEngine {
     if (code === 'Escape') {
       if (this.activeModal !== 'none') {
         this.setModal('none');
+      } else {
+        this.setModal('pause');
       }
       return;
     }
@@ -891,6 +1325,8 @@ export class KCraftEngine {
       this.cycleCameraMode();
     } else if (code === 'KeyG') {
       this.toggleGameMode();
+    } else if (code === 'KeyZ') {
+      this.toggleFlight();
     } else if (code === 'KeyN') {
       this.toggleDayNight();
     } else if (code === 'KeyF') {
@@ -913,6 +1349,7 @@ export class KCraftEngine {
 
   private onMouseDown = (e: MouseEvent): void => {
     if (!this.started || this.activeModal !== 'none') return;
+    soundFX.unlockAndStartMusic();
 
     if (!this.pointerLocked) {
       this.requestCanvasPointerLock();
@@ -924,7 +1361,6 @@ export class KCraftEngine {
       this.lastMouseY = e.clientY;
       this.playerSwingAnim = 1;
 
-      // Check entity attack / TNT ignite first
       if (this.tryAttackOrInteractEntity(false)) {
         return;
       }
@@ -962,7 +1398,7 @@ export class KCraftEngine {
 
   private onMouseMove = (e: MouseEvent): void => {
     if (!this.started || this.activeModal !== 'none') return;
-    const sens = 0.0024;
+    const sens = 0.0024 * this.lookSensitivity;
 
     if (this.pointerLocked) {
       this.rotateCameraBy(e.movementX * sens, e.movementY * sens);
@@ -977,10 +1413,53 @@ export class KCraftEngine {
     }
   };
 
+  private onTouchStart = (e: TouchEvent): void => {
+    if (!this.started || this.activeModal !== 'none') return;
+    soundFX.unlockAndStartMusic();
+    if (this.lookTouchId === null && e.changedTouches.length > 0) {
+      const t = e.changedTouches[0];
+      this.lookTouchId = t.identifier;
+      this.lastTouchX = t.clientX;
+      this.lastTouchY = t.clientY;
+    }
+  };
+
+  private onTouchMove = (e: TouchEvent): void => {
+    if (!this.started || this.activeModal !== 'none') return;
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const t = e.changedTouches[i];
+      if (t.identifier === this.lookTouchId) {
+        e.preventDefault();
+        const dx = t.clientX - this.lastTouchX;
+        const dy = t.clientY - this.lastTouchY;
+        this.lastTouchX = t.clientX;
+        this.lastTouchY = t.clientY;
+        const sens = 0.0052 * this.lookSensitivity;
+        this.rotateCameraBy(dx * sens, dy * sens);
+        break;
+      }
+    }
+  };
+
+  private onTouchEnd = (e: TouchEvent): void => {
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      if (e.changedTouches[i].identifier === this.lookTouchId) {
+        this.lookTouchId = null;
+        break;
+      }
+    }
+  };
+
   public openNearbyNpcDialog(): void {
     const npc = this.npcs.find((n) => n.id === this.nearbyNpcId);
     if (!npc || npc.preset.isHostile) return;
     this.activeDialogNpcId = npc.id;
+    if (!this.talkedNpcSet.has(npc.id)) {
+      this.talkedNpcSet.add(npc.id);
+      this.socialInteractions++;
+      this.gainXp(15);
+      this.syncQuestProgress();
+    }
     this.setModal('npc_dialog');
     soundFX.playGreetingChime();
   }
@@ -1008,7 +1487,7 @@ export class KCraftEngine {
 
     if (bestNpc.preset.isHostile) {
       const held = this.hotbar[this.hotbarIndex];
-      const dmg = held ? getItemMeta(held.id).attackDamage ?? 3 : 3;
+      const dmg = held ? getItemMeta(held.id).attackDamage ?? 4 : 4;
       this.damageNpc(bestNpc, dmg, lookDir);
       soundFX.playSwordSwing();
       return true;
@@ -1016,6 +1495,12 @@ export class KCraftEngine {
 
     if (allowTalk) {
       this.activeDialogNpcId = bestNpc.id;
+      if (!this.talkedNpcSet.has(bestNpc.id)) {
+        this.talkedNpcSet.add(bestNpc.id);
+        this.socialInteractions++;
+        this.gainXp(15);
+        this.syncQuestProgress();
+      }
       this.setModal('npc_dialog');
       soundFX.playGreetingChime();
       return true;
@@ -1025,14 +1510,12 @@ export class KCraftEngine {
   }
 
   private handleRightClickAction(): void {
-    // 1. Check if aiming directly at a friendly Korean NPC -> Talk!
     if (this.tryAttackOrInteractEntity(true)) {
       return;
     }
 
     const slot = this.hotbar[this.hotbarIndex];
 
-    // 2. Check if aiming at Crafting Table -> Open Crafting Modal!
     if (this.currentRayHit && this.currentRayHit.blockId === BLOCK_IDS.CRAFTING_TABLE) {
       this.setModal('inventory');
       return;
@@ -1041,9 +1524,12 @@ export class KCraftEngine {
     if (!slot) return;
     const meta = getItemMeta(slot.id);
 
-    // 3. Eat Korean Food (Kimbap / Tteokbokki)!
     if (meta.category === 'food') {
-      if (this.health < this.maxHealth || this.hunger < this.maxHunger || this.gameMode === 'creative') {
+      if (
+        this.health < this.maxHealth ||
+        this.hunger < this.maxHunger ||
+        this.gameMode === 'creative'
+      ) {
         this.health = Math.min(this.maxHealth, this.health + (meta.healAmount ?? 4));
         this.hunger = Math.min(this.maxHunger, this.hunger + (meta.hungerAmount ?? 5));
         if (this.gameMode !== 'creative') {
@@ -1053,15 +1539,16 @@ export class KCraftEngine {
         }
         this.playerSwingAnim = 1;
         soundFX.playEat();
-        this.showToast(`نوش جان! ${meta.nameFa} (${meta.nameKo}) سلامت و انرژی را بازیابی کرد ❤️`);
+        this.showToast(
+          `نوش جان! ${meta.nameFa} (${meta.nameKo}) سلامت و انرژی را بازیابی کرد ❤️`
+        );
         this.emitHudState();
       } else {
-        this.showToast('سلامتی و سیری شما کامل است!');
+        this.showToast('سلامتی و انرژی شما کامل است!');
       }
       return;
     }
 
-    // 4. Place Block on targeted voxel face!
     if (meta.isBlock && typeof slot.id === 'number' && this.currentRayHit) {
       const px = this.currentRayHit.bx + this.currentRayHit.nx;
       const py = this.currentRayHit.by + this.currentRayHit.ny;
@@ -1069,7 +1556,6 @@ export class KCraftEngine {
 
       if (!this.world.inBounds(px, py, pz)) return;
 
-      // Ensure placed block doesn't overlap player AABB (radius 0.3, height 1.78)
       const overlapsPlayer =
         px + 1 > this.playerPos.x - 0.28 &&
         px < this.playerPos.x + 0.28 &&
@@ -1082,6 +1568,8 @@ export class KCraftEngine {
 
       this.world.setBlock(px, py, pz, slot.id as BlockId);
       this.blocksPlaced++;
+      this.gainXp(4);
+      this.syncQuestProgress();
       this.playerSwingAnim = 1;
       soundFX.playPlace();
 
@@ -1098,6 +1586,8 @@ export class KCraftEngine {
     if (by <= 0) return;
     this.world.setBlock(bx, by, bz, BLOCK_IDS.AIR);
     this.blocksMined++;
+    this.gainXp(5);
+    this.syncQuestProgress();
     soundFX.playBreak();
     this.spawnBlockParticles(bx + 0.5, by + 0.5, bz + 0.5, blockId, 14);
 
@@ -1162,7 +1652,6 @@ export class KCraftEngine {
       }
     }
 
-    // Damage nearby Dokkaebi
     for (const npc of [...this.npcs]) {
       const d = npc.pos.distanceTo(center);
       if (d < radius + 2 && npc.preset.isHostile) {
@@ -1203,6 +1692,7 @@ export class KCraftEngine {
       [BLOCK_IDS.DIRT]: 0x866042,
       [BLOCK_IDS.STONE]: 0x83878d,
       [BLOCK_IDS.COBBLESTONE]: 0x7d8188,
+      [BLOCK_IDS.BASALT]: 0x363c47,
       [BLOCK_IDS.OAK_LOG]: 0x6b4d31,
       [BLOCK_IDS.OAK_PLANKS]: 0xba8e58,
       [BLOCK_IDS.CHERRY_LEAVES]: 0xffa8c4,
@@ -1211,6 +1701,9 @@ export class KCraftEngine {
       [BLOCK_IDS.HANJI_WALL]: 0xfbf2df,
       [BLOCK_IDS.RED_PILLAR]: 0xb5282f,
       [BLOCK_IDS.LANTERN]: 0xffbf52,
+      [BLOCK_IDS.NEON_CYAN]: 0x22e6e2,
+      [BLOCK_IDS.NEON_MAGENTA]: 0xff4db8,
+      [BLOCK_IDS.GOLD_BLOCK]: 0xf5c438,
       [BLOCK_IDS.DIAMOND_ORE]: 0x32e6df,
       [BLOCK_IDS.GOLD_ORE]: 0xf5c438,
       [BLOCK_IDS.TNT]: 0xdc352b,
@@ -1255,9 +1748,20 @@ export class KCraftEngine {
       this.npcs = this.npcs.filter((n) => n.id !== npc.id);
       if (npc.preset.isHostile) {
         this.dokkaebiDefeated++;
+        this.goldCoins += 45;
+        this.gainXp(45);
+        this.syncQuestProgress();
         const reward: InventoryItemId = Math.random() > 0.45 ? 'diamond' : 'gold_ingot';
         this.spawnPickup(reward, 1, npc.pos.clone().add(new THREE.Vector3(0, 0.7, 0)));
-        this.showToast('جنگجوی دوکه‌بی شکست خورد! غنیمت درخشان روی زمین افتاد ✨');
+        this.pushLiveChat({
+          senderFa: 'نگهبان جی‌هون',
+          senderKo: '지훈',
+          roleFa: 'محافظ دهکده',
+          portraitUrl: this.presetPortraits['jihoon'] ?? this.playerPortraitUrl,
+          text: 'آفرین جنگجوی شجاع! دوکه‌بی شکست خورد و دهکده در امان ماند! ⚔️✨',
+          accentColor: '#FFD166',
+          durationMs: 4800,
+        });
       }
       this.emitHudState();
     }
@@ -1274,7 +1778,6 @@ export class KCraftEngine {
     const dt = Math.min(0.05, Math.max(0.001, rawDt));
     this.elapsedTotal += dt;
 
-    // FPS counter
     this.fpsFrames++;
     this.fpsTimer += dt;
     if (this.fpsTimer >= 0.5) {
@@ -1289,6 +1792,7 @@ export class KCraftEngine {
     if (this.started) {
       this.updatePlayer(dt);
       this.updateVoxelMining(dt);
+      this.updateVillageLiveChatter(dt);
     } else {
       this.updateTitleScreenCamera(dt);
     }
@@ -1297,6 +1801,7 @@ export class KCraftEngine {
     this.updatePickups(dt);
     this.updatePrimedTnts(dt);
     this.updateParticles(dt);
+    this.pruneExpiredLiveChats();
 
     this.renderFrame();
 
@@ -1307,8 +1812,39 @@ export class KCraftEngine {
     }
   };
 
+  private updateVillageLiveChatter(dt: number): void {
+    if (this.activeModal !== 'none') return;
+    this.villageChatterTimer -= dt;
+    if (this.villageChatterTimer > 0) return;
+    this.villageChatterTimer = 15 + Math.random() * 10;
+
+    // Pick a friendly Korean villager near the player or in the plaza to share a lively message!
+    const friendlies = this.npcs.filter((n) => !n.preset.isHostile);
+    if (friendlies.length === 0) return;
+
+    const closeOnes = friendlies.filter((n) => n.pos.distanceTo(this.playerPos) < 16);
+    const speaker =
+      closeOnes.length > 0
+        ? closeOnes[Math.floor(Math.random() * closeOnes.length)]
+        : friendlies[Math.floor(Math.random() * friendlies.length)];
+
+    const lines = speaker.preset.dialogLines;
+    const line =
+      lines && lines.length > 0
+        ? lines[Math.floor(Math.random() * lines.length)]
+        : speaker.preset.greetingFa;
+
+    this.pushLiveChat({
+      senderFa: speaker.preset.nameFa,
+      senderKo: speaker.preset.nameKo,
+      roleFa: speaker.preset.roleFa,
+      portraitUrl: speaker.portraitUrl,
+      text: line,
+      durationMs: 4700,
+    });
+  }
+
   private updateTitleScreenCamera(_dt: number): void {
-    // Cinematic gentle orbit around the Korean Hanok Plaza & Player Character!
     const angle = this.elapsedTotal * 0.22;
     const cx = 48.5;
     const cz = 46.5;
@@ -1337,9 +1873,8 @@ export class KCraftEngine {
   }
 
   private updatePlayer(dt: number): void {
-    // Keyboard camera rotation fallback (Q / E / Arrow Keys)
     if (this.activeModal === 'none') {
-      const turnSpeed = 2.0 * dt;
+      const turnSpeed = 2.0 * dt * this.lookSensitivity;
       if (this.keys.has('ArrowLeft') || this.keys.has('KeyQ')) {
         this.rotateCameraBy(-turnSpeed, 0);
       }
@@ -1354,7 +1889,6 @@ export class KCraftEngine {
       }
     }
 
-    // Movement vector
     let forward = 0;
     let strafe = 0;
     if (this.activeModal === 'none') {
@@ -1366,8 +1900,15 @@ export class KCraftEngine {
       strafe += this.mobileMoveX;
     }
 
-    const sprinting = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight');
-    const baseSpeed = this.gameMode === 'creative' ? 6.8 : sprinting ? 6.4 : 4.6;
+    const sprinting =
+      this.keys.has('ShiftLeft') || this.keys.has('ShiftRight') || this.mobileSprinting;
+    const baseSpeed = this.isFlying
+      ? 8.5
+      : this.gameMode === 'creative'
+      ? 7.0
+      : sprinting
+      ? 6.6
+      : 4.7;
 
     const sinY = Math.sin(this.playerYaw);
     const cosY = Math.cos(this.playerYaw);
@@ -1383,7 +1924,6 @@ export class KCraftEngine {
     this.playerVel.x = moveX * baseSpeed;
     this.playerVel.z = moveZ * baseSpeed;
 
-    // Check if swimming in water
     const footBlock = this.world.getBlock(
       Math.floor(this.playerPos.x),
       Math.floor(this.playerPos.y + 0.5),
@@ -1392,9 +1932,18 @@ export class KCraftEngine {
     const inWater = footBlock === BLOCK_IDS.WATER;
 
     const wantJump =
-      this.activeModal === 'none' && (this.keys.has('Space') || this.mobileJumping);
+      this.activeModal === 'none' &&
+      (this.keys.has('Space') || this.mobileJumping || this.mobileFlyUp);
+    const wantDescend =
+      this.activeModal === 'none' &&
+      (this.keys.has('ControlLeft') || this.mobileFlyDown);
 
-    if (inWater) {
+    if (this.isFlying) {
+      let vy = 0;
+      if (wantJump) vy += 6.2;
+      if (wantDescend) vy -= 6.2;
+      this.playerVel.y = vy;
+    } else if (inWater) {
       this.playerVel.y -= 8.5 * dt;
       this.playerVel.y = Math.max(-2.8, this.playerVel.y);
       if (wantJump) {
@@ -1404,14 +1953,14 @@ export class KCraftEngine {
       this.playerVel.y -= 23.5 * dt;
       this.playerVel.y = Math.max(-32, this.playerVel.y);
       if (wantJump && this.onGround) {
-        this.playerVel.y = 8.15;
+        this.playerVel.y = 8.2;
         this.onGround = false;
+        soundFX.playJump();
       }
     }
 
     this.moveEntityWithVoxelAABB(this.playerPos, this.playerVel, dt, 0.3, 1.78, true);
 
-    // Hunger & passive health regen in Survival
     if (this.gameMode === 'survival') {
       this.hungerTick += dt * (moveLen > 0.2 ? 1.2 : 0.25);
       if (this.hungerTick >= 18) {
@@ -1423,7 +1972,6 @@ export class KCraftEngine {
       }
     }
 
-    // Player Blink & Rig Animation
     this.playerBlinkTimer -= dt;
     if (this.playerBlinkTimer <= 0) {
       if (this.playerIsBlinking) {
@@ -1442,26 +1990,30 @@ export class KCraftEngine {
 
     const horizSpeed = Math.hypot(this.playerVel.x, this.playerVel.z) / 5.0;
     this.playerRig.root.position.copy(this.playerPos);
-    // Rig forward is +Z, whereas camera yaw=0 looks toward -Z, so add Math.PI
     this.playerRig.bodyGroup.rotation.y = this.playerYaw + Math.PI;
     this.playerRig.headPivot.rotation.x = -this.playerPitch * 0.7;
-    this.playerRig.animateWalk(horizSpeed, this.elapsedTotal, 1 - this.playerSwingAnim > 0.99 ? 0 : this.playerSwingAnim);
+    this.playerRig.animateWalk(
+      horizSpeed,
+      this.elapsedTotal,
+      1 - this.playerSwingAnim > 0.99 ? 0 : this.playerSwingAnim
+    );
 
     this.playerRig.root.visible = this.cameraMode !== 'first_person';
 
-    // Update Camera Position according to active CameraMode!
     const eye = this.getPlayerEyePos();
     const lookDir = this.getPlayerLookDir();
 
     if (this.cameraMode === 'first_person') {
-      const bob = this.onGround && horizSpeed > 0.1 ? Math.sin(this.elapsedTotal * 11) * 0.038 * horizSpeed : 0;
+      const bob =
+        this.onGround && horizSpeed > 0.1
+          ? Math.sin(this.elapsedTotal * 11) * 0.038 * horizSpeed
+          : 0;
       this.camera.position.set(eye.x, eye.y + bob, eye.z);
       this.camera.rotation.order = 'YXZ';
       this.camera.rotation.y = this.playerYaw;
       this.camera.rotation.x = this.playerPitch;
       this.camera.rotation.z = 0;
 
-      // Animate 1st-person arm bob & swing
       const swingSin = this.playerSwingAnim > 0 ? Math.sin(this.playerSwingAnim * Math.PI) : 0;
       this.fpArmGroup.position.set(
         0.52 - swingSin * 0.14,
@@ -1477,8 +2029,11 @@ export class KCraftEngine {
       this.camera.position.copy(camBack);
       this.camera.lookAt(eye.clone().addScaledVector(lookDir, 4));
     } else {
-      // third_front (Selfie view of your Korean character face!)
-      const forwardHoriz = new THREE.Vector3(-Math.sin(this.playerYaw), 0.12, -Math.cos(this.playerYaw)).normalize();
+      const forwardHoriz = new THREE.Vector3(
+        -Math.sin(this.playerYaw),
+        0.12,
+        -Math.cos(this.playerYaw)
+      ).normalize();
       const camRay = this.world.raycast(eye, forwardHoriz, 2.55);
       const safeDist = camRay ? Math.max(0.65, camRay.distance - 0.35) : 2.55;
       const camFront = eye.clone().addScaledVector(forwardHoriz, safeDist);
@@ -1486,7 +2041,6 @@ export class KCraftEngine {
       this.camera.lookAt(this.playerPos.x, this.playerPos.y + 1.52, this.playerPos.z);
     }
 
-    // Update Block Raycast Highlight
     this.currentRayHit = this.world.raycast(eye, lookDir, 6.2);
     if (this.currentRayHit && this.activeModal === 'none') {
       this.highlightBox.visible = true;
@@ -1527,7 +2081,6 @@ export class KCraftEngine {
     this.miningDuration = Math.max(0.14, hardness);
     this.miningElapsed += dt;
 
-    // Continuous arm swing & dig sound
     if (this.playerSwingAnim <= 0.05) {
       this.playerSwingAnim = 1;
     }
@@ -1576,7 +2129,6 @@ export class KCraftEngine {
       return false;
     };
 
-    // Y axis
     const nextY = pos.y + vel.y * dt;
     if (!collidesAt(pos.x, nextY, pos.z)) {
       pos.y = nextY;
@@ -1584,27 +2136,34 @@ export class KCraftEngine {
       if (vel.y < 0) {
         pos.y = Math.floor(nextY) + 1.0001;
         grounded = true;
+        if (isPlayer && this.isFlying) {
+          this.isFlying = false;
+        }
       }
       vel.y = 0;
     }
 
-    // X axis
     const nextX = pos.x + vel.x * dt;
     if (!collidesAt(nextX, pos.y + 0.02, pos.z)) {
       pos.x = nextX;
     } else if (!isPlayer && grounded && !collidesAt(nextX, pos.y + 1.05, pos.z)) {
-      // Auto-step 1 block for smooth NPC village navigation!
+      pos.y += 1.02;
+      pos.x = nextX;
+    } else if (isPlayer && grounded && !collidesAt(nextX, pos.y + 1.05, pos.z)) {
+      // Smooth mobile auto-step over 1-block curbs/stairs!
       pos.y += 1.02;
       pos.x = nextX;
     } else {
       vel.x = 0;
     }
 
-    // Z axis
     const nextZ = pos.z + vel.z * dt;
     if (!collidesAt(pos.x, pos.y + 0.02, nextZ)) {
       pos.z = nextZ;
     } else if (!isPlayer && grounded && !collidesAt(pos.x, pos.y + 1.05, nextZ)) {
+      pos.y += 1.02;
+      pos.z = nextZ;
+    } else if (isPlayer && grounded && !collidesAt(pos.x, pos.y + 1.05, nextZ)) {
       pos.y += 1.02;
       pos.z = nextZ;
     } else {
@@ -1618,13 +2177,12 @@ export class KCraftEngine {
   }
 
   private updateNpcs(dt: number): void {
-    // Night-time Dokkaebi spawning in Survival mode (gentle & fun, max 2 natural at night)
     const isNight = this.timeOfDay > 0.58 && this.timeOfDay < 0.92;
     if (this.started && isNight && this.gameMode === 'survival') {
       this.dokkaebiSpawnTimer -= dt;
       const hostileCount = this.npcs.filter((n) => n.preset.isHostile).length;
       if (this.dokkaebiSpawnTimer <= 0 && hostileCount < 2) {
-        this.dokkaebiSpawnTimer = 22;
+        this.dokkaebiSpawnTimer = 25;
         const dokkaebiPreset = KOREAN_CHARACTER_PRESETS.find((p) => p.id === 'dokkaebi');
         if (dokkaebiPreset) {
           const ang = Math.random() * Math.PI * 2;
@@ -1636,10 +2194,9 @@ export class KCraftEngine {
     }
 
     let closestFriendly: NpcEntity | null = null;
-    let closestDist = 4.2;
+    let closestDist = 4.5;
 
     for (const npc of this.npcs) {
-      // Natural eye blinking on EVERY Korean character!
       npc.blinkTimer -= dt;
       if (npc.blinkTimer <= 0) {
         npc.isBlinking = !npc.isBlinking;
@@ -1647,26 +2204,37 @@ export class KCraftEngine {
         npc.rig.setBlinking(npc.isBlinking);
       }
 
-      if (npc.hurtFlash > 0) {
-        npc.hurtFlash = Math.max(0, npc.hurtFlash - dt);
-      }
-      if (npc.attackCooldown > 0) {
-        npc.attackCooldown = Math.max(0, npc.attackCooldown - dt);
-      }
-      if (npc.swingAnim > 0) {
-        npc.swingAnim = Math.max(0, npc.swingAnim - dt * 4);
-      }
+      if (npc.hurtFlash > 0) npc.hurtFlash = Math.max(0, npc.hurtFlash - dt);
+      if (npc.attackCooldown > 0) npc.attackCooldown = Math.max(0, npc.attackCooldown - dt);
+      if (npc.swingAnim > 0) npc.swingAnim = Math.max(0, npc.swingAnim - dt * 4);
+      if (npc.greetCooldown > 0) npc.greetCooldown = Math.max(0, npc.greetCooldown - dt);
 
       const distToPlayer = npc.pos.distanceTo(this.playerPos);
 
       if (!npc.preset.isHostile && distToPlayer < closestDist) {
         closestDist = distToPlayer;
         closestFriendly = npc;
+
+        // Spontaneous animated greeting bubble when player approaches a Korean villager!
+        if (
+          this.started &&
+          this.activeModal === 'none' &&
+          distToPlayer < 3.4 &&
+          npc.greetCooldown <= 0
+        ) {
+          npc.greetCooldown = 28;
+          this.pushLiveChat({
+            senderFa: npc.preset.nameFa,
+            senderKo: npc.preset.nameKo,
+            roleFa: npc.preset.roleFa,
+            portraitUrl: npc.portraitUrl,
+            text: npc.preset.greetingFa,
+            durationMs: 4500,
+          });
+        }
       }
 
-      // AI Behavior
       if (npc.preset.isHostile) {
-        // Hostile Dokkaebi chases player!
         const dx = this.playerPos.x - npc.pos.x;
         const dz = this.playerPos.z - npc.pos.z;
         npc.targetYaw = Math.atan2(dx, dz);
@@ -1677,21 +2245,24 @@ export class KCraftEngine {
           npc.vel.x *= 0.8;
           npc.vel.z *= 0.8;
         }
-        if (distToPlayer <= 1.85 && npc.attackCooldown <= 0 && this.started && this.gameMode === 'survival') {
+        if (
+          distToPlayer <= 1.85 &&
+          npc.attackCooldown <= 0 &&
+          this.started &&
+          this.gameMode === 'survival'
+        ) {
           npc.attackCooldown = 1.4;
           npc.swingAnim = 1;
           this.health = Math.max(1, this.health - 2);
           soundFX.playSwordSwing();
-          this.showToast('دوکه‌بی ضربه زد! با شمشیر چوسان دفاع کن یا کیمباب بخور!');
+          this.showToast('دوکه‌بی ضربه زد! با شمشیر چوسان دفاع کن یا غذا بخور!');
         }
       } else {
-        // Friendly Korean Villager / Joseon Guard / Companion AI!
         const nearestHostile = this.npcs.find(
           (other) => other.preset.isHostile && other.pos.distanceTo(npc.pos) < 12
         );
 
         if ((npc.preset.id === 'jihoon' || npc.isFollowing) && nearestHostile) {
-          // Guard Ji-hoon & Companions heroically fight Dokkaebi!
           const dx = nearestHostile.pos.x - npc.pos.x;
           const dz = nearestHostile.pos.z - npc.pos.z;
           const d = Math.hypot(dx, dz);
@@ -1702,14 +2273,9 @@ export class KCraftEngine {
           } else if (npc.attackCooldown <= 0) {
             npc.attackCooldown = 0.95;
             npc.swingAnim = 1;
-            this.damageNpc(
-              nearestHostile,
-              6,
-              new THREE.Vector3(dx, 0, dz).normalize()
-            );
+            this.damageNpc(nearestHostile, 6, new THREE.Vector3(dx, 0, dz).normalize());
           }
         } else if (npc.isFollowing) {
-          // Companion follows player loyally!
           if (distToPlayer > 18) {
             const sy = this.world.getSurfaceY(this.playerPos.x + 1.5, this.playerPos.z + 1.5);
             npc.pos.set(this.playerPos.x + 1.5, sy + 0.1, this.playerPos.z + 1.5);
@@ -1728,12 +2294,10 @@ export class KCraftEngine {
             );
           }
         } else {
-          // Peaceful village stroll; look warmly at player when nearby!
           npc.aiTimer -= dt;
           if (npc.aiTimer <= 0) {
             npc.aiTimer = 2.0 + Math.random() * 3.5;
             npc.moving = Math.random() > 0.45;
-            // Gently bias wandering back toward the central plaza (48, 46)
             const distFromPlaza = Math.hypot(npc.pos.x - 48, npc.pos.z - 46);
             if (distFromPlaza > 22) {
               npc.targetYaw = Math.atan2(48 - npc.pos.x, 46 - npc.pos.z);
@@ -1745,17 +2309,15 @@ export class KCraftEngine {
           if (distToPlayer < 5.2 && this.started) {
             npc.vel.x *= 0.75;
             npc.vel.z *= 0.75;
-            const lookAtPlayerYaw = Math.atan2(
+            npc.targetYaw = Math.atan2(
               this.playerPos.x - npc.pos.x,
               this.playerPos.z - npc.pos.z
             );
-            npc.targetYaw = lookAtPlayerYaw;
           } else if (npc.moving) {
             const aheadX = Math.floor(npc.pos.x + Math.sin(npc.targetYaw) * 1.2);
             const aheadZ = Math.floor(npc.pos.z + Math.cos(npc.targetYaw) * 1.2);
             const aheadSurface = this.world.getSurfaceY(aheadX, aheadZ);
             if (aheadSurface <= WATER_LEVEL) {
-              // Avoid walking into pond water
               npc.targetYaw += Math.PI * 0.8;
               npc.vel.x = 0;
               npc.vel.z = 0;
@@ -1770,11 +2332,9 @@ export class KCraftEngine {
         }
       }
 
-      // Gravity & Voxel collision for NPC
       npc.vel.y = Math.max(-28, npc.vel.y - 22 * dt);
       this.moveEntityWithVoxelAABB(npc.pos, npc.vel, dt, 0.28, 1.75, false);
 
-      // Smooth yaw interpolation
       let diff = npc.targetYaw - npc.yaw;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
@@ -1796,7 +2356,13 @@ export class KCraftEngine {
       p.vel.y = Math.max(-16, p.vel.y - 18 * dt);
 
       const nextY = p.pos.y + p.vel.y * dt;
-      if (!this.world.isSolid(Math.floor(p.pos.x), Math.floor(nextY - 0.15), Math.floor(p.pos.z))) {
+      if (
+        !this.world.isSolid(
+          Math.floor(p.pos.x),
+          Math.floor(nextY - 0.15),
+          Math.floor(p.pos.z)
+        )
+      ) {
         p.pos.y = nextY;
       } else {
         p.vel.y = 0;
@@ -1806,10 +2372,13 @@ export class KCraftEngine {
       p.pos.x += p.vel.x * dt;
       p.pos.z += p.vel.z * dt;
 
-      p.mesh.position.set(p.pos.x, p.pos.y + Math.sin(this.elapsedTotal * 4 + i) * 0.08, p.pos.z);
+      p.mesh.position.set(
+        p.pos.x,
+        p.pos.y + Math.sin(this.elapsedTotal * 4 + i) * 0.08,
+        p.pos.z
+      );
       p.mesh.rotation.y += dt * 2.4;
 
-      // Magnetic pickup toward player
       const playerCenter = new THREE.Vector3(
         this.playerPos.x,
         this.playerPos.y + 0.9,
@@ -1887,15 +2456,14 @@ export class KCraftEngine {
   }
 
   private updateDayNightCycle(dt: number): void {
-    // 1 full cycle = ~320 seconds
-    this.timeOfDay += dt / 320;
+    this.timeOfDay += dt / 340;
     if (this.timeOfDay >= 1) {
       this.timeOfDay -= 1;
       this.dayCount++;
     }
 
     const sunAngle = this.timeOfDay * Math.PI * 2;
-    const sunElev = Math.sin(sunAngle); // >0 day, <0 night
+    const sunElev = Math.sin(sunAngle);
 
     const centerX = 48;
     const centerZ = 48;
@@ -1914,9 +2482,15 @@ export class KCraftEngine {
 
     this.sunLight.position.copy(this.sunMesh.position);
 
-    const daySky = new THREE.Color(0x80c7f9);
+    const daySky =
+      this.worldBiome === 'jeju_island'
+        ? new THREE.Color(0x5ec8f8)
+        : new THREE.Color(0x80c7f9);
     const sunsetSky = new THREE.Color(0xeb9872);
-    const nightSky = new THREE.Color(0x11192e);
+    const nightSky =
+      this.worldBiome === 'seoul_night'
+        ? new THREE.Color(0x141736)
+        : new THREE.Color(0x11192e);
 
     let skyColor: THREE.Color;
     if (sunElev > 0.22) {
@@ -1925,13 +2499,16 @@ export class KCraftEngine {
       this.ambientLight.intensity = 0.64;
     } else if (sunElev > -0.14) {
       const t = (sunElev + 0.14) / 0.36;
-      skyColor = nightSky.clone().lerp(sunsetSky, Math.sin(t * Math.PI)).lerp(daySky, t);
+      skyColor = nightSky
+        .clone()
+        .lerp(sunsetSky, Math.sin(t * Math.PI))
+        .lerp(daySky, t);
       this.sunLight.intensity = 0.25 + t * 0.67;
-      this.ambientLight.intensity = 0.36 + t * 0.28;
+      this.ambientLight.intensity = 0.38 + t * 0.26;
     } else {
       skyColor = nightSky;
-      this.sunLight.intensity = 0.18;
-      this.ambientLight.intensity = 0.38;
+      this.sunLight.intensity = 0.22;
+      this.ambientLight.intensity = this.worldBiome === 'seoul_night' ? 0.52 : 0.4;
     }
 
     (this.scene.background as THREE.Color).copy(skyColor);
@@ -1955,6 +2532,7 @@ export class KCraftEngine {
     return {
       entityId: npc.id,
       preset: npc.preset,
+      portraitUrl: npc.portraitUrl,
       isFollowing: npc.isFollowing,
       hp: Math.ceil(npc.hp),
       maxHp: npc.maxHp,
@@ -1963,17 +2541,32 @@ export class KCraftEngine {
 
   public emitHudState(): void {
     const isNight = this.timeOfDay > 0.56 && this.timeOfDay < 0.94;
-    let timeLabelFa = 'روز بهاری ☀️';
-    if (this.timeOfDay >= 0.46 && this.timeOfDay <= 0.56) timeLabelFa = 'غروب طلایی سئول 🌇';
-    else if (isNight) timeLabelFa = 'شب فانوس‌ها 🏮';
-    else if (this.timeOfDay >= 0.94 || this.timeOfDay < 0.08) timeLabelFa = 'طلوع صبحگاهی 🌸';
+    let timeLabelFa = 'روز بهاری';
+    if (this.timeOfDay >= 0.46 && this.timeOfDay <= 0.56) timeLabelFa = 'غروب طلایی';
+    else if (isNight) timeLabelFa = 'شب فانوس‌ها';
+    else if (this.timeOfDay >= 0.94 || this.timeOfDay < 0.08) timeLabelFa = 'طلوع صبحگاهی';
 
     const nearby = this.npcs.find((n) => n.id === this.nearbyNpcId);
     const dialogNpc = this.npcs.find((n) => n.id === this.activeDialogNpcId);
 
+    const radarDots: RadarDot[] = this.npcs
+      .map((n) => ({
+        id: n.id,
+        dx: n.pos.x - this.playerPos.x,
+        dz: n.pos.z - this.playerPos.z,
+        kind: n.preset.isHostile
+          ? ('hostile' as const)
+          : n.isFollowing
+          ? ('companion' as const)
+          : ('villager' as const),
+        nameFa: n.preset.nameFa,
+      }))
+      .filter((d) => Math.hypot(d.dx, d.dz) <= 32);
+
     this.onHudUpdate({
       started: this.started,
       activeModal: this.activeModal,
+      worldBiome: this.worldBiome,
       health: Math.round(this.health),
       maxHealth: this.maxHealth,
       hunger: Math.round(this.hunger),
@@ -1983,6 +2576,8 @@ export class KCraftEngine {
       inventory: this.inventory.map((s) => (s ? { ...s } : null)),
       cameraMode: this.cameraMode,
       gameMode: this.gameMode,
+      isFlying: this.isFlying,
+      sprinting: this.mobileSprinting,
       timeLabelFa,
       isNight,
       dayCount: this.dayCount,
@@ -1991,11 +2586,19 @@ export class KCraftEngine {
         y: Math.floor(this.playerPos.y),
         z: Math.floor(this.playerPos.z),
       },
+      playerYaw: this.playerYaw,
       fps: this.fps,
       playerNameFa: this.playerPreset.nameFa,
       playerNameKo: this.playerPreset.nameKo,
       playerFace: { ...this.playerFace },
       playerPortraitUrl: this.playerPortraitUrl,
+      playerLevel: this.playerLevel,
+      playerXp: this.playerXp,
+      nextLevelXp: this.getNextLevelXp(),
+      goldCoins: this.goldCoins,
+      quests: this.quests.map((q) => ({ ...q })),
+      liveChatFeed: [...this.liveChatFeed],
+      radarDots,
       nearbyNpc: this.toNpcSnapshot(nearby),
       activeDialogNpc: this.toNpcSnapshot(dialogNpc),
       companionsCount: this.npcs.filter((n) => n.isFollowing).length,
@@ -2012,6 +2615,10 @@ export class KCraftEngine {
       targetBlockNameFa: this.currentRayHit
         ? getItemMeta(this.currentRayHit.blockId).nameFa
         : null,
+      controlStyle: this.controlStyle,
+      lookSensitivity: this.lookSensitivity,
+      musicEnabled: soundFX.musicEnabled,
+      sfxEnabled: soundFX.sfxEnabled,
     });
   }
 

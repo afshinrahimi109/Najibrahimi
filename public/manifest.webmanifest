@@ -1,0 +1,27 @@
+{
+  "name": "کی‌کرفت | ماین‌کرفت کره‌ای (K-Craft)",
+  "short_name": "کی‌کرفت",
+  "description": "بازی شبیه‌ساز سه‌بعدی ماین‌کرفت با شخصیت‌ها و معماری اصیل کره‌ای",
+  "lang": "fa",
+  "dir": "rtl",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "any",
+  "background_color": "#0d1422",
+  "theme_color": "#131c2e",
+  "icons": [
+    {
+      "src": "./icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

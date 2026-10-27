@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { KOREAN_CHARACTER_PRESETS } from '../character/KoreanPresets';
 import { renderCharacterPortraitDataUrl } from '../character/KoreanSkinGenerator';
 import { CharacterPreset, GameMode, KoreanFaceConfig } from '../types/game';
@@ -24,6 +24,21 @@ export const StartScreen: React.FC<Props> = ({
   onOpenCustomizer,
   onStartGame,
 }) => {
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const isWeb =
+    typeof window !== 'undefined' &&
+    window.location.hostname !== 'kcraft.local' &&
+    (window.location.protocol === 'http:' || window.location.protocol === 'https:');
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+    window.addEventListener('beforeinstallprompt', handler);
+    return () => window.removeEventListener('beforeinstallprompt', handler);
+  }, []);
+
   const playable = React.useMemo(
     () => KOREAN_CHARACTER_PRESETS.filter((p) => p.isPlayable),
     []
@@ -46,6 +61,13 @@ export const StartScreen: React.FC<Props> = ({
     playable.find((p) => p.nameFa === selectedNameFa)?.bioFa ??
     'شخصیت اختصاصی شما با چهره و پوشش کره‌ای آماده ماجراجویی در دنیای بلوکی است!';
 
+  const handleInstallPwa = async () => {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    await deferredPrompt.userChoice.catch(() => {});
+    setDeferredPrompt(null);
+  };
+
   return (
     <div className="start-screen-overlay">
       <div className="start-card">
@@ -56,6 +78,23 @@ export const StartScreen: React.FC<Props> = ({
             شبیه‌ساز سه‌بعدی ماین‌کرفت با معماری عمارت‌های هانوک، شکوفه‌های گیلاس و شخصیت‌هایی که
             همگی چهره و پوشش اصیل کره‌ای دارند
           </p>
+
+          {isWeb && (
+            <div className="install-download-bar">
+              <a
+                href="./K-Craft-Korea.apk"
+                download="K-Craft-Korea.apk"
+                className="apk-download-btn"
+              >
+                📥 دانلود فایل نصبی اندروید (APK)
+              </a>
+              {deferredPrompt && (
+                <button className="pwa-install-btn" onClick={handleInstallPwa}>
+                  📲 نصب مستقیم اپلیکیشن
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="start-body-grid">
@@ -97,7 +136,7 @@ export const StartScreen: React.FC<Props> = ({
         </div>
 
         <div className="start-controls-strip">
-          <span>حرکت: WASD + Space</span>
+          <span>حرکت: WASD + Space (یا لمس صفحه)</span>
           <span>کندن بلوک / حمله: کلیک چپ</span>
           <span>گذاشتن بلوک / خوردن کیمباب: کلیک راست (یا R)</span>
           <span>چهره خودت (سوم‌شخص): V</span>

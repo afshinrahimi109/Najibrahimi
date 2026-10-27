@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { soundFX } from '../audio/SoundFX';
 import { getItemMeta } from '../data/items';
 import { HudState } from '../types/game';
+import { MobileControls } from './MobileControls';
+import { LiveDialogueStream } from './LiveDialogueStream';
 
 interface Props {
   hud: HudState;
@@ -20,6 +22,12 @@ interface Props {
   onPrimaryTap: () => void;
   onSecondaryTap: () => void;
   onRotateCamera: (dyaw: number, dpitch: number) => void;
+  onSetFlyDown: (down: boolean) => void;
+  onSetJumping: (jumping: boolean) => void;
+  onToggleFlight: () => void;
+  onToggleSprint: () => void;
+  onQuickGreet: (npcId: string) => void;
+  onSetControlStyle: (style: HudState['controlStyle']) => void;
 }
 
 export const GameHud: React.FC<Props> = ({
@@ -39,10 +47,19 @@ export const GameHud: React.FC<Props> = ({
   onPrimaryTap,
   onSecondaryTap,
   onRotateCamera,
+  onSetFlyDown,
+  onSetJumping,
+  onToggleFlight,
+  onToggleSprint,
+  onQuickGreet,
+  onSetControlStyle,
 }) => {
   const [muted, setMuted] = useState(soundFX.muted);
   const [showTouchPad, setShowTouchPad] = useState(
-    typeof window !== 'undefined' && ('ontouchstart' in window || window.innerWidth < 820)
+    typeof window !== 'undefined' &&
+      ('ontouchstart' in window ||
+        window.location.hostname === 'kcraft.local' ||
+        window.innerWidth < 900)
   );
 
   const activeSlot = hud.hotbar[hud.hotbarIndex];
@@ -190,78 +207,42 @@ export const GameHud: React.FC<Props> = ({
       {/* Toast Notification */}
       {hud.toastMessage && <div className="hud-toast">{hud.toastMessage}</div>}
 
-      {/* Optional On-Screen Touch / Mouse Controls */}
+      {/* Smart touch control zones: analog stick or sculpted 3D D-pad + context actions */}
       {showTouchPad && hud.activeModal === 'none' && (
-        <div className="touch-controls-layer">
-          <div className="dpad-cluster">
-            <button
-              className="dpad-btn up"
-              onMouseDown={() => onMobileMove(0, 1, false)}
-              onMouseUp={() => onMobileMove(0, 0, false)}
-              onTouchStart={() => onMobileMove(0, 1, false)}
-              onTouchEnd={() => onMobileMove(0, 0, false)}
-            >
-              ▲
-            </button>
-            <div className="dpad-mid-row">
-              <button
-                className="dpad-btn"
-                onMouseDown={() => onMobileMove(1, 0, false)}
-                onMouseUp={() => onMobileMove(0, 0, false)}
-                onTouchStart={() => onMobileMove(1, 0, false)}
-                onTouchEnd={() => onMobileMove(0, 0, false)}
-              >
-                ▶
-              </button>
-              <button
-                className="dpad-btn jump"
-                onMouseDown={() => onMobileMove(0, 0, true)}
-                onMouseUp={() => onMobileMove(0, 0, false)}
-                onTouchStart={() => onMobileMove(0, 0, true)}
-                onTouchEnd={() => onMobileMove(0, 0, false)}
-              >
-                پرش
-              </button>
-              <button
-                className="dpad-btn"
-                onMouseDown={() => onMobileMove(-1, 0, false)}
-                onMouseUp={() => onMobileMove(0, 0, false)}
-                onTouchStart={() => onMobileMove(-1, 0, false)}
-                onTouchEnd={() => onMobileMove(0, 0, false)}
-              >
-                ◀
-              </button>
-            </div>
-            <button
-              className="dpad-btn down"
-              onMouseDown={() => onMobileMove(0, -1, false)}
-              onMouseUp={() => onMobileMove(0, 0, false)}
-              onTouchStart={() => onMobileMove(0, -1, false)}
-              onTouchEnd={() => onMobileMove(0, 0, false)}
-            >
-              ▼
-            </button>
-          </div>
+        <MobileControls
+          controlStyle={hud.controlStyle}
+          isFlying={hud.isFlying}
+          sprinting={hud.sprinting}
+          secondaryActionLabel={activeMeta?.category === 'food' ? 'خوردن' : activeMeta?.isBlock ? 'گذاشتن' : 'استفاده'}
+          onMoveVector={(mx, mz) => onMobileMove(mx, mz, false)}
+          onSetJump={onSetJumping}
+          onSetFlyDown={onSetFlyDown}
+          onPrimaryTap={onPrimaryTap}
+          onSecondaryTap={onSecondaryTap}
+          onToggleSprint={onToggleSprint}
+          onToggleFlight={onToggleFlight}
+        />
+      )}
 
-          <div className="touch-actions-cluster">
-            <div className="look-mini-row">
-              <button className="dpad-btn" onClick={() => onRotateCamera(0.28, 0)}>
-                چرخش راست ↻
-              </button>
-              <button className="dpad-btn" onClick={() => onRotateCamera(-0.28, 0)}>
-                ↺ چرخش چپ
-              </button>
-            </div>
-            <div className="action-pair-row">
-              <button className="act-btn break" onClick={onPrimaryTap}>
-                ⛏️ شکستن / ضربه
-              </button>
-              <button className="act-btn place" onClick={onSecondaryTap}>
-                🧱 گذاشتن / خوردن
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* Villager dialogue bubbles intelligently enter and leave without covering controls */}
+      {hud.activeModal === 'none' && (
+        <LiveDialogueStream
+          messages={hud.liveChatFeed}
+          nearbyNpc={hud.nearbyNpc}
+          onQuickGreetNearby={(npc) => onQuickGreet(npc.entityId)}
+          onOpenFullDialog={onOpenNearbyNpc}
+        />
+      )}
+
+      {showTouchPad && hud.activeModal === 'none' && (
+        <button
+          className="control-mode-switch"
+          type="button"
+          title="تغییر روش کنترل حرکت"
+          onClick={() => onSetControlStyle(hud.controlStyle === 'joystick' ? 'dpad' : 'joystick')}
+        >
+          {hud.controlStyle === 'joystick' ? '◈ جوی‌استیک' : '✣ جهت‌نما'}
+        </button>
       )}
 
       {/* Bottom Classic 9-Slot Minecraft Hotbar */}

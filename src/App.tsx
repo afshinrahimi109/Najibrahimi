@@ -67,6 +67,12 @@ export const App: React.FC = () => {
           onPrimaryTap={() => engine.triggerPrimaryActionTap()}
           onSecondaryTap={() => engine.triggerSecondaryAction()}
           onRotateCamera={(dy, dp) => engine.rotateCameraBy(dy, dp)}
+          onSetFlyDown={(down) => { engine.mobileFlyDown = down; }}
+          onSetJumping={(jumping) => { engine.mobileJumping = jumping; }}
+          onToggleFlight={() => engine.toggleFlight()}
+          onToggleSprint={() => engine.toggleMobileSprint()}
+          onQuickGreet={(npcId) => engine.sendQuickChatToNpc(npcId, 'سلام! خوشحالم می‌بینمت.', 'سلام دوست من! به روستای ما خوش آمدی.')}
+          onSetControlStyle={(style) => engine.setControlStyle(style)}
         />
       )}
 

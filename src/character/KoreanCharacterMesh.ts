@@ -518,10 +518,12 @@ export function buildHeldItemMesh(
     return group;
   }
 
-  if (itemId === 'tteokbokki') {
+  if (itemId === 'tteokbokki' || itemId === 'bingsoo' || itemId === 'honey_tteok') {
+    const bowlColor =
+      itemId === 'bingsoo' ? 0xff75a0 : itemId === 'honey_tteok' ? 0xf5c87a : 0xd93829;
     const bowl = new THREE.Mesh(
       new THREE.CylinderGeometry(0.11, 0.075, 0.1, 12),
-      new THREE.MeshLambertMaterial({ color: 0xd93829 })
+      new THREE.MeshLambertMaterial({ color: bowlColor })
     );
     bowl.position.set(0, 0, 0.12);
     group.add(bowl);

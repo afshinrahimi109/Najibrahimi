@@ -38,6 +38,10 @@ export const TILE_INDEX = {
   TNT_SIDE: 27,
   TNT_TOP: 28,
   TNT_BOTTOM: 29,
+  NEON_CYAN: 30,
+  NEON_MAGENTA: 31,
+  BASALT: 32,
+  GOLD_BLOCK: 33,
 };
 
 // deterministic pseudo-random for crisp repeatable pixel noise
@@ -432,6 +436,56 @@ export function getBlockTextureSystem(): BlockTextureSystem {
     }
   });
 
+  // 30. NEON_CYAN (Seoul Cyber Neon)
+  drawPixelTile(ctx, TILE_INDEX.NEON_CYAN, (px) => {
+    for (let y = 0; y < 16; y++) {
+      for (let x = 0; x < 16; x++) {
+        const border = x === 0 || x === 15 || y === 0 || y === 15;
+        const innerRing = x === 2 || x === 13 || y === 2 || y === 13;
+        if (border) px(x, y, '#14384E');
+        else if (innerRing) px(x, y, '#99FFFF');
+        else px(x, y, shade('#22E6E2', Math.floor((hash2(x, y, 301) - 0.5) * 18)));
+      }
+    }
+  });
+
+  // 31. NEON_MAGENTA (K-Pop Pink Neon)
+  drawPixelTile(ctx, TILE_INDEX.NEON_MAGENTA, (px) => {
+    for (let y = 0; y < 16; y++) {
+      for (let x = 0; x < 16; x++) {
+        const border = x === 0 || x === 15 || y === 0 || y === 15;
+        const innerRing = x === 2 || x === 13 || y === 2 || y === 13;
+        if (border) px(x, y, '#3D1536');
+        else if (innerRing) px(x, y, '#FFC4EA');
+        else px(x, y, shade('#FF4DB8', Math.floor((hash2(x, y, 302) - 0.5) * 18)));
+      }
+    }
+  });
+
+  // 32. BASALT (Jeju Volcanic Dark Columnar Stone)
+  drawPixelTile(ctx, TILE_INDEX.BASALT, (px) => {
+    for (let y = 0; y < 16; y++) {
+      for (let x = 0; x < 16; x++) {
+        const r = hash2(x, y, 303);
+        const pore = r > 0.88;
+        px(x, y, pore ? '#1C2026' : shade('#363C47', Math.floor((r - 0.5) * 20)));
+      }
+    }
+  });
+
+  // 33. GOLD_BLOCK (Royal Joseon Gold Block)
+  drawPixelTile(ctx, TILE_INDEX.GOLD_BLOCK, (px) => {
+    for (let y = 0; y < 16; y++) {
+      for (let x = 0; x < 16; x++) {
+        const border = x === 0 || x === 15 || y === 0 || y === 15;
+        const diag = (x + y) % 7 === 0;
+        if (border) px(x, y, '#B88418');
+        else if (diag) px(x, y, '#FFF2A6');
+        else px(x, y, shade('#F5C438', Math.floor((hash2(x, y, 304) - 0.5) * 20)));
+      }
+    }
+  });
+
   const atlasTexture = new THREE.CanvasTexture(atlasCanvas);
   atlasTexture.colorSpace = THREE.SRGBColorSpace;
   atlasTexture.magFilter = THREE.NearestFilter;
@@ -511,6 +565,14 @@ export function getBlockTextureSystem(): BlockTextureSystem {
           : faceDir === 'bottom'
           ? TILE_INDEX.TNT_BOTTOM
           : TILE_INDEX.TNT_SIDE;
+      case BLOCK_IDS.NEON_CYAN:
+        return TILE_INDEX.NEON_CYAN;
+      case BLOCK_IDS.NEON_MAGENTA:
+        return TILE_INDEX.NEON_MAGENTA;
+      case BLOCK_IDS.BASALT:
+        return TILE_INDEX.BASALT;
+      case BLOCK_IDS.GOLD_BLOCK:
+        return TILE_INDEX.GOLD_BLOCK;
       default:
         return TILE_INDEX.STONE;
     }
@@ -591,8 +653,8 @@ function generateAllItemIcons(
 ): Record<string, string> {
   const urls: Record<string, string> = {};
 
-  // Isometric 3D block icon renderer for all blocks 1..22!
-  for (let b = 1; b <= 22; b++) {
+  // Isometric 3D block icon renderer for all blocks 1..26!
+  for (let b = 1; b <= 26; b++) {
     const c = document.createElement('canvas');
     c.width = 64;
     c.height = 64;
@@ -805,6 +867,45 @@ function generateAllItemIcons(
   makeGemOrIngot('iron_ingot', '#D8E0EA', '#FFFFFF', false);
   makeGemOrIngot('gold_ingot', '#F5C438', '#FFF4A3', false);
   makeGemOrIngot('diamond', '#32E6DF', '#C9FFFF', true);
+
+  urls['bingsoo'] = makeCustomIcon((ctx) => {
+    // Strawberry Bingsu shaved ice dessert!
+    ctx.fillStyle = '#FFF7FA';
+    ctx.beginPath();
+    ctx.arc(32, 28, 17, Math.PI, 0);
+    ctx.fill();
+    ctx.fillStyle = '#FF5C8D';
+    ctx.beginPath();
+    ctx.arc(26, 22, 5, 0, Math.PI * 2);
+    ctx.arc(38, 23, 5, 0, Math.PI * 2);
+    ctx.arc(32, 16, 5.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#48C4D8';
+    ctx.beginPath();
+    ctx.moveTo(12, 28);
+    ctx.quadraticCurveTo(32, 52, 52, 28);
+    ctx.closePath();
+    ctx.fill();
+  });
+
+  urls['honey_tteok'] = makeCustomIcon((ctx) => {
+    // Pastel Korean Honey Rice Cakes (꿀떡)!
+    ctx.fillStyle = '#5C3D28';
+    ctx.beginPath();
+    ctx.ellipse(32, 42, 22, 8, 0, 0, Math.PI * 2);
+    ctx.fill();
+    const cakes = [
+      { x: 22, y: 34, c: '#FFB3C6' },
+      { x: 40, y: 34, c: '#B8E8B0' },
+      { x: 31, y: 26, c: '#FFF5E1' },
+    ];
+    for (const k of cakes) {
+      ctx.fillStyle = k.c;
+      ctx.beginPath();
+      ctx.ellipse(k.x, k.y, 9, 6.5, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  });
 
   return urls;
 }

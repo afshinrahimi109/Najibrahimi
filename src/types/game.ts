@@ -21,7 +21,11 @@ export type BlockId =
   | 19 // glass
   | 20 // brick (화강암 벽돌)
   | 21 // crafting_table
-  | 22; // tnt
+  | 22 // tnt
+  | 23 // neon_cyan (서울 네온)
+  | 24 // neon_magenta (케이팝 네온)
+  | 25 // basalt (제주 현무암)
+  | 26; // gold_block (황금 블록)
 
 export type ToolOrItemId =
   | 'diamond_pickaxe'
@@ -29,6 +33,8 @@ export type ToolOrItemId =
   | 'joseon_sword'
   | 'kimbap'
   | 'tteokbokki'
+  | 'bingsoo'
+  | 'honey_tteok'
   | 'coal'
   | 'iron_ingot'
   | 'gold_ingot'
@@ -150,13 +156,33 @@ export interface CharacterPreset {
   trades: TradeOffer[];
 }
 
+export type WorldBiomeId = 'hanok_valley' | 'seoul_night' | 'jeju_island';
+export type ControlStyle = 'joystick' | 'dpad';
+export type MenuPageId =
+  | 'hub'
+  | 'worlds'
+  | 'face_studio'
+  | 'villagers'
+  | 'quests'
+  | 'settings';
+
 export type CameraMode = 'first_person' | 'third_back' | 'third_front';
 export type GameMode = 'survival' | 'creative';
-export type ActiveModal = 'start' | 'none' | 'inventory' | 'customizer' | 'npc_dialog' | 'help';
+export type ActiveModal =
+  | 'start'
+  | 'none'
+  | 'pause'
+  | 'inventory'
+  | 'customizer'
+  | 'npc_dialog'
+  | 'quests'
+  | 'settings'
+  | 'help';
 
 export interface NpcStatusSnapshot {
   entityId: string;
   preset: CharacterPreset;
+  portraitUrl: string;
   isFollowing: boolean;
   hp: number;
   maxHp: number;
@@ -170,9 +196,44 @@ export interface CraftingRecipe {
   ingredients: Array<{ id: InventoryItemId; count: number }>;
 }
 
+export interface LiveChatMessage {
+  id: string;
+  senderFa: string;
+  senderKo: string;
+  roleFa: string;
+  portraitUrl: string;
+  text: string;
+  accentColor: string;
+  createdAt: number;
+  durationMs: number;
+}
+
+export interface RadarDot {
+  id: string;
+  dx: number; // relative X from player
+  dz: number; // relative Z from player
+  kind: 'villager' | 'companion' | 'hostile';
+  nameFa: string;
+}
+
+export interface QuestProgress {
+  id: string;
+  titleFa: string;
+  descFa: string;
+  category: 'mine' | 'build' | 'social' | 'combat' | 'craft';
+  current: number;
+  target: number;
+  rewardXp: number;
+  rewardCoins: number;
+  rewardItemId: InventoryItemId;
+  rewardItemCount: number;
+  claimed: boolean;
+}
+
 export interface HudState {
   started: boolean;
   activeModal: ActiveModal;
+  worldBiome: WorldBiomeId;
   health: number;
   maxHealth: number;
   hunger: number;
@@ -182,15 +243,25 @@ export interface HudState {
   inventory: Array<InventorySlot | null>;
   cameraMode: CameraMode;
   gameMode: GameMode;
+  isFlying: boolean;
+  sprinting: boolean;
   timeLabelFa: string;
   isNight: boolean;
   dayCount: number;
   coords: { x: number; y: number; z: number };
+  playerYaw: number;
   fps: number;
   playerNameFa: string;
   playerNameKo: string;
   playerFace: KoreanFaceConfig;
   playerPortraitUrl: string;
+  playerLevel: number;
+  playerXp: number;
+  nextLevelXp: number;
+  goldCoins: number;
+  quests: QuestProgress[];
+  liveChatFeed: LiveChatMessage[];
+  radarDots: RadarDot[];
   nearbyNpc: NpcStatusSnapshot | null;
   activeDialogNpc: NpcStatusSnapshot | null;
   companionsCount: number;
@@ -202,4 +273,8 @@ export interface HudState {
   toastMessage: string | null;
   breakingProgress: number; // 0..1
   targetBlockNameFa: string | null;
+  controlStyle: ControlStyle;
+  lookSensitivity: number; // 0.5 .. 2.0
+  musicEnabled: boolean;
+  sfxEnabled: boolean;
 }
