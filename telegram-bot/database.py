@@ -57,6 +57,22 @@ class DraftStore:
                 "CREATE INDEX IF NOT EXISTS idx_drafts_owner_created "
                 "ON drafts(owner_id, created_at DESC)"
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reminders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_id INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    due_at TEXT NOT NULL,
+                    delivered INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_reminders_due "
+                "ON reminders(delivered, due_at)"
+            )
 
     def save_draft(
         self,
@@ -122,3 +138,37 @@ class DraftStore:
                 (int(draft_id), int(owner_id)),
             ).fetchone()
         return dict(row) if row is not None else None
+
+    def mark_published(self, draft_id: int, *, owner_id: int) -> bool:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "UPDATE drafts SET status = 'published' WHERE id = ? AND owner_id = ? AND status = 'draft'",
+                (int(draft_id), int(owner_id)),
+            )
+        return cursor.rowcount == 1
+
+    def add_reminder(self, *, owner_id: int, text: str, due_at: str) -> int:
+        text = text.strip()
+        if not text or not due_at:
+            raise ValueError("reminder text and due time must not be empty")
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO reminders (owner_id, text, due_at) VALUES (?, ?, ?)",
+                (int(owner_id), text, due_at),
+            )
+            return int(cursor.lastrowid)
+
+    def due_reminders(self, *, now: str) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT id, owner_id, text, due_at FROM reminders WHERE delivered = 0 AND due_at <= ? ORDER BY due_at LIMIT 100",
+                (now,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_reminder_delivered(self, reminder_id: int) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                "UPDATE reminders SET delivered = 1 WHERE id = ? AND delivered = 0",
+                (int(reminder_id),),
+            )

@@ -56,6 +56,22 @@ class DraftStoreTests(unittest.TestCase):
                 model="test-model",
             )
 
+    def test_published_draft_cannot_be_marked_twice(self):
+        saved = self.store.save_draft(
+            owner_id=1234, topic="موضوع", angle="زاویه", content="متن", model="test-model"
+        )
+        self.assertTrue(self.store.mark_published(saved["id"], owner_id=1234))
+        self.assertFalse(self.store.mark_published(saved["id"], owner_id=1234))
+        self.assertEqual(self.store.get_draft(saved["id"], owner_id=1234)["status"], "published")
+
+    def test_reminders_are_persisted_and_due_items_can_be_marked(self):
+        reminder_id = self.store.add_reminder(
+            owner_id=1234, text="یادآوری", due_at="2026-01-01T00:00:00Z"
+        )
+        self.assertEqual(len(self.store.due_reminders(now="2026-01-01T00:00:01Z")), 1)
+        self.store.mark_reminder_delivered(reminder_id)
+        self.assertEqual(self.store.due_reminders(now="2026-01-01T00:00:01Z"), [])
+
     def test_list_is_newest_first_and_limit_is_bounded(self):
         first = self.store.save_draft(
             owner_id=1234,
