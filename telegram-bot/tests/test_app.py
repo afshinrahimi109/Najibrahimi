@@ -72,7 +72,7 @@ class AppFeatureTests(unittest.TestCase):
                     "note", "notes", "notedel", "todo", "remind", "reminders",
                     "cancelreminder", "search", "summarize", "mission", "missions",
                     "mission_result", "post", "reel", "image", "video", "publish",
-                    "schedulepost", "scheduledposts", "cancelscheduled",
+                    "schedulepost", "scheduledposts", "cancelscheduled", "socialpublish",
                 }.issubset(registered)
             )
             self.assertIsNotNone(application.job_queue)

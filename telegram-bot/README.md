@@ -53,7 +53,10 @@ Holo Agent برای استفادهٔ شخصی از تلگرام طراحی شد�
 - `/drafts` و `/draft <شناسه>` — فهرست و نمایش پیش‌نویس‌ها
 - `/publish <شناسه>` — انتشار صریح یک پیش‌نویس ذخیره‌شده در کانال (فقط اگر کانال تنظیم و بات مدیر باشد)
 - `/schedulepost <شناسه> <زمان>`، `/scheduledposts`، `/cancelscheduled <شناسه>` — زمان‌بندی، دیدن و لغو انتشار در کانال تلگرام؛ نمونه: `/schedulepost 4 2h`
-- شبکه‌های اجتماعی غیر از کانال تلگرام هنوز به اتصال API/OAuth و دسترسی‌های خودشان نیاز دارند؛ هیچ راه امنی برای دورزدن ورود یا مجوز پلتفرم‌ها وجود ندارد.
+- `/socialpublish facebook <متن>` و `/socialpublish facebook-image <لینک عکس HTTPS> | <کپشن>` — انتشار فوری در Facebook Page
+- `/socialpublish instagram <لینک عمومی عکس JPEG با HTTPS> | <کپشن>` — انتشار فوری عکس تکی در حساب حرفه‌ای Instagram
+- انتشار Meta فقط پس از ساخت/تنظیم برنامه در Meta for Developers و قرار دادن دسترسی‌های رسمی در فایل محلی `.env` کار می‌کند: `FACEBOOK_PAGE_ID` و `FACEBOOK_PAGE_ACCESS_TOKEN` برای Facebook؛ `INSTAGRAM_ACCOUNT_ID` و `INSTAGRAM_ACCESS_TOKEN` برای Instagram Login. برای Facebook مجوز `pages_manage_posts` لازم است ([راهنمای Meta](https://developers.facebook.com/docs/graph-api/reference/page/feed/))؛ برای Instagram Login حساب Business/Creator و مجوزهای `instagram_business_basic` و `instagram_business_content_publish` لازم‌اند ([راهنمای انتشار Meta](https://developers.facebook.com/documentation/instagram-platform/content-publishing)). بات این اطلاعات را در چت نمی‌خواهد و خودش OAuth/ورود Meta را انجام نمی‌دهد؛ توکن‌ها را فقط در دستگاه خودت تنظیم کن. Instagram باید عکس JPEG با لینک عمومی HTTPS داشته باشد؛ این نسخه هنوز میزبان عمومی فایل ایجاد نمی‌کند و ویدیو/Carousel در Meta را منتشر نمی‌کند.
+- انتشار Meta با دستور بالا فوری و مستقیم است؛ زمان‌بندی موجود فقط برای کانال تلگرام است. دسترسی‌های رسمی، تأیید برنامه، مجوزهای حساب و محدودیت‌های Meta همچنان اعمال می‌شوند.
 - `/remind <زمان> <متن>` — یادآوری ماندگار؛ نمونه‌ها: `/remind 30m تماس با دوست`، `/remind 2h جلسه`، `/remind ۳۰ دقیقه تماس با دوست`
 - `/reminders` و `/cancelreminder <شناسه>` — دیدن یا لغو یادآوری‌های درانتظار
 - `/status` — وضعیت سرویس‌ها، تعداد یادداشت‌ها، کارهای باز و پیش‌نویس‌ها

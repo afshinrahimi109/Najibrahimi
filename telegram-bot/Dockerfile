@@ -12,6 +12,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
 COPY requirements.txt ./
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
-COPY app.py database.py holo.py agents.py ./
+COPY app.py database.py holo.py agents.py social.py ./
 
 CMD ["python", "app.py"]

@@ -20,6 +20,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from agents import run_specialist_mission
 from database import DraftStore
+from social import SocialPublishError, publish_facebook_page_post, publish_instagram_image
 from holo import (HoloError, chat_completion, clean_intent_text, format_search_results, generate_image, generate_motion_video,
                   gemini_completion, gemini_transcribe, pollinations_completion, search_web, transcribe_audio)
 
@@ -42,6 +43,11 @@ class BotConfig:
     telegram_channel_id: str = ""
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
+    facebook_page_id: str = ""
+    facebook_page_access_token: str = ""
+    instagram_account_id: str = ""
+    instagram_access_token: str = ""
+    meta_graph_api_version: str = "v26.0"
 
 
 class GenerationError(Exception):
@@ -105,6 +111,11 @@ def load_config() -> BotConfig:
         telegram_channel_id=os.getenv("TELEGRAM_CHANNEL_ID", "").strip(),
         gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip(),
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash",
+        facebook_page_id=os.getenv("FACEBOOK_PAGE_ID", "").strip(),
+        facebook_page_access_token=os.getenv("FACEBOOK_PAGE_ACCESS_TOKEN", "").strip(),
+        instagram_account_id=os.getenv("INSTAGRAM_ACCOUNT_ID", "").strip(),
+        instagram_access_token=os.getenv("INSTAGRAM_ACCESS_TOKEN", "").strip(),
+        meta_graph_api_version=os.getenv("META_GRAPH_API_VERSION", "v26.0").strip() or "v26.0",
     )
 
 
@@ -308,6 +319,8 @@ async def help_command(
         "/reel <موضوع> و /post <موضوع> — پیش‌نویس محتوا برای ریل یا کانال\n"
         "/publish <شناسه> — انتشار صریح پیش‌نویس در کانال تنظیم‌شده\n"
         "/schedulepost <شناسه> <زمان>، /scheduledposts، /cancelscheduled <شناسه> — زمان‌بندی کانال\n"
+        "/socialpublish facebook <متن> یا facebook-image <لینک عکس> | <کپشن> — انتشار فوری در Facebook\n"
+        "/socialpublish instagram <لینک عمومی عکس JPEG> | <کپشن> — انتشار فوری در حساب حرفه‌ای Instagram\n"
         "/drafts، /draft <شناسه>، /status، /help — مدیریت و راهنما"
     )
 
@@ -334,6 +347,8 @@ async def status_command(
     reminders_count = store.count_pending_reminders(owner_id=config.owner_id)
     missions_count = store.count_missions(owner_id=config.owner_id)
     scheduled_count = store.count_pending_scheduled_posts(owner_id=config.owner_id)
+    facebook_status = bool(config.facebook_page_id and config.facebook_page_access_token)
+    instagram_status = bool(config.instagram_account_id and config.instagram_access_token)
     await update.effective_message.reply_text(
         "📊 وضعیت بات\n"
         "🤖 بات تلگرام: فعال\n"
@@ -341,6 +356,7 @@ async def status_command(
         f"🎙️ تبدیل ویس: {'فعال با Gemini' if config.gemini_api_key else 'فعال با Groq' if config.groq_api_key else 'نیازمند کلید Gemini یا Groq'}\n"
         f"🔎 جستجو: DuckDuckGo — 🎨 تصویر: Pollinations — 🎬 کلیپ: {'آماده' if shutil.which('ffmpeg') else 'نیازمند FFmpeg'}\n"
         f"📣 انتشار کانال: {'تنظیم شده' if config.telegram_channel_id else 'تنظیم نشده'}\n"
+        f"📱 Meta: Facebook {'آماده' if facebook_status else 'تنظیم نشده'} — Instagram {'آماده' if instagram_status else 'تنظیم نشده'}\n"
         f"🗒 یادداشت‌ها: {notes_count} — 📋 کارهای باز: {tasks_count} — ⏰ یادآوری‌ها: {reminders_count}\n"
         f"🧠 مأموریت‌ها: {missions_count} — 🗓 انتشارهای زمان‌بندی‌شده: {scheduled_count} — 🗃 پیش‌نویس‌ها: {count}"
     )
@@ -1031,6 +1047,59 @@ async def cancel_scheduled_post_command(update: Update, context: ContextTypes.DE
     await update.effective_message.reply_text("انتشار زمان‌بندی‌شده لغو شد." if cancelled else "این انتشارِ درصف پیدا نشد.")
 
 
+async def social_publish_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_owner(update, context):
+        return
+    args = context.args
+    if len(args) < 2:
+        await update.effective_message.reply_text(
+            "فرمت‌ها:\n/socialpublish facebook <متن>\n"
+            "/socialpublish facebook-image <لینک HTTPS عکس> | <کپشن>\n"
+            "/socialpublish instagram <لینک عمومی HTTPS عکس JPEG> | <کپشن>"
+        )
+        return
+    platform = args[0].lower()
+    raw = " ".join(args[1:]).strip()
+    try:
+        if platform == "facebook":
+            if "|" in raw:
+                image_url, caption = (part.strip() for part in raw.split("|", 1))
+                post_id = await asyncio.to_thread(
+                    publish_facebook_page_post, _get_config(context), caption, image_url=image_url
+                )
+            else:
+                post_id = await asyncio.to_thread(
+                    publish_facebook_page_post, _get_config(context), raw
+                )
+        elif platform in ("facebook-image", "instagram"):
+            if "|" in raw:
+                image_url, caption = (part.strip() for part in raw.split("|", 1))
+            else:
+                image_url, _, caption = raw.partition(" ")
+                image_url, caption = image_url.strip(), caption.strip()
+            await update.effective_message.reply_text("📤 درخواست انتشار به Meta ارسال شد…")
+            if platform == "facebook-image":
+                post_id = await asyncio.to_thread(
+                    publish_facebook_page_post, _get_config(context), caption,
+                    image_url=image_url,
+                )
+            else:
+                post_id = await asyncio.to_thread(
+                    publish_instagram_image, _get_config(context), image_url, caption
+                )
+        else:
+            await update.effective_message.reply_text("شبکهٔ پشتیبانی‌شده: facebook، facebook-image یا instagram.")
+            return
+    except SocialPublishError as exc:
+        await update.effective_message.reply_text(f"⛔ انتشار ناموفق بود: {exc}")
+        return
+    except Exception:
+        LOGGER.exception("Meta social publishing failed")
+        await update.effective_message.reply_text("⛔ انتشار ناموفق بود؛ تنظیمات دسترسی Meta را بررسی کن.")
+        return
+    await update.effective_message.reply_text(f"✅ در {platform} منتشر شد. شناسهٔ پست: {post_id}")
+
+
 async def deliver_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
     store: DraftStore = context.application.bot_data["store"]
     now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -1098,6 +1167,7 @@ def build_application(config: BotConfig) -> Application:
     application.add_handler(CommandHandler("schedulepost", schedule_post_command))
     application.add_handler(CommandHandler("scheduledposts", scheduled_posts_command))
     application.add_handler(CommandHandler("cancelscheduled", cancel_scheduled_post_command))
+    application.add_handler(CommandHandler("socialpublish", social_publish_command))
     application.add_handler(CommandHandler("remind", remind_command))
     application.add_handler(MessageHandler(filters.VOICE, voice_message))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
