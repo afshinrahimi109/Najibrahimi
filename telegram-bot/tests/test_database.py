@@ -72,6 +72,30 @@ class DraftStoreTests(unittest.TestCase):
         self.store.mark_reminder_delivered(reminder_id)
         self.assertEqual(self.store.due_reminders(now="2026-01-01T00:00:01Z"), [])
 
+    def test_notes_are_private_and_deletable(self):
+        note_id = self.store.add_note(owner_id=1234, text="یادداشت خصوصی")
+        self.assertEqual(self.store.list_notes(owner_id=1234)[0]["text"], "یادداشت خصوصی")
+        self.assertEqual(self.store.list_notes(owner_id=9876), [])
+        self.assertFalse(self.store.delete_note(note_id, owner_id=9876))
+        self.assertTrue(self.store.delete_note(note_id, owner_id=1234))
+
+    def test_tasks_can_be_completed_and_are_owner_scoped(self):
+        task_id = self.store.add_task(owner_id=1234, text="یک کار")
+        self.assertEqual(self.store.list_tasks(owner_id=1234)[0]["status"], "open")
+        self.assertFalse(self.store.complete_task(task_id, owner_id=9876))
+        self.assertTrue(self.store.complete_task(task_id, owner_id=1234))
+        self.assertEqual(self.store.list_tasks(owner_id=1234)[0]["status"], "done")
+        self.assertFalse(self.store.complete_task(task_id, owner_id=1234))
+
+    def test_pending_reminders_can_be_listed_and_cancelled(self):
+        reminder_id = self.store.add_reminder(
+            owner_id=1234, text="جلسه", due_at="2026-01-01T00:00:00Z"
+        )
+        self.assertEqual(self.store.list_reminders(owner_id=1234)[0]["text"], "جلسه")
+        self.assertFalse(self.store.cancel_reminder(reminder_id, owner_id=9876))
+        self.assertTrue(self.store.cancel_reminder(reminder_id, owner_id=1234))
+        self.assertEqual(self.store.list_reminders(owner_id=1234), [])
+
     def test_list_is_newest_first_and_limit_is_bounded(self):
         first = self.store.save_draft(
             owner_id=1234,

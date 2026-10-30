@@ -73,6 +73,34 @@ class DraftStore:
                 "CREATE INDEX IF NOT EXISTS idx_reminders_due "
                 "ON reminders(delivered, due_at)"
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS notes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_id INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_notes_owner ON notes(owner_id, id DESC)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_id INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    completed_at TEXT
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_owner_status ON tasks(owner_id, status, id DESC)"
+            )
 
     def save_draft(
         self,
@@ -172,3 +200,105 @@ class DraftStore:
                 "UPDATE reminders SET delivered = 1 WHERE id = ? AND delivered = 0",
                 (int(reminder_id),),
             )
+
+    def list_reminders(self, *, owner_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 100))
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT id, text, due_at FROM reminders WHERE owner_id = ? AND delivered = 0 ORDER BY due_at LIMIT ?",
+                (int(owner_id), limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def cancel_reminder(self, reminder_id: int, *, owner_id: int) -> bool:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM reminders WHERE id = ? AND owner_id = ? AND delivered = 0",
+                (int(reminder_id), int(owner_id)),
+            )
+        return cursor.rowcount == 1
+
+    def count_notes(self, *, owner_id: int) -> int:
+        with self._connection() as connection:
+            row = connection.execute("SELECT COUNT(*) AS total FROM notes WHERE owner_id = ?", (int(owner_id),)).fetchone()
+        return int(row["total"])
+
+    def count_open_tasks(self, *, owner_id: int) -> int:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS total FROM tasks WHERE owner_id = ? AND status = 'open'",
+                (int(owner_id),),
+            ).fetchone()
+        return int(row["total"])
+
+    def count_pending_reminders(self, *, owner_id: int) -> int:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS total FROM reminders WHERE owner_id = ? AND delivered = 0",
+                (int(owner_id),),
+            ).fetchone()
+        return int(row["total"])
+
+    def add_note(self, *, owner_id: int, text: str) -> int:
+        text = text.strip()
+        if not text:
+            raise ValueError("note must not be empty")
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO notes (owner_id, text) VALUES (?, ?)",
+                (int(owner_id), text),
+            )
+            return int(cursor.lastrowid)
+
+    def list_notes(self, *, owner_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 100))
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT id, text, created_at FROM notes WHERE owner_id = ? ORDER BY id DESC LIMIT ?",
+                (int(owner_id), limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_note(self, note_id: int, *, owner_id: int) -> bool:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM notes WHERE id = ? AND owner_id = ?",
+                (int(note_id), int(owner_id)),
+            )
+        return cursor.rowcount == 1
+
+    def add_task(self, *, owner_id: int, text: str) -> int:
+        text = text.strip()
+        if not text:
+            raise ValueError("task must not be empty")
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO tasks (owner_id, text) VALUES (?, ?)",
+                (int(owner_id), text),
+            )
+            return int(cursor.lastrowid)
+
+    def list_tasks(self, *, owner_id: int, limit: int = 50) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 100))
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT id, text, status, created_at FROM tasks WHERE owner_id = ? ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END, id DESC LIMIT ?",
+                (int(owner_id), limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def complete_task(self, task_id: int, *, owner_id: int) -> bool:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "UPDATE tasks SET status = 'done', completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND owner_id = ? AND status = 'open'",
+                (int(task_id), int(owner_id)),
+            )
+        return cursor.rowcount == 1
+
+    def delete_task(self, task_id: int, *, owner_id: int) -> bool:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM tasks WHERE id = ? AND owner_id = ?",
+                (int(task_id), int(owner_id)),
+            )
+        return cursor.rowcount == 1
