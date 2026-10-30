@@ -642,7 +642,13 @@ def main() -> None:
         LOGGER.error("Configuration or database setup failed: %s", exc)
         raise SystemExit(1) from exc
 
-    LOGGER.info("Najib Agent Telegram bot is starting (long polling).")
+    LOGGER.info("Holo Agent Telegram bot is starting (long polling).")
+    # Python 3.14 no longer creates a default event loop implicitly. PTB 21.x
+    # calls asyncio.get_event_loop() from run_polling(), so create it explicitly.
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
     application.run_polling(
         drop_pending_updates=True,
         allowed_updates=["message"],
