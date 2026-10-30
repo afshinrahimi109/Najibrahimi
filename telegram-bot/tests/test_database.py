@@ -72,6 +72,29 @@ class DraftStoreTests(unittest.TestCase):
         self.store.mark_reminder_delivered(reminder_id)
         self.assertEqual(self.store.due_reminders(now="2026-01-01T00:00:01Z"), [])
 
+    def test_scheduled_channel_posts_are_persistent_and_publish_draft(self):
+        draft = self.store.save_draft(
+            owner_id=1234, topic="پست", angle="تلگرام", content="متن کانال", model="test-model"
+        )
+        schedule_id = self.store.schedule_post(
+            owner_id=1234, draft_id=draft["id"], channel_id="@mychannel",
+            scheduled_at="2026-01-01T00:00:00Z",
+        )
+        self.assertEqual(len(self.store.due_scheduled_posts(now="2026-01-01T00:00:01Z")), 1)
+        self.assertEqual(self.store.list_scheduled_posts(owner_id=1234)[0]["id"], schedule_id)
+        self.store.mark_scheduled_post_published(schedule_id, draft["id"])
+        self.assertEqual(self.store.get_draft(draft["id"], owner_id=1234)["status"], "published")
+        self.assertEqual(self.store.list_scheduled_posts(owner_id=1234), [])
+
+    def test_missions_are_persisted_and_scoped_to_owner(self):
+        mission_id = self.store.save_mission(
+            owner_id=1234, goal="برنامه‌ریزی", report="گزارش نهایی", agents="تحلیلگر، نویسنده"
+        )
+        self.assertEqual(self.store.count_missions(owner_id=1234), 1)
+        self.assertEqual(self.store.get_mission(mission_id, owner_id=1234)["report"], "گزارش نهایی")
+        self.assertIsNone(self.store.get_mission(mission_id, owner_id=9876))
+        self.assertEqual(self.store.list_missions(owner_id=9876), [])
+
     def test_notes_are_private_and_deletable(self):
         note_id = self.store.add_note(owner_id=1234, text="یادداشت خصوصی")
         self.assertEqual(self.store.list_notes(owner_id=1234)[0]["text"], "یادداشت خصوصی")

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -17,8 +18,9 @@ from telegram import InputFile, Update
 from telegram.constants import ChatType
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
+from agents import run_specialist_mission
 from database import DraftStore
-from holo import (HoloError, chat_completion, clean_intent_text, format_search_results, generate_image,
+from holo import (HoloError, chat_completion, clean_intent_text, format_search_results, generate_image, generate_motion_video,
                   gemini_completion, gemini_transcribe, pollinations_completion, search_web, transcribe_audio)
 
 LOGGER = logging.getLogger("najib_agent")
@@ -282,7 +284,7 @@ async def start_command(
     await update.effective_message.reply_text(
         "سلام! 👋 من Holo Agent هستم؛ دستیار خصوصی فارسی‌زبانت.\n\n"
         "پیام متنی یا ویس بفرست؛ می‌توانم جستجو و خلاصه کنم، تصویر بسازم و یادداشت/کار/یادآوری نگه دارم.\n\n"
-        "نمونه‌ها:\n/note ایدهٔ جدید\n/todo add خرید نان\n/remind 30m تماس با دوست\n/search خبرهای هوش مصنوعی\n/post موضوع پست کانال\n\n"
+        "نمونه‌ها:\n/note ایدهٔ جدید\n/todo add خرید نان\n/remind 30m تماس با دوست\n/search خبرهای هوش مصنوعی\n/mission برنامهٔ شروع یک کسب‌وکار کوچک را بررسی کن\n/video شهر آینده‌نگر در غروب\n\n"
         "اگر کلید AI کار نکند، چت متنی از مدل عمومی Pollinations پاسخ می‌گیرد؛ اطلاعات حساس نفرست. برای فهمیدن ویس، کلید معتبر لازم است.\n"
         "برای راهنما: /help"
     )
@@ -300,8 +302,12 @@ async def help_command(
         "/remind <زمان> <متن>، /reminders، /cancelreminder <شناسه> — یادآوری‌ها\n"
         "/search <عبارت> و /summarize <متن> — تحقیق و خلاصه‌سازی\n"
         "/image <توضیح> — ساخت تصویر\n"
+        "/video <توضیح> — ساخت کلیپ متحرک کوتاه از تصویر (نیازمند FFmpeg)\n"
+        "/mission <هدف> — اجرای مأموریت چندمتخصصی و ذخیرهٔ گزارش\n"
+        "/missions و /mission_result <شناسه> — گزارش‌های چندعامله\n"
         "/reel <موضوع> و /post <موضوع> — پیش‌نویس محتوا برای ریل یا کانال\n"
         "/publish <شناسه> — انتشار صریح پیش‌نویس در کانال تنظیم‌شده\n"
+        "/schedulepost <شناسه> <زمان>، /scheduledposts، /cancelscheduled <شناسه> — زمان‌بندی کانال\n"
         "/drafts، /draft <شناسه>، /status، /help — مدیریت و راهنما"
     )
 
@@ -326,15 +332,17 @@ async def status_command(
     notes_count = store.count_notes(owner_id=config.owner_id)
     tasks_count = store.count_open_tasks(owner_id=config.owner_id)
     reminders_count = store.count_pending_reminders(owner_id=config.owner_id)
+    missions_count = store.count_missions(owner_id=config.owner_id)
+    scheduled_count = store.count_pending_scheduled_posts(owner_id=config.owner_id)
     await update.effective_message.reply_text(
         "📊 وضعیت بات\n"
         "🤖 بات تلگرام: فعال\n"
         f"🧠 مدل زبانی: {llm_status}\n"
         f"🎙️ تبدیل ویس: {'فعال با Gemini' if config.gemini_api_key else 'فعال با Groq' if config.groq_api_key else 'نیازمند کلید Gemini یا Groq'}\n"
-        "🔎 جستجو: DuckDuckGo — 🎨 تصویر: Pollinations\n"
+        f"🔎 جستجو: DuckDuckGo — 🎨 تصویر: Pollinations — 🎬 کلیپ: {'آماده' if shutil.which('ffmpeg') else 'نیازمند FFmpeg'}\n"
         f"📣 انتشار کانال: {'تنظیم شده' if config.telegram_channel_id else 'تنظیم نشده'}\n"
         f"🗒 یادداشت‌ها: {notes_count} — 📋 کارهای باز: {tasks_count} — ⏰ یادآوری‌ها: {reminders_count}\n"
-        f"🗃 پیش‌نویس‌های ذخیره‌شده: {count}"
+        f"🧠 مأموریت‌ها: {missions_count} — 🗓 انتشارهای زمان‌بندی‌شده: {scheduled_count} — 🗃 پیش‌نویس‌ها: {count}"
     )
 
 
@@ -604,6 +612,76 @@ async def summarize_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.effective_message.reply_text(f"⛔ {exc}")
 
 
+async def _run_mission(message: Any, context: ContextTypes.DEFAULT_TYPE, goal: str) -> None:
+    goal = goal.strip()
+    if not goal:
+        await message.reply_text("هدف را بنویس؛ مثال: /mission راه‌اندازی یک فروشگاه آنلاین کم‌هزینه را بررسی و برنامه‌ریزی کن")
+        return
+    if len(goal) > 1200:
+        await message.reply_text("هدف مأموریت را به ۱۲۰۰ نویسه یا کمتر کوتاه کن.")
+        return
+    await message.reply_text("🧠 مأموریت شروع شد: تحلیلگر، متخصص موضوع و بازبین کیفیت هم‌زمان بررسی می‌کنند…")
+    try:
+        report, agents = await run_specialist_mission(
+            goal,
+            config=_get_config(context),
+            chat=_chat,
+            search=search_web,
+        )
+        mission_id = await asyncio.to_thread(
+            _get_store(context).save_mission,
+            owner_id=_owner_id(context), goal=goal, report=report,
+            agents="، ".join(agents),
+        )
+    except (HoloError, GenerationError) as exc:
+        await message.reply_text(f"⛔ مأموریت کامل نشد: {exc}")
+        return
+    except Exception:
+        LOGGER.exception("Multi-agent mission failed")
+        await message.reply_text("⛔ مأموریت کامل نشد؛ کمی بعد دوباره امتحان کن.")
+        return
+    await _reply_long(
+        message,
+        f"🧠 گزارش مأموریت #{mission_id}\n👥 نقش‌ها: {'، '.join(agents)}\n\n{report}\n\nدیدن دوباره: /mission_result {mission_id}",
+    )
+
+
+async def mission_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_owner(update, context):
+        return
+    await _run_mission(update.effective_message, context, " ".join(context.args))
+
+
+async def missions_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_owner(update, context):
+        return
+    rows = await asyncio.to_thread(_get_store(context).list_missions, owner_id=_owner_id(context))
+    if not rows:
+        await update.effective_message.reply_text("هنوز مأموریتی اجرا نشده. نمونه: /mission یک برنامهٔ یادگیری پایتون طراحی کن")
+        return
+    lines = ["🧠 مأموریت‌های اخیر:"]
+    lines.extend(f"\n#{row['id']} — {row['goal']}\nنقش‌ها: {row['agents']}\nگزارش: /mission_result {row['id']}" for row in rows)
+    await _reply_long(update.effective_message, "\n".join(lines))
+
+
+async def mission_result_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_owner(update, context):
+        return
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await update.effective_message.reply_text("شناسهٔ گزارش را بده؛ مثال: /mission_result 2")
+        return
+    row = await asyncio.to_thread(
+        _get_store(context).get_mission, int(context.args[0]), owner_id=_owner_id(context)
+    )
+    if not row:
+        await update.effective_message.reply_text("گزارش پیدا نشد.")
+        return
+    await _reply_long(
+        update.effective_message,
+        f"🧠 مأموریت #{row['id']}: {row['goal']}\n👥 {row['agents']}\n\n{row['report']}",
+    )
+
+
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _require_owner(update, context):
         return
@@ -644,6 +722,32 @@ async def image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await _run_image(update.effective_message, prompt)
 
 
+async def video_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_owner(update, context):
+        return
+    prompt = " ".join(context.args).strip()
+    if not prompt:
+        await update.effective_message.reply_text("موضوع کلیپ را بنویس؛ مثال: /video یک شهر آینده‌نگر هنگام غروب")
+        return
+    await _run_video(update.effective_message, prompt)
+
+
+async def _run_video(message: Any, prompt: str) -> None:
+    if len(prompt) > 500:
+        await message.reply_text("توضیح کلیپ را به ۵۰۰ نویسه یا کمتر کوتاه کن.")
+        return
+    await message.reply_text("🎬 دارم تصویر را می‌سازم و به کلیپ متحرک ۶ ثانیه‌ای تبدیل می‌کنم؛ این مرحله ممکن است کمی طول بکشد…")
+    try:
+        clip = await asyncio.to_thread(generate_motion_video, prompt, seconds=6)
+        await message.reply_video(
+            video=InputFile(clip, filename="holo-clip.mp4"),
+            caption="🎞️ کلیپ کوتاه ساخته شد. این نسخه از تصویر متحرک‌شده ساخته می‌شود و صدای تولیدشده ندارد.",
+            supports_streaming=True,
+        )
+    except HoloError as exc:
+        await message.reply_text(f"⛔ {exc}")
+
+
 async def _run_image(message: Any, prompt: str) -> None:
     if not prompt:
         await message.reply_text("توضیح تصویر را بنویس؛ مثال: /image یک گربه فضانورد، تصویرسازی دیجیتال")
@@ -661,6 +765,10 @@ async def _process_text(message: Any, context: ContextTypes.DEFAULT_TYPE, text: 
     if not text:
         return
     lowered = text.lower()
+    if text.startswith(("ماموریت:", "تحلیل چندعاملی:")):
+        goal = re.sub(r"^(?:ماموریت:|تحلیل چندعاملی:)\s*", "", text).strip()
+        await _run_mission(message, context, goal)
+        return
     if text.startswith(("یادداشت کن", "یادداشت:")):
         note_text = re.sub(r"^(?:یادداشت کن|یادداشت:)\s*", "", text).strip(" :،")
         if not note_text:
@@ -707,6 +815,10 @@ async def _process_text(message: Any, context: ContextTypes.DEFAULT_TYPE, text: 
     if "جستجو" in text or "search" in lowered or "پیدا کن" in text:
         query = clean_intent_text(text, ("جستجو کن", "جستجو", "search", "پیدا کن", "در اینترنت"))
         await _run_search(message, context, query)
+        return
+    if any(word in text for word in ("ویدیو", "ویدئو", "فیلم", "کلیپ")) and any(word in text for word in ("بساز", "درست کن", "تولید", "ساخت")):
+        prompt = clean_intent_text(text, ("ویدیو", "ویدئو", "فیلم", "کلیپ", "بساز", "درست کن", "تولید کن", "تولید", "ساخت"))
+        await _run_video(message, prompt)
         return
     if any(word in text for word in ("تصویر", "عکس", "عکسو", "image")) and any(word in text for word in ("بساز", "درست کن", "تولید", "بکش", "image")):
         prompt = clean_intent_text(text, ("تصویر", "عکس", "عکسو", "بساز", "درست کن", "تولید کن", "تولید", "بکش", "image"))
@@ -782,7 +894,7 @@ async def publish_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if len(context.args) != 1 or not context.args[0].isdigit():
         await update.effective_message.reply_text("شناسهٔ پیش‌نویس را مشخص کن؛ مثال: /publish 12")
         return
-    draft_id = int(context.args[0])
+    draft_id = int(context.args[0].translate(PERSIAN_DIGITS))
     draft = _get_store(context).get_draft(draft_id, owner_id=config.owner_id)
     if draft is None:
         await update.effective_message.reply_text("پیش‌نویس پیدا نشد.")
@@ -843,6 +955,82 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.effective_message.reply_text(f"⏰ یادآوری #{reminder_id} ثبت شد و در زمان تعیین‌شده برایت می‌آید.")
 
 
+async def schedule_post_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_owner(update, context):
+        return
+    config = _get_config(context)
+    if not config.telegram_channel_id:
+        await update.effective_message.reply_text("اول TELEGRAM_CHANNEL_ID را تنظیم و بات را مدیر کانال کن.")
+        return
+    if len(context.args) not in (2, 3) or not context.args[0].translate(PERSIAN_DIGITS).isdigit():
+        await update.effective_message.reply_text("فرمت: /schedulepost <شناسهٔ پیش‌نویس> <زمان> — مثال: /schedulepost 4 2h یا /schedulepost 4 ۳۰ دقیقه")
+        return
+    duration_text = context.args[1].translate(PERSIAN_DIGITS)
+    if len(context.args) == 3 and duration_text.isdigit():
+        duration_text += context.args[2].translate(PERSIAN_DIGITS)
+    match = REMINDER_PATTERN.fullmatch(duration_text)
+    if not match:
+        await update.effective_message.reply_text("زمان را مثل 30m، 2h یا 1d وارد کن.")
+        return
+    amount = int(match.group(1))
+    unit = match.group(2).lower()
+    delta = timedelta(minutes=amount) if unit in ("m", "min", "دقیقه") else timedelta(hours=amount) if unit in ("h", "ساعت") else timedelta(days=amount)
+    if amount < 1 or delta > timedelta(days=30):
+        await update.effective_message.reply_text("زمان انتشار باید بین یک دقیقه تا ۳۰ روز آینده باشد.")
+        return
+    draft_id = int(context.args[0])
+    draft = _get_store(context).get_draft(draft_id, owner_id=config.owner_id)
+    if not draft:
+        await update.effective_message.reply_text("پیش‌نویس پیدا نشد.")
+        return
+    if len(draft["content"]) > 4000:
+        await update.effective_message.reply_text("این پیش‌نویس از سقف طول پیام کانال بلندتر است.")
+        return
+    scheduled_at = (datetime.now(timezone.utc) + delta).isoformat(timespec="seconds").replace("+00:00", "Z")
+    try:
+        schedule_id = await asyncio.to_thread(
+            _get_store(context).schedule_post,
+            owner_id=config.owner_id, draft_id=draft_id,
+            channel_id=config.telegram_channel_id, scheduled_at=scheduled_at,
+        )
+    except ValueError:
+        await update.effective_message.reply_text("این پیش‌نویس دیگر قابل انتشار نیست یا از قبل برایش زمان گذاشته‌ای.")
+        return
+    await update.effective_message.reply_text(
+        f"🗓 انتشار زمان‌بندی‌شدهٔ #{schedule_id} ثبت شد. زمان UTC: {scheduled_at}. دیدن فهرست: /scheduledposts"
+    )
+
+
+async def scheduled_posts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_owner(update, context):
+        return
+    rows = await asyncio.to_thread(
+        _get_store(context).list_scheduled_posts, owner_id=_owner_id(context)
+    )
+    if not rows:
+        await update.effective_message.reply_text("انتشار زمان‌بندی‌شده‌ای نداری.")
+        return
+    lines = ["🗓 انتشارهای در صف:"]
+    lines.extend(
+        f"\n#{row['id']} — پیش‌نویس #{row['draft_id']} ({row['topic']})\nزمان UTC: {row['scheduled_at']}\nلغو: /cancelscheduled {row['id']}"
+        for row in rows
+    )
+    await _reply_long(update.effective_message, "\n".join(lines))
+
+
+async def cancel_scheduled_post_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_owner(update, context):
+        return
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await update.effective_message.reply_text("شناسهٔ انتشار را بده؛ مثال: /cancelscheduled 2")
+        return
+    cancelled = await asyncio.to_thread(
+        _get_store(context).cancel_scheduled_post,
+        int(context.args[0]), owner_id=_owner_id(context),
+    )
+    await update.effective_message.reply_text("انتشار زمان‌بندی‌شده لغو شد." if cancelled else "این انتشارِ درصف پیدا نشد.")
+
+
 async def deliver_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
     store: DraftStore = context.application.bot_data["store"]
     now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -856,6 +1044,21 @@ async def deliver_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
             await asyncio.to_thread(store.mark_reminder_delivered, reminder["id"])
         except Exception:
             LOGGER.exception("Failed to deliver reminder %s", reminder["id"])
+
+    scheduled_posts = await asyncio.to_thread(store.due_scheduled_posts, now=now)
+    for scheduled in scheduled_posts:
+        try:
+            await context.bot.send_message(
+                chat_id=scheduled["channel_id"],
+                text=scheduled["content"],
+            )
+            await asyncio.to_thread(
+                store.mark_scheduled_post_published,
+                scheduled["id"], scheduled["draft_id"],
+            )
+            LOGGER.info("Published scheduled post %s", scheduled["id"])
+        except Exception:
+            LOGGER.exception("Failed to publish scheduled post %s", scheduled["id"])
 
 
 async def error_handler(
@@ -885,9 +1088,16 @@ def build_application(config: BotConfig) -> Application:
     application.add_handler(CommandHandler("cancelreminder", cancel_reminder_command))
     application.add_handler(CommandHandler("post", post_command))
     application.add_handler(CommandHandler("summarize", summarize_command))
+    application.add_handler(CommandHandler("mission", mission_command))
+    application.add_handler(CommandHandler("missions", missions_command))
+    application.add_handler(CommandHandler("mission_result", mission_result_command))
     application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("image", image_command))
+    application.add_handler(CommandHandler("video", video_command))
     application.add_handler(CommandHandler("publish", publish_command))
+    application.add_handler(CommandHandler("schedulepost", schedule_post_command))
+    application.add_handler(CommandHandler("scheduledposts", scheduled_posts_command))
+    application.add_handler(CommandHandler("cancelscheduled", cancel_scheduled_post_command))
     application.add_handler(CommandHandler("remind", remind_command))
     application.add_handler(MessageHandler(filters.VOICE, voice_message))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))

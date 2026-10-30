@@ -101,6 +101,37 @@ class DraftStore:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tasks_owner_status ON tasks(owner_id, status, id DESC)"
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS missions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_id INTEGER NOT NULL,
+                    goal TEXT NOT NULL,
+                    report TEXT NOT NULL,
+                    agents TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_missions_owner ON missions(owner_id, id DESC)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scheduled_posts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_id INTEGER NOT NULL,
+                    draft_id INTEGER NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    scheduled_at TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_scheduled_posts_due ON scheduled_posts(status, scheduled_at)"
+            )
 
     def save_draft(
         self,
@@ -173,6 +204,11 @@ class DraftStore:
                 "UPDATE drafts SET status = 'published' WHERE id = ? AND owner_id = ? AND status = 'draft'",
                 (int(draft_id), int(owner_id)),
             )
+            if cursor.rowcount == 1:
+                connection.execute(
+                    "UPDATE scheduled_posts SET status = 'cancelled' WHERE draft_id = ? AND owner_id = ? AND status = 'pending'",
+                    (int(draft_id), int(owner_id)),
+                )
         return cursor.rowcount == 1
 
     def add_reminder(self, *, owner_id: int, text: str, due_at: str) -> int:
@@ -286,6 +322,114 @@ class DraftStore:
                 (int(owner_id), limit),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def schedule_post(
+        self, *, owner_id: int, draft_id: int, channel_id: str, scheduled_at: str
+    ) -> int:
+        with self._connection() as connection:
+            draft = connection.execute(
+                "SELECT status FROM drafts WHERE id = ? AND owner_id = ?",
+                (int(draft_id), int(owner_id)),
+            ).fetchone()
+            if draft is None or draft["status"] != "draft":
+                raise ValueError("draft is missing or no longer publishable")
+            existing = connection.execute(
+                "SELECT id FROM scheduled_posts WHERE draft_id = ? AND owner_id = ? AND status = 'pending'",
+                (int(draft_id), int(owner_id)),
+            ).fetchone()
+            if existing:
+                raise ValueError("draft already has a pending schedule")
+            cursor = connection.execute(
+                "INSERT INTO scheduled_posts (owner_id, draft_id, channel_id, scheduled_at) VALUES (?, ?, ?, ?)",
+                (int(owner_id), int(draft_id), channel_id, scheduled_at),
+            )
+            return int(cursor.lastrowid)
+
+    def due_scheduled_posts(self, *, now: str) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT s.id, s.owner_id, s.draft_id, s.channel_id, d.content
+                   FROM scheduled_posts s JOIN drafts d ON d.id = s.draft_id
+                   WHERE s.status = 'pending' AND s.scheduled_at <= ?
+                   ORDER BY s.scheduled_at LIMIT 50""",
+                (now,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_scheduled_post_published(self, schedule_id: int, draft_id: int) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                "UPDATE scheduled_posts SET status = 'published' WHERE id = ? AND status = 'pending'",
+                (int(schedule_id),),
+            )
+            connection.execute(
+                "UPDATE drafts SET status = 'published' WHERE id = ? AND status = 'draft'",
+                (int(draft_id),),
+            )
+
+    def list_scheduled_posts(self, *, owner_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 100))
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT s.id, s.draft_id, s.scheduled_at, d.topic
+                   FROM scheduled_posts s JOIN drafts d ON d.id = s.draft_id
+                   WHERE s.owner_id = ? AND s.status = 'pending'
+                   ORDER BY s.scheduled_at LIMIT ?""",
+                (int(owner_id), limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def cancel_scheduled_post(self, schedule_id: int, *, owner_id: int) -> bool:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "UPDATE scheduled_posts SET status = 'cancelled' WHERE id = ? AND owner_id = ? AND status = 'pending'",
+                (int(schedule_id), int(owner_id)),
+            )
+        return cursor.rowcount == 1
+
+    def count_pending_scheduled_posts(self, *, owner_id: int) -> int:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS total FROM scheduled_posts WHERE owner_id = ? AND status = 'pending'",
+                (int(owner_id),),
+            ).fetchone()
+        return int(row["total"])
+
+    def count_missions(self, *, owner_id: int) -> int:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS total FROM missions WHERE owner_id = ?",
+                (int(owner_id),),
+            ).fetchone()
+        return int(row["total"])
+
+    def save_mission(self, *, owner_id: int, goal: str, report: str, agents: str) -> int:
+        goal, report, agents = goal.strip(), report.strip(), agents.strip()
+        if not goal or not report or not agents:
+            raise ValueError("mission fields must not be empty")
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO missions (owner_id, goal, report, agents) VALUES (?, ?, ?, ?)",
+                (int(owner_id), goal, report, agents),
+            )
+            return int(cursor.lastrowid)
+
+    def list_missions(self, *, owner_id: int, limit: int = 10) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 100))
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT id, goal, agents, created_at FROM missions WHERE owner_id = ? ORDER BY id DESC LIMIT ?",
+                (int(owner_id), limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_mission(self, mission_id: int, *, owner_id: int) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT id, owner_id, goal, report, agents, created_at FROM missions WHERE id = ? AND owner_id = ?",
+                (int(mission_id), int(owner_id)),
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def complete_task(self, task_id: int, *, owner_id: int) -> bool:
         with self._connection() as connection:

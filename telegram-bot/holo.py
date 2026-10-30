@@ -5,6 +5,9 @@ import base64
 import json
 import logging
 import re
+import shutil
+import subprocess
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -329,6 +332,56 @@ def generate_image(prompt: str, timeout: float = 90) -> bytes:
     if len(image) > 12_000_000:
         raise HoloError("تصویر بزرگ‌تر از حد مجاز است.")
     return image
+
+
+def animate_image_to_video(image: bytes, *, seconds: int = 6) -> bytes:
+    """Create a short portrait MP4 with a gentle Ken Burns motion from a generated still."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise HoloError("برای ساخت کلیپ متحرک، FFmpeg نصب نیست؛ در Termux اجرا کن: pkg install ffmpeg")
+    if not image or len(image) > 12_000_000:
+        raise HoloError("تصویر ورودی خالی یا بیش از حد بزرگ است.")
+    seconds = max(3, min(int(seconds), 10))
+    extension = ".jpg" if image.startswith(b"\xff\xd8") else ".png"
+    with tempfile.TemporaryDirectory(prefix="holo-video-") as temp_dir:
+        image_path = f"{temp_dir}/source{extension}"
+        video_path = f"{temp_dir}/clip.mp4"
+        with open(image_path, "wb") as image_file:
+            image_file.write(image)
+        filters = (
+            "scale=720:1280:force_original_aspect_ratio=increase,"
+            "crop=720:1280,"
+            f"zoompan=z='min(zoom+0.0012,1.10)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=720x1280:fps=30,"
+            "format=yuv420p"
+        )
+        command = [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-loop", "1",
+            "-i", image_path, "-vf", filters, "-frames:v", str(seconds * 30),
+            "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "27",
+            "-movflags", "+faststart", video_path,
+        ]
+        try:
+            subprocess.run(command, check=True, capture_output=True, timeout=120)
+            with open(video_path, "rb") as video_file:
+                video = video_file.read(45_000_001)
+        except FileNotFoundError:
+            raise HoloError("FFmpeg پیدا نشد؛ در Termux اجرا کن: pkg install ffmpeg") from None
+        except subprocess.TimeoutExpired:
+            raise HoloError("ساخت کلیپ بیشتر از حد معمول طول کشید؛ یک تصویر ساده‌تر امتحان کن.") from None
+        except subprocess.CalledProcessError as exc:
+            LOGGER.warning("ffmpeg failed with return code %s", exc.returncode)
+            raise HoloError("ساخت کلیپ ناموفق بود؛ FFmpeg را به‌روز کن و دوباره امتحان کن.") from None
+        except OSError:
+            raise HoloError("فایل کلیپ ساخته نشد؛ فضای ذخیره‌سازی گوشی را بررسی کن.") from None
+    if len(video) < 12 or video[4:8] != b"ftyp" or len(video) > 45_000_000:
+        raise HoloError("حجم کلیپ از سقف ارسال تلگرام بیشتر شد.")
+    return video
+
+
+def generate_motion_video(prompt: str, *, seconds: int = 6) -> bytes:
+    """Generate a still image and render it as a short silent motion clip."""
+    still = generate_image(prompt)
+    return animate_image_to_video(still, seconds=seconds)
 
 
 def format_search_results(results: list[dict[str, str]]) -> str:

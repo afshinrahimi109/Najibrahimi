@@ -70,8 +70,9 @@ class AppFeatureTests(unittest.TestCase):
             self.assertTrue(
                 {
                     "note", "notes", "notedel", "todo", "remind", "reminders",
-                    "cancelreminder", "search", "summarize", "post", "reel",
-                    "image", "publish",
+                    "cancelreminder", "search", "summarize", "mission", "missions",
+                    "mission_result", "post", "reel", "image", "video", "publish",
+                    "schedulepost", "scheduledposts", "cancelscheduled",
                 }.issubset(registered)
             )
             self.assertIsNotNone(application.job_queue)

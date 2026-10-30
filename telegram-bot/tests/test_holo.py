@@ -1,6 +1,7 @@
 import unittest
 
-from holo import _SearchParser, clean_intent_text, format_search_results
+from holo import HoloError, _SearchParser, animate_image_to_video, clean_intent_text, format_search_results
+from unittest.mock import patch
 
 
 class HoloUtilityTests(unittest.TestCase):
@@ -13,6 +14,11 @@ class HoloUtilityTests(unittest.TestCase):
         self.assertEqual(parser.results[0]["url"], "https://example.com")
         self.assertEqual(parser.results[0]["title"], "A title")
         self.assertEqual(parser.results[0]["snippet"], "A useful summary.")
+
+    @patch("holo.shutil.which", return_value=None)
+    def test_video_generation_explains_missing_ffmpeg(self, _which):
+        with self.assertRaisesRegex(HoloError, "FFmpeg"):
+            animate_image_to_video(b"fake-image")
 
     def test_format_search_results_keeps_source_url(self):
         rendered = format_search_results([{"title": "Example", "snippet": "Summary", "url": "https://example.com"}])
