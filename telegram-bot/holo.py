@@ -1,6 +1,7 @@
 """Provider integrations for Holo Agent (Groq, DuckDuckGo and Pollinations)."""
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
@@ -12,6 +13,7 @@ from html.parser import HTMLParser
 LOGGER = logging.getLogger("najib_agent")
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_TRANSCRIPTION_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+GEMINI_API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models/"
 POLLINATIONS_URL = "https://image.pollinations.ai/prompt/"
 
 
@@ -53,6 +55,97 @@ def chat_completion(
     if not isinstance(content, str) or not content.strip():
         raise HoloError("سرویس هوش مصنوعی پاسخ متنی برنگرداند.")
     return content.strip()
+
+
+def _gemini_request(api_key: str, model: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+    if not api_key:
+        raise HoloError("کلید Gemini تنظیم نشده است؛ GEMINI_API_KEY را وارد کن.")
+    endpoint = GEMINI_API_ROOT + urllib.parse.quote(model, safe="") + ":generateContent"
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            raise HoloError("کلید Gemini معتبر نیست یا دسترسی API برای آن فعال نیست.") from None
+        if exc.code == 404:
+            raise HoloError("مدل Gemini پیدا نشد؛ مقدار GEMINI_MODEL را بررسی کن.") from None
+        if exc.code == 429:
+            raise HoloError("سهمیهٔ Gemini فعلاً تمام شده؛ کمی بعد دوباره امتحان کن.") from None
+        LOGGER.warning("Gemini returned HTTP %s", exc.code)
+        raise HoloError(f"Gemini درخواست را نپذیرفت (خطای {exc.code}).") from None
+    except (urllib.error.URLError, TimeoutError, OSError):
+        raise HoloError("ارتباط با Gemini برقرار نشد یا زمان درخواست تمام شد.") from None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HoloError("پاسخ Gemini قابل خواندن نبود.") from None
+    return result
+
+
+def gemini_completion(
+    *, api_key: str, model: str, messages: list[dict[str, str]], timeout: float = 45,
+    max_tokens: int = 1200,
+) -> str:
+    system_parts = [item["content"] for item in messages if item.get("role") == "system"]
+    contents = [
+        {
+            "role": "model" if item.get("role") == "assistant" else "user",
+            "parts": [{"text": item.get("content", "")}],
+        }
+        for item in messages
+        if item.get("role") != "system" and item.get("content")
+    ]
+    if not contents:
+        raise HoloError("پیام خالی است.")
+    payload: dict[str, Any] = {
+        "contents": contents,
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": max_tokens},
+    }
+    if system_parts:
+        payload["systemInstruction"] = {"parts": [{"text": "\n\n".join(system_parts)}]}
+    result = _gemini_request(api_key, model, payload, timeout)
+    try:
+        parts = result["candidates"][0]["content"]["parts"]
+        text = "\n".join(part["text"] for part in parts if isinstance(part.get("text"), str))
+    except (KeyError, IndexError, TypeError):
+        feedback = result.get("prompt_feedback", {}) if isinstance(result, dict) else {}
+        if feedback:
+            raise HoloError("Gemini نتوانست به این درخواست پاسخ دهد؛ متن را ساده‌تر کن.") from None
+        raise HoloError("Gemini پاسخ متنی برنگرداند.") from None
+    if not text.strip():
+        raise HoloError("Gemini پاسخ متنی برنگرداند.")
+    return text.strip()
+
+
+def gemini_transcribe(api_key: str, model: str, audio: bytes, timeout: float = 60) -> str:
+    if len(audio) > 14_000_000:
+        raise HoloError("ویس برای تبدیل با Gemini خیلی بزرگ است؛ یک ویس کوتاه‌تر بفرست.")
+    instruction = "این فایل صوتی شامل گفتار است. گفتار را دقیقاً به زبان گفته‌شده پیاده‌سازی کن و فقط متن پیاده‌سازی‌شده را برگردان."
+    payload = {
+        "contents": [{
+            "role": "user",
+            "parts": [
+                {"text": instruction},
+                {"inlineData": {"mimeType": "audio/ogg", "data": base64.b64encode(audio).decode("ascii")}},
+            ],
+        }],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1200},
+    }
+    result = _gemini_request(api_key, model, payload, timeout)
+    try:
+        text = "\n".join(
+            part["text"] for part in result["candidates"][0]["content"]["parts"]
+            if isinstance(part.get("text"), str)
+        )
+    except (KeyError, IndexError, TypeError):
+        raise HoloError("Gemini نتوانست گفتار را از ویس استخراج کند.") from None
+    if not text.strip():
+        raise HoloError("گفتار واضحی در ویس پیدا نشد.")
+    return text.strip()
 
 
 class _SearchParser(HTMLParser):

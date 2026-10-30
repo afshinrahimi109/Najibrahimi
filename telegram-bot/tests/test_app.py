@@ -2,7 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app import BotConfig, REMINDER_PATTERN, PERSIAN_DIGITS, build_application, _split_long_text
+from app import BotConfig, REMINDER_PATTERN, PERSIAN_DIGITS, _chat, build_application, _split_long_text
+from unittest.mock import patch
 
 
 class AppFeatureTests(unittest.TestCase):
@@ -10,6 +11,22 @@ class AppFeatureTests(unittest.TestCase):
         duration = "۳۰ دقیقه".translate(PERSIAN_DIGITS).replace(" ", "")
         self.assertIsNotNone(REMINDER_PATTERN.fullmatch(duration))
         self.assertIsNotNone(REMINDER_PATTERN.fullmatch("2h"))
+
+    @patch("app.gemini_completion", return_value="جواب Gemini")
+    def test_gemini_is_preferred_over_the_old_groq_key(self, gemini_completion):
+        config = BotConfig(
+            telegram_token="123:ABC",
+            owner_id=123,
+            openrouter_api_key="",
+            openrouter_model="openai/gpt-4o-mini",
+            database_path=":memory:",
+            openrouter_timeout_seconds=10,
+            groq_api_key="old-invalid-key",
+            gemini_api_key="new-key",
+        )
+        answer = _chat(config, [{"role": "user", "content": "سلام"}])
+        self.assertEqual(answer, "جواب Gemini")
+        gemini_completion.assert_called_once()
 
     def test_long_text_is_split_within_telegram_limit(self):
         chunks = _split_long_text(("یک متن بلند. " * 500), limit=500)

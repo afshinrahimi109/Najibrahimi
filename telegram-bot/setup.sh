@@ -21,21 +21,34 @@ if [[ ! -f .env ]]; then
     exit 1
   fi
 
-  echo "۳) از console.groq.com یک API key بساز."
-  read -r -s -p "کلید Groq (برای چت و ویس): " GROQ_API_KEY
-  echo
-  if [[ -z "$GROQ_API_KEY" ]]; then echo "کلید Groq خالی است؛ دوباره اجرا کن." >&2; exit 1; fi
+  echo "۳) برای هوش مصنوعی یکی را انتخاب کن: Gemini یا Groq."
+  echo "   کلید Gemini را از aistudio.google.com/apikey یا کلید Groq را از console.groq.com/keys بگیر."
+  read -r -p "انتخاب (1=Gemini، 2=Groq) [1]: " AI_PROVIDER
+  AI_PROVIDER="${AI_PROVIDER:-1}"
+  if [[ "$AI_PROVIDER" == "1" ]]; then
+    read -r -s -p "کلید Gemini: " AI_API_KEY
+    echo
+    if [[ -z "$AI_API_KEY" ]]; then echo "کلید خالی است؛ دوباره اجرا کن." >&2; exit 1; fi
+    PROVIDER_LINES=$'GEMINI_API_KEY='"$AI_API_KEY"$'\nGEMINI_MODEL=gemini-2.5-flash'
+  elif [[ "$AI_PROVIDER" == "2" ]]; then
+    read -r -s -p "کلید Groq: " AI_API_KEY
+    echo
+    if [[ -z "$AI_API_KEY" ]]; then echo "کلید خالی است؛ دوباره اجرا کن." >&2; exit 1; fi
+    PROVIDER_LINES=$'GROQ_API_KEY='"$AI_API_KEY"$'\nGROQ_MODEL=llama-3.3-70b-versatile'
+  else
+    echo "انتخاب معتبر نیست؛ دوباره اجرا کن." >&2
+    exit 1
+  fi
 
   umask 077
   {
     printf 'TELEGRAM_BOT_TOKEN=%s\n' "$TELEGRAM_BOT_TOKEN"
     printf 'TELEGRAM_OWNER_ID=%s\n' "$TELEGRAM_OWNER_ID"
-    printf 'GROQ_API_KEY=%s\n' "$GROQ_API_KEY"
-    printf 'GROQ_MODEL=llama-3.3-70b-versatile\n'
+    printf '%s\n' "$PROVIDER_LINES"
     printf 'DATABASE_PATH=./data/drafts.sqlite3\n'
   } > .env
   chmod 600 .env
-  unset TELEGRAM_BOT_TOKEN TELEGRAM_OWNER_ID GROQ_API_KEY
+  unset TELEGRAM_BOT_TOKEN TELEGRAM_OWNER_ID AI_API_KEY PROVIDER_LINES
   echo "تنظیمات محلی ذخیره شد."
 else
   echo "فایل .env از قبل وجود دارد؛ تنظیمات فعلی را تغییر نمی‌دهم."
