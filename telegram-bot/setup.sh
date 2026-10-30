@@ -21,10 +21,10 @@ if [[ ! -f .env ]]; then
     exit 1
   fi
 
-  echo "۳) برای هوش مصنوعی یکی را انتخاب کن: Gemini یا Groq."
+  echo "۳) یکی را انتخاب کن: Gemini، Groq، یا مدل عمومی بدون کلید."
   echo "   کلید Gemini را از aistudio.google.com/apikey یا کلید Groq را از console.groq.com/keys بگیر."
-  read -r -p "انتخاب (1=Gemini، 2=Groq) [1]: " AI_PROVIDER
-  AI_PROVIDER="${AI_PROVIDER:-1}"
+  read -r -p "انتخاب (1=Gemini، 2=Groq، 3=بدون کلید) [3]: " AI_PROVIDER
+  AI_PROVIDER="${AI_PROVIDER:-3}"
   if [[ "$AI_PROVIDER" == "1" ]]; then
     read -r -s -p "کلید Gemini: " AI_API_KEY
     echo
@@ -35,6 +35,8 @@ if [[ ! -f .env ]]; then
     echo
     if [[ -z "$AI_API_KEY" ]]; then echo "کلید خالی است؛ دوباره اجرا کن." >&2; exit 1; fi
     PROVIDER_LINES=$'GROQ_API_KEY='"$AI_API_KEY"$'\nGROQ_MODEL=llama-3.3-70b-versatile'
+  elif [[ "$AI_PROVIDER" == "3" ]]; then
+    PROVIDER_LINES=$'PUBLIC_FALLBACK=1'
   else
     echo "انتخاب معتبر نیست؛ دوباره اجرا کن." >&2
     exit 1

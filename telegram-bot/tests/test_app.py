@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from app import BotConfig, REMINDER_PATTERN, PERSIAN_DIGITS, _chat, build_application, _split_long_text
+from holo import HoloError
 from unittest.mock import patch
 
 
@@ -27,6 +28,23 @@ class AppFeatureTests(unittest.TestCase):
         answer = _chat(config, [{"role": "user", "content": "سلام"}])
         self.assertEqual(answer, "جواب Gemini")
         gemini_completion.assert_called_once()
+
+    @patch("app.pollinations_completion", return_value="جواب مدل عمومی")
+    @patch("app.chat_completion", side_effect=HoloError("کلید Groq نامعتبر"))
+    def test_invalid_groq_key_falls_back_to_no_key_text_model(self, groq_completion, public_completion):
+        config = BotConfig(
+            telegram_token="123:ABC",
+            owner_id=123,
+            openrouter_api_key="",
+            openrouter_model="openai/gpt-4o-mini",
+            database_path=":memory:",
+            openrouter_timeout_seconds=10,
+            groq_api_key="old-invalid-key",
+        )
+        answer = _chat(config, [{"role": "user", "content": "سلام"}])
+        self.assertEqual(answer, "جواب مدل عمومی")
+        groq_completion.assert_called_once()
+        public_completion.assert_called_once()
 
     def test_long_text_is_split_within_telegram_limit(self):
         chunks = _split_long_text(("یک متن بلند. " * 500), limit=500)

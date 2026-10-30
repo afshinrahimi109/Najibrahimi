@@ -57,6 +57,55 @@ def chat_completion(
     return content.strip()
 
 
+def _pollinations_text(raw: str) -> str:
+    try:
+        data = json.loads(raw)
+        content = data["choices"][0]["message"]["content"]
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        content = raw.strip()
+    return content.strip() if isinstance(content, str) else ""
+
+
+def pollinations_completion(
+    *, messages: list[dict[str, str]], timeout: float = 60, max_tokens: int = 1200,
+) -> str:
+    """No-key public text fallback; availability and limits are controlled by the provider."""
+    endpoint = "https://text.pollinations.ai/openai"
+    payload = {
+        "model": "openai",
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": max_tokens,
+    }
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": "HoloAgent/1.0"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            content = _pollinations_text(response.read(2_000_000).decode("utf-8", "replace"))
+        if content:
+            return content
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as exc:
+        LOGGER.warning("Public text POST fallback failed: %s", type(exc).__name__)
+
+    # Older Pollinations deployments also accept a prompt in the URL path.
+    flat_prompt = "\n".join(f"{item['role']}: {item['content']}" for item in messages)
+    get_url = "https://text.pollinations.ai/" + urllib.parse.quote(flat_prompt[:6000]) + "?model=openai"
+    get_request = urllib.request.Request(get_url, headers={"User-Agent": "HoloAgent/1.0"})
+    try:
+        with urllib.request.urlopen(get_request, timeout=min(timeout, 35)) as response:
+            content = _pollinations_text(response.read(2_000_000).decode("utf-8", "replace"))
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as exc:
+        LOGGER.warning("Public text GET fallback failed: %s", type(exc).__name__)
+        raise HoloError("مدل عمومیِ بدون کلید فعلاً در دسترس نیست.") from None
+    if not content:
+        raise HoloError("مدل عمومی پاسخ متنی برنگرداند.")
+    return content
+
+
 def _gemini_request(api_key: str, model: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
     if not api_key:
         raise HoloError("کلید Gemini تنظیم نشده است؛ GEMINI_API_KEY را وارد کن.")

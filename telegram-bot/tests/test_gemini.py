@@ -2,7 +2,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from holo import HoloError, gemini_completion, gemini_transcribe
+from holo import HoloError, gemini_completion, gemini_transcribe, pollinations_completion
 
 
 class FakeResponse:
@@ -53,6 +53,16 @@ class GeminiTests(unittest.TestCase):
         inline_audio = payload["contents"][0]["parts"][1]["inlineData"]
         self.assertEqual(inline_audio["mimeType"], "audio/ogg")
         self.assertTrue(inline_audio["data"])
+
+    @patch("holo.urllib.request.urlopen")
+    def test_public_no_key_text_fallback_works(self, urlopen):
+        urlopen.return_value = FakeResponse({
+            "choices": [{"message": {"content": "پاسخ عمومی"}}]
+        })
+        answer = pollinations_completion(messages=[{"role": "user", "content": "سلام"}])
+        self.assertEqual(answer, "پاسخ عمومی")
+        request = urlopen.call_args.args[0]
+        self.assertIsNone(request.get_header("Authorization"))
 
     @patch("holo.urllib.request.urlopen")
     def test_invalid_key_has_clear_error(self, urlopen):

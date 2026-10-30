@@ -19,7 +19,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from database import DraftStore
 from holo import (HoloError, chat_completion, clean_intent_text, format_search_results, generate_image,
-                  gemini_completion, gemini_transcribe, search_web, transcribe_audio)
+                  gemini_completion, gemini_transcribe, pollinations_completion, search_web, transcribe_audio)
 
 LOGGER = logging.getLogger("najib_agent")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -175,30 +175,49 @@ def _openrouter_chat(
 
 
 def _chat(config: BotConfig, messages: list[dict[str, str]], *, max_tokens: int = 1000) -> str:
-    """Use Groq when configured, retaining OpenRouter as a backward-compatible fallback."""
+    """Try configured providers, then use a public no-key model as a best-effort fallback."""
+    failures: list[str] = []
     if config.gemini_api_key:
-        return gemini_completion(
-            api_key=config.gemini_api_key,
-            model=config.gemini_model,
-            messages=messages,
-            timeout=config.openrouter_timeout_seconds,
-            max_tokens=max_tokens,
-        )
+        try:
+            return gemini_completion(
+                api_key=config.gemini_api_key,
+                model=config.gemini_model,
+                messages=messages,
+                timeout=config.openrouter_timeout_seconds,
+                max_tokens=max_tokens,
+            )
+        except HoloError as exc:
+            LOGGER.warning("Gemini unavailable; falling back: %s", exc)
+            failures.append(str(exc))
     if config.groq_api_key:
-        return chat_completion(
-            api_key=config.groq_api_key,
-            model=config.groq_model,
-            messages=messages,
-            timeout=config.openrouter_timeout_seconds,
-            max_tokens=max_tokens,
-        )
+        try:
+            return chat_completion(
+                api_key=config.groq_api_key,
+                model=config.groq_model,
+                messages=messages,
+                timeout=config.openrouter_timeout_seconds,
+                max_tokens=max_tokens,
+            )
+        except HoloError as exc:
+            LOGGER.warning("Groq unavailable; falling back: %s", exc)
+            failures.append(str(exc))
     if config.openrouter_api_key:
         system_prompt = messages[0]["content"] if messages and messages[0]["role"] == "system" else ""
         user_prompt = "\n\n".join(
             f"{item['role']}: {item['content']}" for item in messages[1 if system_prompt else 0:]
         )
-        return _openrouter_chat(config, system_prompt, user_prompt, max_tokens=max_tokens)
-    raise GenerationError("هیچ کلید هوش مصنوعی تنظیم نشده است؛ GEMINI_API_KEY، GROQ_API_KEY یا OPENROUTER_API_KEY را وارد کن.")
+        try:
+            return _openrouter_chat(config, system_prompt, user_prompt, max_tokens=max_tokens)
+        except GenerationError as exc:
+            LOGGER.warning("OpenRouter unavailable; falling back: %s", exc)
+            failures.append(str(exc))
+    try:
+        return pollinations_completion(messages=messages, timeout=60, max_tokens=max_tokens)
+    except HoloError as exc:
+        LOGGER.warning("No-key fallback failed: %s", exc)
+        if failures:
+            raise HoloError("سرویس‌های هوش مصنوعی پاسخ ندادند؛ کمی بعد دوباره امتحان کن.") from None
+        raise
 
 
 def _split_long_text(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> list[str]:
@@ -264,6 +283,7 @@ async def start_command(
         "سلام! 👋 من Holo Agent هستم؛ دستیار خصوصی فارسی‌زبانت.\n\n"
         "پیام متنی یا ویس بفرست؛ می‌توانم جستجو و خلاصه کنم، تصویر بسازم و یادداشت/کار/یادآوری نگه دارم.\n\n"
         "نمونه‌ها:\n/note ایدهٔ جدید\n/todo add خرید نان\n/remind 30m تماس با دوست\n/search خبرهای هوش مصنوعی\n/post موضوع پست کانال\n\n"
+        "اگر کلید AI کار نکند، چت متنی از مدل عمومی Pollinations پاسخ می‌گیرد؛ اطلاعات حساس نفرست. برای فهمیدن ویس، کلید معتبر لازم است.\n"
         "برای راهنما: /help"
     )
 
@@ -294,13 +314,13 @@ async def status_command(
     config = _get_config(context)
     store = _get_store(context)
     llm_status = (
-        f"Gemini فعال — {config.gemini_model}"
+        f"Gemini تنظیم‌شده — {config.gemini_model} (با fallback عمومی)"
         if config.gemini_api_key
-        else f"Groq فعال — {config.groq_model}"
+        else f"Groq تنظیم‌شده — {config.groq_model} (با fallback عمومی)"
         if config.groq_api_key
-        else f"OpenRouter فعال — {config.openrouter_model}"
+        else f"OpenRouter تنظیم‌شده — {config.openrouter_model} (با fallback عمومی)"
         if config.openrouter_api_key
-        else "کلید تنظیم نشده"
+        else "Pollinations عمومی؛ بدون کلید API"
     )
     count = store.count_drafts(owner_id=config.owner_id)
     notes_count = store.count_notes(owner_id=config.owner_id)
@@ -327,10 +347,6 @@ async def _create_reel(message: Any, context: ContextTypes.DEFAULT_TYPE, topic: 
     if len(topic) > MAX_TOPIC_LENGTH:
         await message.reply_text(f"موضوع خیلی طولانی است؛ حداکثر {MAX_TOPIC_LENGTH} نویسه بنویس.")
         return
-    if not config.gemini_api_key and not config.groq_api_key and not config.openrouter_api_key:
-        await message.reply_text("⛔ کلید Gemini، Groq یا OpenRouter در تنظیمات وارد نشده است.")
-        return
-
     await message.reply_text("🧠 در حال انتخاب زاویهٔ محتوا…")
     try:
         angle = await asyncio.to_thread(
@@ -540,9 +556,6 @@ async def _create_telegram_post(message: Any, context: ContextTypes.DEFAULT_TYPE
     if not topic:
         await message.reply_text("موضوع پست را بنویس؛ مثال: /post نکته‌های شروع برنامه‌نویسی")
         return
-    if not config.gemini_api_key and not config.groq_api_key and not config.openrouter_api_key:
-        await message.reply_text("برای تولید پست، کلید Gemini، Groq یا OpenRouter لازم است.")
-        return
     await message.reply_text("✍️ در حال نوشتن پیش‌نویس پست کانال…")
     try:
         content = await asyncio.to_thread(
@@ -580,9 +593,6 @@ async def summarize_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not source:
         await update.effective_message.reply_text("متنی را برای خلاصه‌کردن بعد از دستور بفرست؛ مثال: /summarize [متن]")
         return
-    if not config.gemini_api_key and not config.groq_api_key and not config.openrouter_api_key:
-        await update.effective_message.reply_text("برای خلاصه‌سازی، کلید Gemini، Groq یا OpenRouter لازم است.")
-        return
     try:
         result = await asyncio.to_thread(
             _chat, config,
@@ -610,7 +620,7 @@ async def _run_search(message: Any, context: ContextTypes.DEFAULT_TYPE, query: s
         results = await asyncio.to_thread(search_web, query)
         source_text = format_search_results(results)
         config = _get_config(context)
-        if results and (config.gemini_api_key or config.groq_api_key or config.openrouter_api_key):
+        if results:
             summary = await asyncio.to_thread(
                 _chat, config,
                 [{"role": "system", "content": "نتایج جستجوی ارائه‌شده را به فارسی خلاصه کن. فقط از اطلاعات همین نتایج استفاده کن، عدم قطعیت را روشن کن و منابع را با URL نگه دار."},
@@ -679,9 +689,6 @@ async def _process_text(message: Any, context: ContextTypes.DEFAULT_TYPE, text: 
         if not summary_text:
             await message.reply_text("متن را بعد از دونقطه بفرست.")
             return
-        if not config.gemini_api_key and not config.groq_api_key and not config.openrouter_api_key:
-            await message.reply_text("برای خلاصه‌سازی، کلید Gemini، Groq یا OpenRouter لازم است.")
-            return
         try:
             summary = await asyncio.to_thread(
                 _chat, config,
@@ -711,9 +718,6 @@ async def _process_text(message: Any, context: ContextTypes.DEFAULT_TYPE, text: 
         return
 
     config = _get_config(context)
-    if not config.gemini_api_key and not config.groq_api_key and not config.openrouter_api_key:
-        await message.reply_text("⛔ مغز هوشمند هنوز پیکربندی نشده است؛ کلید GEMINI_API_KEY یا GROQ_API_KEY را در تنظیمات سرور وارد کن.")
-        return
     history = context.user_data.setdefault("conversation", [])
     history.append({"role": "user", "content": text[:4000]})
     messages = [{"role": "system", "content": "تو Holo هستی؛ دستیار فارسی‌زبانِ صمیمی و دقیق. به فارسی پاسخ بده. ادعا نکن جستجو، انتشار، ساخت تصویر یا کار بیرونی انجام داده‌ای مگر ابزار واقعاً اجرا شده باشد. برای درخواستِ جستجو، تصویر یا پیش‌نویس از ابزارهای همین ربات استفاده کن. پاسخ روشن و مختصر باشد."}]
@@ -756,7 +760,13 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.effective_message.reply_text(f"📝 متن تشخیص‌داده‌شده:\n{text[:3000]}")
         await _process_text(update.effective_message, context, text)
     except HoloError as exc:
-        await update.effective_message.reply_text(f"⛔ {exc}")
+        if not config.gemini_api_key and config.groq_api_key:
+            await update.effective_message.reply_text(
+                "مدل عمومیِ بدون کلید فقط متن را پاسخ می‌دهد؛ برای تبدیل ویس باید کلید معتبر Gemini یا Groq داشته باشی. "
+                "فعلاً می‌توانی از میکروفون صفحه‌کلید گوشی برای نوشتن گفتار به‌صورت متن استفاده کنی."
+            )
+        else:
+            await update.effective_message.reply_text(f"⛔ {exc}")
     except Exception:
         LOGGER.exception("Voice processing failed")
         await update.effective_message.reply_text("⛔ پردازش ویس ناموفق بود؛ کمی بعد دوباره امتحان کن.")
