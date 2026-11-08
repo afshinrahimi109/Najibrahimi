@@ -1,0 +1,27 @@
+{
+  "name": "bishomare-call",
+  "version": "1.0.0",
+  "private": true,
+  "description": "تماس صوتی و تصویری بدون سیم‌کارت — WebRTC + signaling سرور خودت",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node test/signal.test.js && node test/browser.test.js && node test/lan.test.js",
+    "lan": "node server.js --lan"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "selfsigned": "^5.5.0",
+    "web-push": "^4.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "jsdom": "^31.0.0"
+  }
+}

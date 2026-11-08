@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<title>بیشماره — تماس بدون سیم‌کارت</title>
+<meta name="description" content="تماس صوتی و تصویری رایگان بدون سیم‌کارت و بدون شماره تلفن؛ مستقیم، رمزنگاری‌شده و بین‌المللی." />
+<meta name="theme-color" content="#070b12" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="بیشماره" />
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<link rel="icon" href="icons/icon-192.png" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ───────────── آیکون‌ها ───────────── -->
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.2 1.2"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.2-1.2"/></symbol>
+  <symbol id="i-keypad" viewBox="0 0 24 24"><circle cx="6" cy="6" r="1.6"/><circle cx="12" cy="6" r="1.6"/><circle cx="18" cy="6" r="1.6"/><circle cx="6" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18" cy="12" r="1.6"/><circle cx="6" cy="18" r="1.6"/><circle cx="12" cy="18" r="1.6"/><circle cx="18" cy="18" r="1.6"/></symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24"><path d="M6.5 3.5h2.2l1.6 4-2 1.4a12 12 0 0 0 6.8 6.8l1.4-2 4 1.6v2.2a2.5 2.5 0 0 1-2.7 2.5C11.3 19.4 4.6 12.7 4 6.2A2.5 2.5 0 0 1 6.5 3.5Z"/></symbol>
+  <symbol id="i-phone-off" viewBox="0 0 24 24"><path d="M6.5 3.5h2.2l1.6 4-2 1.4a12 12 0 0 0 6.8 6.8l1.4-2 4 1.6v2.2a2.5 2.5 0 0 1-2.7 2.5C11.3 19.4 4.6 12.7 4 6.2A2.5 2.5 0 0 1 6.5 3.5Z"/><path d="M3 3l18 18"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="10" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></symbol>
+  <symbol id="i-mic-off" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="10" rx="3"/><path d="M5 11a7 7 0 0 0 11 5.7"/><path d="M12 18v3"/><path d="M3 3l18 18"/></symbol>
+  <symbol id="i-video" viewBox="0 0 24 24"><rect x="2.5" y="6" width="13" height="12" rx="3"/><path d="M15.5 11l6-3.5v9l-6-3.5z"/></symbol>
+  <symbol id="i-video-off" viewBox="0 0 24 24"><rect x="2.5" y="6" width="13" height="12" rx="3"/><path d="M15.5 11l6-3.5v9l-6-3.5z"/><path d="M3 3l18 18"/></symbol>
+  <symbol id="i-flip" viewBox="0 0 24 24"><path d="M4 8a8 8 0 0 1 13-3"/><path d="M17 2v3.5h-3.5"/><path d="M20 16a8 8 0 0 1-13 3"/><path d="M7 22v-3.5h3.5"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20V10"/><path d="M10 20V4"/><path d="M16 20v-7"/><path d="M22 20H2"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2.5"/><path d="M15 5.5A2.5 2.5 0 0 0 12.5 3H5.5A2.5 2.5 0 0 0 3 5.5v7A2.5 2.5 0 0 0 5.5 15"/></symbol>
+  <symbol id="i-share" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="M8 7l4-4 4 4"/><path d="M5 14v4.5A2.5 2.5 0 0 0 7.5 21h9a2.5 2.5 0 0 0 2.5-2.5V14"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M5 5l14 14"/><path d="M19 5L5 19"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M20 12H6"/><path d="M12 6l-6 6 6 6"/></symbol>
+  <symbol id="i-del" viewBox="0 0 24 24"><path d="M20 6H9.5L3.5 12l6 6H20a1.5 1.5 0 0 0 1.5-1.5v-9A1.5 1.5 0 0 0 20 6Z"/><path d="M12 9.5l4 5"/><path d="M16 9.5l-4 5"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.4"/><path d="M2.8 20a6.2 6.2 0 0 1 12.4 0"/><path d="M16 5.2a3.4 3.4 0 0 1 0 6.6"/><path d="M17.6 14.4A6.2 6.2 0 0 1 21.4 20"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M4.5 12.5l5 5 10-11"/></symbol>
+  <symbol id="i-qr" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M14 14h3v3h-3z"/><path d="M20 14v2"/><path d="M20 20h-3"/><path d="M14 20v-1"/></symbol>
+  <symbol id="i-in" viewBox="0 0 24 24"><path d="M20 12H7"/><path d="M12 6l-6 6 6 6"/></symbol>
+  <symbol id="i-out" viewBox="0 0 24 24"><path d="M4 12h13"/><path d="M12 6l6 6-6 6"/></symbol>
+</svg>
+
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark"><svg><use href="#i-phone"/></svg></span>
+      <span class="brand-text">
+        <b>بی‌شماره</b>
+        <small>تماس بدون سیم‌کارت</small>
+      </span>
+    </div>
+    <div class="topbar-actions">
+      <span id="connPill" class="pill pill-wait"><i></i><span>اتصال…</span></span>
+      <button id="btnSettings" class="icon-btn" aria-label="تنظیمات"><svg><use href="#i-gear"/></svg></button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+
+  <main id="home" class="screen">
+    <!-- کارت هویت -->
+    <section class="card id-card">
+      <div class="id-row">
+        <div class="id-main">
+          <span class="label">شماره‌ی من</span>
+          <strong id="myId" class="my-id">···</strong>
+        </div>
+        <button id="btnIdMenu" class="ghost-btn">
+          <span id="myName">مهمان</span>
+          <span class="dot"></span>
+        </button>
+      </div>
+      <p class="micro">تا وقتی این صفحه باز است فعالی. دوستانت با همین شماره بهت زنگ می‌زنند — بدون سیم‌کارت.</p>
+      <div class="quick-links">
+        <button id="btnMyLink" class="quick-btn"><svg><use href="#i-link"/></svg>کپی لینک من</button>
+        <button id="btnMyQr" class="quick-btn"><svg><use href="#i-qr"/></svg>QR من</button>
+      </div>
+      <div id="myQrHome" class="qr-box" hidden></div>
+      <span class="chip-lan" id="lanChip" hidden>
+        📴 حالت محلی — بدون اینترنت
+        <a class="chip-link" href="/cert" download>نصب گواهی</a>
+      </span>
+    </section>
+
+    <!-- تب‌ها -->
+    <div class="tabs" role="tablist">
+      <button class="tab active" data-tab="link" role="tab"><svg><use href="#i-link"/></svg>لینک تماس</button>
+      <button class="tab" data-tab="dial" role="tab"><svg><use href="#i-keypad"/></svg>شماره‌گیری</button>
+    </div>
+
+    <!-- تب لینک -->
+    <section class="pane active" data-pane="link">
+      <div class="card">
+        <h2>تماس با یک لینک</h2>
+        <p class="muted">یک لینک بساز و برای هر کسی بفرست (واتساپ، تلگرام، پیامک…). طرف مقابل که بازش کند، تماس خودکار وصل می‌شود.</p>
+        <div class="mode-row">
+          <button class="mode active" data-video="0"><svg><use href="#i-mic"/></svg>صوتی</button>
+          <button class="mode" data-video="1"><svg><use href="#i-video"/></svg>تصویری</button>
+        </div>
+        <button id="btnNewLink" class="btn btn-primary btn-lg"><svg><use href="#i-link"/></svg>ساخت لینک تماس</button>
+        <div id="linkBox" class="link-box" hidden>
+          <div class="link-field">
+            <input id="linkInput" readonly aria-label="لینک تماس" />
+            <button id="btnCopyLink" class="icon-btn solid" aria-label="کپی"><svg><use href="#i-copy"/></svg></button>
+          </div>
+          <div class="link-actions">
+            <button id="btnShareLink" class="btn btn-soft"><svg><use href="#i-share"/></svg>اشتراک‌گذاری</button>
+            <button id="btnOpenLink" class="btn btn-soft">باز کردن در همین دستگاه</button>
+          </div>
+          <button id="btnQr" class="btn btn-soft btn-qr">نمایش QR برای اسکن با دوربین</button>
+          <div id="qrBox" class="qr-box" hidden></div>
+          <p class="micro">منتظر می‌مانیم… همین‌که لینک باز شود، تماس برقرار می‌شود.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- تب شماره‌گیری -->
+    <section class="pane" data-pane="dial">
+      <div class="card dial-card">
+        <div class="dial-display">
+          <span id="dialDigits" class="digits" dir="ltr"></span>
+          <span class="dial-hint" id="dialHint">شماره‌ی ۶ رقمی طرف مقابل</span>
+        </div>
+        <div class="dialpad" id="dialpad">
+          <button data-k="1">1</button><button data-k="2">2<small>ABC</small></button><button data-k="3">3<small>DEF</small></button>
+          <button data-k="4">4<small>GHI</small></button><button data-k="5">5<small>JKL</small></button><button data-k="6">6<small>MNO</small></button>
+          <button data-k="7">7<small>PQRS</small></button><button data-k="8">8<small>TUV</small></button><button data-k="9">9<small>WXYZ</small></button>
+          <button data-k="*">*</button>
+          <button data-k="0">0</button>
+          <button data-k="del" class="mute"><svg><use href="#i-del"/></svg></button>
+        </div>
+        <div class="dial-actions">
+          <button id="btnDial" class="btn btn-call" aria-label="تماس"><svg><use href="#i-phone"/></svg></button>
+          <button id="btnVideoDial" class="mode-mini" title="تماس تصویری"><svg><use href="#i-video"/></svg></button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 class="row-title"><svg><use href="#i-users"/></svg>آنلاین‌ها <span id="onlineCount" class="badge">0</span></h2>
+        <ul id="onlineList" class="list"></ul>
+        <p class="micro" id="onlineEmpty">هیچ‌کس دیگری آنلاین نیست. لینک تماس بساز و برای دوستت بفرست.</p>
+      </div>
+    </section>
+
+    <div class="card" id="recentCard" hidden>
+      <h2 class="row-title"><svg><use href="#i-clock"/></svg>تماس‌های اخیر</h2>
+      <ul id="recentList" class="list"></ul>
+    </div>
+
+    <p class="footer-note">
+      صدا و تصویر <b>مستقیم و رمزنگاری‌شده</b> بین دو دستگاه رد و بدل می‌شود — سرور فقط تماس را «معرفی» می‌کند.
+      هیچ سیم‌کارت، شماره یا ثبت‌نامی لازم نیست.
+    </p>
+  </main>
+</div>
+
+<!-- ───────────── صفحه‌ی تماس ───────────── -->
+<div id="callScreen" class="call-screen" hidden data-state="idle">
+  <video id="remoteVideo" class="remote-video" playsinline autoplay></video>
+  <div class="call-glow"></div>
+
+  <div class="call-head">
+    <div class="avatar" id="callAvatar">؟</div>
+    <div class="call-peer">
+      <strong id="callName">—</strong>
+      <span id="callNumber" dir="ltr"></span>
+    </div>
+    <span id="callTimer" class="timer" dir="ltr">00:00</span>
+  </div>
+
+  <div class="call-mid">
+    <div class="big-avatar" id="bigAvatar">؟</div>
+    <div class="call-status" id="callStatus">در حال اتصال…</div>
+    <div class="wave" id="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="quality" id="callQuality" hidden><span class="q-dot"></span><span id="qualityText">کیفیت: خوب</span></div>
+  </div>
+
+  <video id="localVideo" class="local-video" playsinline autoplay muted hidden></video>
+
+  <div class="call-controls" id="callControls">
+    <button class="cbtn" data-act="mute" aria-label="بی‌صدا"><svg><use href="#i-mic"/></svg><span>بی‌صدا</span></button>
+    <button class="cbtn" data-act="camera" aria-label="دوربین"><svg><use href="#i-video-off"/></svg><span>دوربین</span></button>
+    <button class="cbtn" data-act="flip" aria-label="چرخش دوربین" hidden><svg><use href="#i-flip"/></svg><span>چرخش</span></button>
+    <button class="cbtn" data-act="stats" aria-label="جزئیات"><svg><use href="#i-chart"/></svg><span>جزئیات</span></button>
+    <button class="cbtn danger" data-act="hangup" aria-label="پایان"><svg><use href="#i-phone-off"/></svg><span>پایان</span></button>
+    <button class="cbtn success" data-act="accept" aria-label="پاسخ" hidden><svg><use href="#i-phone"/></svg><span>پاسخ</span></button>
+    <button class="cbtn danger" data-act="reject" aria-label="رد" hidden><svg><use href="#i-phone-off"/></svg><span>رد</span></button>
+  </div>
+
+  <div class="stats-panel" id="statsPanel" hidden></div>
+  <button id="btnPlayAudio" class="audio-fix" hidden>🔈 برای شنیدن صدا بزن</button>
+</div>
+
+<!-- ───────────── تنظیمات ───────────── -->
+<div id="sheet" class="sheet" hidden>
+  <div class="sheet-backdrop" data-close></div>
+  <div class="sheet-body">
+    <div class="sheet-head">
+      <h2>تنظیمات</h2>
+      <button class="icon-btn" data-close aria-label="بستن"><svg><use href="#i-x"/></svg></button>
+    </div>
+    <label class="field">
+      <span>نام نمایشی</span>
+      <input id="setName" maxlength="24" placeholder="مثلاً علی" />
+    </label>
+    <div class="field">
+      <span>لینک تماس مستقیم من</span>
+      <div class="link-field">
+        <input id="myLink" readonly dir="ltr" aria-label="لینک تماس مستقیم" />
+        <button id="btnCopyMyLink" class="icon-btn solid" aria-label="کپی"><svg><use href="#i-copy"/></svg></button>
+      </div>
+      <small class="switch-note">هر کسی این لینک را باز کند، با یک ضربه به تو زنگ می‌زند — حتی اگر برنامه‌ات بسته باشد.</small>
+      <div id="myQr" class="qr-box" hidden></div>
+    </div>
+    <label class="field">
+      <span>میکروفون</span>
+      <select id="setMic"><option value="">پیش‌فرض دستگاه</option></select>
+    </label>
+    <label class="field">
+      <span>دوربین</span>
+      <select id="setCam"><option value="">پیش‌فرض دستگاه</option></select>
+    </label>
+    <div class="switch-row">
+      <span>صدای زنگ</span>
+      <button id="setRing" class="switch" role="switch" aria-checked="true"><i></i></button>
+    </div>
+    <div class="switch-row">
+      <span>شماره‌ی ثابت روی این دستگاه</span>
+      <button id="setSticky" class="switch" role="switch" aria-checked="true"><i></i></button>
+    </div>
+    <div class="switch-row">
+      <span>زنگ خوردن با برنامه‌ی بسته<br><small class="switch-note">اعلان پوش — روی آیفون باید برنامه نصب شده باشد</small></span>
+      <button id="setPush" class="switch" role="switch" aria-checked="false"><i></i></button>
+    </div>
+    <div class="sheet-info" id="sheetInfo"></div>
+    <button id="btnInstall" class="btn btn-soft" hidden>افزودن به صفحه‌ی اصلی (نصب برنامه)</button>
+    <p class="micro" id="iosInstallHint" hidden>در آیفون/آیپد: در سافاری دکمه‌ی «اشتراک‌گذاری» را بزن → «افزودن به صفحه‌ی اصلی».
+      اعلان تماس روی آیفون فقط در حالت نصب‌شده کار می‌کند.</p>
+    <button id="btnReset" class="btn btn-soft">پاک کردن تاریخچه و تنظیمات</button>
+    <p class="micro">بیشماره یک برنامه‌ی وب است (PWA). با «افزودن به صفحه‌ی اصلی» مثل یک اپ نصب می‌شود.</p>
+  </div>
+</div>
+
+<!-- ───────────── دیالوگ کد دسترسی ───────────── -->
+<div id="codeGate" class="gate" hidden>
+  <div class="gate-card">
+    <h2>کد دسترسی</h2>
+    <p class="muted">این سرور خصوصی است. کدی که مدیر سرور داده را وارد کن.</p>
+    <input id="codeInput" inputmode="numeric" autocomplete="one-time-code" placeholder="••••" />
+    <button id="btnCode" class="btn btn-primary">ورود</button>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
