@@ -6,6 +6,23 @@
 
 > بدون سیم‌کارت، بدون اپ‌استور، بدون شماره — فقط یک مرورگر. روی اندروید/آیفون هم با «افزودن به صفحه‌ی اصلی» مثل یک اپ نصب می‌شود (PWA).
 
+<p align="center">
+  <a href="https://render.com/deploy?repo=https://github.com/afshinrahimi109/Najibrahimi">
+    <img src="https://render.com/images/deploy-to-render-button.svg" alt="Deploy to Render" height="38">
+  </a>
+</p>
+
+**سریع‌ترین راه تا لینک همیشگی:** دکمه‌ی بالا → ورود با گیت‌هاب → **Apply**. همه‌چیز از `render.yaml`
+خوانده می‌شود و در چند دقیقه آدرسی مثل `https://bishomare.onrender.com` می‌گیری؛ همان لینک توست.
+(این دکمه بعد از merge شدن این تغییرات در شاخه‌ی `main` فعال می‌شود.)
+
+روی **VPS** هم یک دستور کافی است:
+
+```bash
+cp call/.env.example call/.env      # DOMAIN=call.example.com را داخلش بگذار
+cd call && docker compose up -d     # HTTPS خودکار با Caddy
+```
+
 ---
 
 ## ✨ چه چیزی دارد؟
@@ -14,7 +31,7 @@
 | --- | --- |
 | **تماس با لینک** | یک لینک بساز، برای طرف مقابل بفرست (واتساپ/تلگرام/پیامک). به‌محض باز کردن لینک، تماس وصل می‌شود. |
 | **تماس با شماره‌ی ۶ رقمی** | هر آنلاین یک شماره‌ی موقت می‌گیرد؛ با شماره‌گیر روی صفحه، مثل گوشی واقعی زنگ می‌زنی. |
-| **لینک تماس شخصی** | در تنظیمات یک لینک `?to=شماره` داری؛ هر کسی بازش کند با یک ضربه به تو زنگ می‌زند. |
+| **لینک تماس شخصی** | یک دکمه روی صفحه‌ی اصلی: «کپی لینک من» یا «QR من» — هر کسی بازش کند با یک ضربه به تو زنگ می‌زند. |
 | **تماس تصویری** | روشن/خاموش کردن دوربین در میانه‌ی تماس، بدون قطع شدن صدا، و چرخش دوربین جلو/عقب. |
 | **زنگ واقعی** | زنگ ورودی با Web Audio ساخته می‌شود + لرزش گوشی + تغییر عنوان تب. |
 | **صامت / بی‌صدا** | قطع و وصل میکروفون در یک لحظه (بدون مذاکره‌ی مجدد WebRTC). |
@@ -189,10 +206,11 @@ docker run -d --name bishomare -p 8080:8080 --restart unless-stopped bishomare
 
 | پلتفرم | تنظیمات |
 | --- | --- |
-| **Render** | New → Web Service → این پوشه (`call`) → Build: `npm install` ، Start: `node server.js`. فایل `render.yaml` هم آماده است. |
-| **Railway** | New Project → Deploy from repo → Root Directory: `call` → Start: `node server.js` |
-| **Fly.io** | `fly launch --dockerfile Dockerfile` و بعد `fly deploy` |
-| **VPS + Caddy** | `caddy reverse-proxy --from call.example.com --to 127.0.0.1:8080` (HTTPS خودکار) |
+| **Render** | دکمه‌ی «Deploy to Render» بالای همین صفحه (فایل `render.yaml` در ریشه‌ی مخزن آماده است) |
+| **Railway** | New Project → Deploy from repo → Root Directory: `call` (فایل `railway.json` آماده است) |
+| **Fly.io** | `cd call && fly launch --copy-config && fly deploy` (فایل `fly.toml` آماده است) |
+| **VPS + Docker** | `cp .env.example .env` (دامنه را بگذار) → `docker compose up -d` — اپ + Caddy با HTTPS خودکار |
+| **VPS بدون داکر** | `caddy reverse-proxy --from call.example.com --to 127.0.0.1:8080` |
 
 > برای اینکه WebSocket هم از پشت پروکسی/CDN رد شود، باید هدرهای `Upgrade`/`Connection` عبور کنند (Caddy و Render و Railway به‌صورت پیش‌فرض درست کار می‌کنند).
 
@@ -294,7 +312,10 @@ call/
 ├── test/browser.test.js   تست رابط کاربری در jsdom (دو مرورگر شبیه‌سازی‌شده)
 ├── test/lan.test.js       تست حالت محلی/بدون اینترنت (HTTPS + WSS + QR)
 ├── Dockerfile
-└── docker-compose.turn.yml
+├── docker-compose.yml     اپ + Caddy (HTTPS خودکار) برای هر VPS
+├── fly.toml / railway.json  کانفیگ آماده‌ی استقرار
+├── docker-compose.turn.yml  سرور رله (coturn) برای شبکه‌های سخت
+└── .env.example
 ```
 
 ---

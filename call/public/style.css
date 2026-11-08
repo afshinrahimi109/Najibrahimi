@@ -217,6 +217,17 @@ svg { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width: 1
 }
 .link-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
 
+.quick-links { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+.quick-btn {
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  padding: 11px 10px; border-radius: 13px; border: 1px solid var(--line-2);
+  background: rgba(255,255,255,.05); color: var(--txt); font: inherit; font-size: 12.5px;
+  cursor: pointer; transition: .16s ease;
+}
+.quick-btn svg { font-size: 16px; color: var(--accent); }
+.quick-btn:active { transform: scale(.97); }
+.quick-btn:hover { background: rgba(255,255,255,.1); }
+
 .chip-lan {
   display: inline-flex; align-items: center; gap: 6px; align-self: flex-start;
   margin-top: 10px; padding: 5px 11px; border-radius: 999px; font-size: 11px;

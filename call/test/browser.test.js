@@ -265,6 +265,16 @@ try {
   await waitFor(() => A.q('#connPill').className.includes('pill-ok'), 'سبز شدن نشانگر اتصال');
   ok('نشانگر اتصال «آنلاین» شد');
 
+  /* ── لینک و QR شخصی روی صفحه‌ی اصلی ── */
+  assert.ok(A.q('#btnMyLink') && A.q('#btnMyQr'), 'دکمه‌های لینک/QR شخصی باید باشند');
+  A.click('#btnMyQr');
+  await waitFor(() => A.q('#myQrHome') && !A.q('#myQrHome').hidden, 'QR شخصی');
+  assert.ok(A.q('#myQrHome').querySelector('svg'));
+  ok('QR لینک شخصی با یک ضربه روی صفحه‌ی اصلی ساخته می‌شود');
+  A.click('#btnMyQr');
+  assert.ok(A.q('#myQrHome').hidden);
+  ok('QR شخصی با ضربه‌ی دوم بسته می‌شود');
+
   /* ── شماره‌گیر: نمایش زنده‌ی شماره ── */
   ['5', '5', '5', '1', '2', '3'].forEach((k) => {
     A.click(A.q(`#dialpad [data-k="${k}"]`));

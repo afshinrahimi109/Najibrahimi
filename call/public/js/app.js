@@ -49,6 +49,9 @@ const el = {
   qrBox: $('#qrBox'),
   myQr: $('#myQr'),
   lanChip: $('#lanChip'),
+  btnMyLink: $('#btnMyLink'),
+  btnMyQr: $('#btnMyQr'),
+  myQrHome: $('#myQrHome'),
   btnOpenLink: $('#btnOpenLink'),
   dialDigits: $('#dialDigits'),
   dialHint: $('#dialHint'),
@@ -1270,6 +1273,26 @@ el.setName.oninput = () => {
   save({ name: el.setName.value.trim().slice(0, 24) });
   renderMe();
   sig.send({ t: 'setName', name: store.name });
+};
+
+async function copyText(text, okMsg) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(okMsg);
+  } catch {
+    toast('کپی خودکار ممکن نشد — از تنظیمات کپی کن.', 'err');
+  }
+}
+
+el.btnMyLink.onclick = () => {
+  if (!state.id) return toast('هنوز به سرور وصل نشده‌ام…', 'err');
+  copyText(linkForId(state.id), 'لینک تماس تو کپی شد — برای هر کسی بفرست ✓');
+};
+
+el.btnMyQr.onclick = () => {
+  if (!el.myQrHome.hidden) { el.myQrHome.hidden = true; return; }
+  if (!state.id) return toast('هنوز به سرور وصل نشده‌ام…', 'err');
+  if (!renderQr(el.myQrHome, linkForId(state.id))) toast('ساخت QR ممکن نشد.', 'err');
 };
 
 el.btnCopyMyLink.onclick = async () => {
