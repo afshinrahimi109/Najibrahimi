@@ -79,6 +79,8 @@ const el = {
   sheetInfo: $('#sheetInfo'),
   btnReset: $('#btnReset'),
   myLink: $('#myLink'),
+  btnInstall: $('#btnInstall'),
+  iosInstallHint: $('#iosInstallHint'),
   btnCopyMyLink: $('#btnCopyMyLink'),
   codeGate: $('#codeGate'),
   codeInput: $('#codeInput'),
@@ -1182,6 +1184,8 @@ function openSheet() {
   el.sheet.hidden = false;
   el.setName.value = store.name || '';
   el.myLink.value = state.id ? linkForId(state.id) : '';
+  if (el.btnInstall) el.btnInstall.hidden = !deferredPrompt;
+  if (el.iosInstallHint) el.iosInstallHint.hidden = !(isIOSDevice && !navigator.standalone);
   syncSwitches();
   updateSheetInfo();
   fillDevices();
@@ -1340,6 +1344,31 @@ renderRecents();
 setPill('idle');
 checkEnvironment();
 updateSheetInfo();
+
+/* ───────── نصب برنامه (PWA) ───────── */
+
+let deferredPrompt = null;
+
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredPrompt = e;
+  if (el.btnInstall) el.btnInstall.hidden = false;
+});
+
+if (el.btnInstall) {
+  el.btnInstall.onclick = async () => {
+    if (!deferredPrompt) return;
+    try {
+      deferredPrompt.prompt();
+      await deferredPrompt.userChoice;
+    } catch { /* noop */ }
+    deferredPrompt = null;
+    el.btnInstall.hidden = true;
+  };
+}
+
+const isIOSDevice = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+if (el.iosInstallHint && isIOSDevice && !navigator.standalone) el.iosInstallHint.hidden = false;
 
 /* ثبت سرویس‌ورکر (نصب روی صفحه‌ی اصلی + باز شدن آفلاینِ پوسته) */
 if ('serviceWorker' in navigator && window.isSecureContext) {
