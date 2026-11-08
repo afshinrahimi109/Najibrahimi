@@ -15,10 +15,13 @@ import express from 'express';
 import http from 'http';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
+import https from 'https';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import { generateVAPIDKeys, setVapidDetails, sendNotification } from 'web-push';
+import selfsigned from 'selfsigned';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -30,9 +33,18 @@ const HOST = process.env.HOST || '0.0.0.0';
 // اگر این را تنظیم کنی، فقط کسانی که کد دسترسی دارند میتوانند وارد شوند
 const ACCESS_CODE = (process.env.CALL_CODE || '').trim();
 
+/**
+ * حالت «بدون اینترنت» (شبکه‌ی محلی / LAN)
+ * با `npm run lan` یا LAN=1 روشن می‌شود: سرور روی HTTPS با گواهی خودامضا بالا می‌آید،
+ * STUN لازم نیست (تماس مستقیم روی همان وای‌فای انجام می‌شود) و هیچ بسته‌ای
+ * از دستگاه خارج نمی‌شود. برای همین بدون اینترنت هم کار می‌کند.
+ */
+const LAN = process.argv.includes('--lan') || /^(1|true|yes|on)$/i.test(process.env.LAN || '');
+const HTTPS_PORT = Number(process.env.LAN_PORT || 8443);
+
 // سرورهای STUN برای پیدا کردن مسیر بین دو طرف
-const STUN_URLS = (process.env.STUN_URLS ||
-  'stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302')
+const DEFAULT_STUN = 'stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302';
+const STUN_URLS = (process.env.STUN_URLS !== undefined ? process.env.STUN_URLS : LAN ? '' : DEFAULT_STUN)
   .split(',').map((s) => s.trim()).filter(Boolean);
 
 // سرور TURN اختیاری — برای شبکههایی که NAT سخت دارند (شبکهی اداری/همراه)
@@ -376,6 +388,7 @@ function onHello(peer, msg) {
     name: peer.name,
     iceServers: iceServers(),
     hasTurn: Boolean(TURN_URL),
+    lan: LAN,
     vapidPublicKey: pushReady ? vapid.publicKey : '',
     ringTimeout: RING_TIMEOUT_MS,
     peers: [...peers.values()].filter((p) => p.authed && p !== peer).slice(0, 60)
@@ -612,6 +625,7 @@ app.get('/api/health', (_req, res) => {
     rooms: rooms.size,
     calls: calls.size,
     turn: Boolean(TURN_URL),
+    lan: LAN,
     push: pushReady,
     pushSubs: pushSubs.size,
     uptime: Math.round(process.uptime()),
@@ -623,6 +637,7 @@ app.get('/api/config', (_req, res) => {
   res.json({
     iceServers: iceServers(),
     hasTurn: Boolean(TURN_URL),
+    lan: LAN,
     needCode: Boolean(ACCESS_CODE),
     ringTimeout: RING_TIMEOUT_MS,
     vapidPublicKey: pushReady ? vapid.publicKey : '',
@@ -687,6 +702,21 @@ app.post('/api/send', (req, res) => {
 });
 
 /* ── فایلهای ثابت ── */
+/* ── دانلود گواهی حالت محلی (برای نصب روی گوشی و رفع هشدار) ── */
+app.get('/cert', (_req, res) => {
+  const certFile = path.join(__dirname, 'data', 'tls', 'cert.pem');
+  try {
+    const pem = fs.readFileSync(certFile);
+    res.setHeader('Content-Type', 'application/x-x509-ca-cert');
+    res.setHeader('Content-Disposition', 'attachment; filename="bishomare-lan.crt"');
+    res.setHeader('Cache-Control', 'no-store');
+    res.end(pem);
+  } catch {
+    res.status(404).type('text/plain; charset=utf-8').send('سرور در حالت محلی اجرا نشده است.');
+  }
+});
+
+
 app.use(
   express.static(path.join(__dirname, 'public'), {
     etag: true,
@@ -707,48 +737,57 @@ app.get(/^\/(?!api|ws).*/, (_req, res) => {
 const server = http.createServer(app);
 
 /* ── WebSocket: مسیر اصلی سیگنالینگ ── */
-const wss = new WebSocketServer({ server, path: '/ws', maxPayload: MAX_FRAME_BYTES });
+const wssList = [];
 
-wss.on('connection', (ws, req) => {
-  if (peers.size > MAX_PEERS) {
-    ws.close(1013, 'busy');
-    return;
-  }
-  const peer = new Peer(freshPeerId());
-  peer.transport = 'ws';
-  peer.ws = ws;
-  peers.set(peer.id, peer);
+function attachWs(serverInstance) {
+  const wss = new WebSocketServer({ server: serverInstance, path: '/ws', maxPayload: MAX_FRAME_BYTES });
+  wssList.push(wss);
 
-  ws.isAlive = true;
-  ws.on('pong', () => { ws.isAlive = true; peer.alive = Date.now(); });
+  wss.on('connection', (ws, req) => {
+    if (peers.size > MAX_PEERS) {
+      ws.close(1013, 'busy');
+      return;
+    }
+    const peer = new Peer(freshPeerId());
+    peer.transport = 'ws';
+    peer.ws = ws;
+    peers.set(peer.id, peer);
 
-  // برای اینکه کلاینت بتواند در صورت قطعی همان شناسه را بگیرد
-  send(peer, { t: 'hello-ack', provisionalId: peer.id });
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; peer.alive = Date.now(); });
 
-  ws.on('message', (buf) => {
-    let msg;
-    try { msg = JSON.parse(buf.toString()); } catch { return; }
-    dispatch(peer, msg);
+    // برای اینکه کلاینت بتواند در صورت قطعی همان شناسه را بگیرد
+    send(peer, { t: 'hello-ack', provisionalId: peer.id });
+
+    ws.on('message', (buf) => {
+      let msg;
+      try { msg = JSON.parse(buf.toString()); } catch { return; }
+      dispatch(peer, msg);
+    });
+
+    ws.on('close', () => {
+      if (peer.ws === ws) removePeer(peer);
+    });
+    ws.on('error', () => {
+      if (peer.ws === ws) removePeer(peer);
+    });
+
+    const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0];
+    if (ip) peer.ip = ip;
   });
 
-  ws.on('close', () => {
-    if (peer.ws === ws) removePeer(peer);
-  });
-  ws.on('error', () => {
-    if (peer.ws === ws) removePeer(peer);
-  });
-
-  const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0];
-  if (ip) peer.ip = ip;
-});
+  return wss;
+}
 
 const heartbeat = setInterval(() => {
-  for (const ws of wss.clients) {
-    if (ws.isAlive === false) { ws.terminate(); continue; }
-    ws.isAlive = false;
-    try { ws.ping(); } catch { /* noop */ }
+  for (const wss of wssList) {
+    for (const ws of wss.clients) {
+      if (ws.isAlive === false) { ws.terminate(); continue; }
+      ws.isAlive = false;
+      try { ws.ping(); } catch { /* noop */ }
+    }
   }
-  // پاکسازی اتاقهای قدیمی و همتای بدون اتصال
+  // پاکسازی اتاق‌های قدیمی و همتای بدون اتصال
   const now = Date.now();
   for (const [code, room] of rooms) {
     if (room.members.size === 0 && now - room.createdAt > ROOM_TTL_MS) rooms.delete(code);
@@ -764,16 +803,121 @@ const heartbeat = setInterval(() => {
 }, 30_000);
 heartbeat.unref?.();
 
-server.listen(PORT, HOST, () => {
-  console.log(`\n  📞 بیشماره روی http://${HOST}:${PORT} بالا آمد`);
-  console.log(`     STUN: ${STUN_URLS.join(', ')}`);
-  console.log(`     TURN: ${TURN_URL ? TURN_URL : 'تنظیم نشده (برای شبکههای سخت لازم است)'}`);
+/* ── گواهی خودامضا برای حالت محلی ── */
+
+function localIPv4() {
+  const out = new Set(['127.0.0.1']);
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const ni of list || []) {
+      if (ni.family === 'IPv4' && !ni.internal) out.add(ni.address);
+    }
+  }
+  return [...out];
+}
+
+async function ensureCert() {
+  const dir = path.join(__dirname, 'data', 'tls');
+  const keyFile = path.join(dir, 'key.pem');
+  const certFile = path.join(dir, 'cert.pem');
+  const metaFile = path.join(dir, 'hosts.json');
+  const ips = localIPv4();
+
+  try {
+    const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+    const same = meta.ips.length === ips.length && meta.ips.every((ip) => ips.includes(ip));
+    const key = fs.readFileSync(keyFile, 'utf8');
+    const cert = fs.readFileSync(certFile, 'utf8');
+    if (same && key && cert) return { key, cert };
+  } catch { /* بسازیم */ }
+
+  const altNames = [
+    { type: 2, value: 'localhost' },
+    { type: 2, value: 'bishomare.local' },
+    ...ips.map((ip) => ({ type: 7, ip })),
+  ];
+  const pems = await selfsigned.generate([{ name: 'commonName', value: 'bishomare.local' }], {
+    days: 3650,
+    keySize: 2048,
+    algorithm: 'sha256',
+    extensions: [
+      { name: 'subjectAltName', altNames },
+      { name: 'basicConstraints', cA: true },
+    ],
+  });
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(keyFile, pems.private, { mode: 0o600 });
+    fs.writeFileSync(certFile, pems.cert, { mode: 0o600 });
+    fs.writeFileSync(metaFile, JSON.stringify({ ips, created: Date.now() }), { mode: 0o600 });
+  } catch { /* فایل‌سیستم فقط‌خواندنی */ }
+  return { key: pems.private, cert: pems.cert };
+}
+
+/* ── اجرا ── */
+
+const servers = [];
+
+function printInfo() {
+  console.log(`     STUN: ${STUN_URLS.length ? STUN_URLS.join(', ') : 'ندارد (تماس مستقیم روی شبکه)'}`);
+  console.log(`     TURN: ${TURN_URL || 'تنظیم نشده'}`);
   console.log(`     کد دسترسی: ${ACCESS_CODE ? 'فعال' : 'غیرفعال'}`);
-  console.log(`     اعلان پوش: ${pushReady ? 'فعال (زنگ روی اپ بسته)' : 'غیرفعال'}\n`);
+  console.log(`     اعلان پوش: ${pushReady ? 'فعال' : 'غیرفعال'}`);
+}
+
+async function main() {
+  if (LAN) {
+    const { key, cert } = await ensureCert();
+    const httpsServer = https.createServer({ key, cert }, app);
+    attachWs(httpsServer);
+    await new Promise((resolve, reject) => {
+      httpsServer.once('error', reject);
+      httpsServer.listen(HTTPS_PORT, HOST, resolve);
+    });
+    servers.push(httpsServer);
+
+    // آدرس HTTP فقط برای هدایت به HTTPS (راحت‌تر تایپ شود)
+    const redirectServer = http.createServer((req, res) => {
+      const host = String(req.headers.host || '').split(':')[0] || 'localhost';
+      res.writeHead(302, { Location: `https://${host}:${HTTPS_PORT}${req.url || '/'}` });
+      res.end('بی‌شماره در حالت محلی روی HTTPS اجرا می‌شود.');
+    });
+    redirectServer.on('error', () => {});
+    try { redirectServer.listen(PORT, HOST); servers.push(redirectServer); } catch { /* پورت مشغول */ }
+
+    const urls = localIPv4().filter((ip) => ip !== '127.0.0.1').map((ip) => `https://${ip}:${HTTPS_PORT}`);
+    console.log('\n  📴 بی‌شماره — حالت محلی (بدون سیم‌کارت، بدون اینترنت)');
+    console.log(`     سرور روی HTTPS:${HTTPS_PORT} بالا آمد`);
+    if (urls.length) {
+      console.log('     از گوشی روی همین وای‌فای باز کن:');
+      for (const u of urls) console.log(`        ${u}`);
+      console.log('     بار اول مرورگر هشدار گواهی می‌دهد → «پیشرفته» → «ادامه/Proceed»');
+      console.log('     آیفون: گواهی باید اعتماد شود (راهنما در README).');
+    } else {
+      console.log('     ⚠️ هیچ آدرس شبکه‌ی محلی پیدا نشد — وای‌فای/هات‌اسپات را روشن کن.');
+    }
+    printInfo();
+    console.log('');
+  } else {
+    const server = http.createServer(app);
+    attachWs(server);
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(PORT, HOST, resolve);
+    });
+    servers.push(server);
+    console.log(`\n  📞 بیشماره روی http://${HOST}:${PORT} بالا آمد`);
+    printInfo();
+    console.log('');
+  }
+}
+
+main().catch((err) => {
+  console.error('  ❌ سرور بالا نیامد:', err.message);
+  process.exit(1);
 });
 
 process.on('SIGTERM', () => {
-  for (const p of peers.values()) send(p, { t: 'error', code: 'shutdown', message: 'سرور راهاندازی مجدد میشود.' });
-  server.close(() => process.exit(0));
-  setTimeout(() => process.exit(0), 3000).unref();
+  for (const p of peers.values()) send(p, { t: 'error', code: 'shutdown', message: 'سرور راه‌اندازی مجدد می‌شود.' });
+  for (const s of servers) { try { s.close(); } catch { /* noop */ } }
+  setTimeout(() => process.exit(0), 1500).unref();
 });

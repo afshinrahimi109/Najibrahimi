@@ -279,6 +279,10 @@ try {
   assert.match(link, /\?c=[a-z0-9]{6,}/);
   ok('لینک تماس ساخته شد');
 
+  await waitFor(() => A.q('#qrBox') && !A.q('#qrBox').hidden, 'نمایش QR لینک');
+  assert.ok(A.q('#qrBox').querySelector('svg'), 'QR باید به شکل SVG رسم شود');
+  ok('QR لینک تماس رسم شد (برای اتصال بدون تایپ/اینترنت)');
+
   /* ── نفر دوم لینک را باز می‌کند ── */
   const B = makeBrowser({ url: link, name: 'B' });
   await waitFor(() => B.callState() === 'incoming', 'صفحه‌ی دعوت در مرورگر دوم');

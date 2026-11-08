@@ -10,6 +10,7 @@ import { store, save, addRecent, clearAll } from './store.js';
 import { SignalClient } from './signal.js';
 import { LiveCall, friendlyMediaError } from './call.js';
 import { createRinger } from './ring.js';
+import qrcode from './vendor/qrcode.mjs';
 
 /* ───────── ابزارها ───────── */
 
@@ -44,6 +45,10 @@ const el = {
   linkInput: $('#linkInput'),
   btnCopyLink: $('#btnCopyLink'),
   btnShareLink: $('#btnShareLink'),
+  btnQr: $('#btnQr'),
+  qrBox: $('#qrBox'),
+  myQr: $('#myQr'),
+  lanChip: $('#lanChip'),
   btnOpenLink: $('#btnOpenLink'),
   dialDigits: $('#dialDigits'),
   dialHint: $('#dialHint'),
@@ -103,6 +108,7 @@ const state = {
   iceServers: [],
   hasTurn: false,
   vapidKey: '',
+  lan: false,
   call: null,
   startedAt: 0,
   lastStats: null,
@@ -186,6 +192,8 @@ function onWelcome(msg) {
   state.iceServers = msg.iceServers || [];
   state.hasTurn = Boolean(msg.hasTurn);
   state.vapidKey = msg.vapidPublicKey || '';
+  state.lan = Boolean(msg.lan);
+  if (el.lanChip) el.lanChip.hidden = !state.lan;
   if (store.sticky || !store.myId) save({ myId: msg.id });
   if (!store.name) save({ name: msg.name || '' });
   renderMe();
@@ -279,6 +287,7 @@ async function createLink() {
 
   el.linkInput.value = linkFor(code);
   el.linkBox.hidden = false;
+  if (renderQr(el.qrBox, el.linkInput.value)) el.btnQr.textContent = 'بستن QR';
   el.btnNewLink.classList.remove('btn-primary');
   el.btnNewLink.classList.add('btn-soft');
   el.btnNewLink.innerHTML = '<svg><use href="#i-x"/></svg>لغو انتظار';
@@ -299,6 +308,8 @@ function cancelLink() {
 
 function resetLinkUi() {
   el.linkBox.hidden = true;
+  if (el.qrBox) el.qrBox.hidden = true;
+  if (el.btnQr) el.btnQr.textContent = 'نمایش QR برای اسکن با دوربین';
   el.btnNewLink.classList.add('btn-primary');
   el.btnNewLink.classList.remove('btn-soft');
   el.btnNewLink.innerHTML = '<svg><use href="#i-link"/></svg>ساخت لینک تماس';
@@ -1153,6 +1164,34 @@ el.btnCopyLink.onclick = copyLink;
 el.btnShareLink.onclick = shareLink;
 el.btnOpenLink.onclick = () => { if (state.linkRoom) window.open(linkFor(state.linkRoom), '_blank'); };
 
+/* ───────── QR (برای اتصال بدون اینترنت و بدون تایپ آدرس) ───────── */
+
+function renderQr(box, text) {
+  if (!box) return false;
+  try {
+    const qr = qrcode(0, 'M');
+    qr.addData(text);
+    qr.make();
+    box.innerHTML = qr.createSvgTag({ cellSize: 6, margin: 2, scalable: true });
+    box.hidden = false;
+    return true;
+  } catch {
+    box.hidden = true;
+    return false;
+  }
+}
+
+el.btnQr.onclick = () => {
+  if (!el.qrBox.hidden) {
+    el.qrBox.hidden = true;
+    el.btnQr.textContent = 'نمایش QR برای اسکن با دوربین';
+    return;
+  }
+  const ok = renderQr(el.qrBox, el.linkInput.value);
+  el.btnQr.textContent = ok ? 'بستن QR' : 'نمایش QR برای اسکن با دوربین';
+  if (!ok) toast('ساخت QR ممکن نشد.', 'err');
+};
+
 /* ───────── تماس‌های اخیر ───────── */
 
 function renderRecents() {
@@ -1184,6 +1223,8 @@ function openSheet() {
   el.sheet.hidden = false;
   el.setName.value = store.name || '';
   el.myLink.value = state.id ? linkForId(state.id) : '';
+  if (state.id) renderQr(el.myQr, el.myLink.value);
+  else if (el.myQr) el.myQr.hidden = true;
   if (el.btnInstall) el.btnInstall.hidden = !deferredPrompt;
   if (el.iosInstallHint) el.iosInstallHint.hidden = !(isIOSDevice && !navigator.standalone);
   syncSwitches();

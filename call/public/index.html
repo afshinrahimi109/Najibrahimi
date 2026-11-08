@@ -72,6 +72,10 @@
         </button>
       </div>
       <p class="micro">تا وقتی این صفحه باز است فعالی. دوستانت با همین شماره بهت زنگ می‌زنند — بدون سیم‌کارت.</p>
+      <span class="chip-lan" id="lanChip" hidden>
+        📴 حالت محلی — بدون اینترنت
+        <a class="chip-link" href="/cert" download>نصب گواهی</a>
+      </span>
     </section>
 
     <!-- تب‌ها -->
@@ -99,6 +103,8 @@
             <button id="btnShareLink" class="btn btn-soft"><svg><use href="#i-share"/></svg>اشتراک‌گذاری</button>
             <button id="btnOpenLink" class="btn btn-soft">باز کردن در همین دستگاه</button>
           </div>
+          <button id="btnQr" class="btn btn-soft btn-qr">نمایش QR برای اسکن با دوربین</button>
+          <div id="qrBox" class="qr-box" hidden></div>
           <p class="micro">منتظر می‌مانیم… همین‌که لینک باز شود، تماس برقرار می‌شود.</p>
         </div>
       </div>
@@ -200,6 +206,7 @@
         <button id="btnCopyMyLink" class="icon-btn solid" aria-label="کپی"><svg><use href="#i-copy"/></svg></button>
       </div>
       <small class="switch-note">هر کسی این لینک را باز کند، با یک ضربه به تو زنگ می‌زند — حتی اگر برنامه‌ات بسته باشد.</small>
+      <div id="myQr" class="qr-box" hidden></div>
     </div>
     <label class="field">
       <span>میکروفون</span>

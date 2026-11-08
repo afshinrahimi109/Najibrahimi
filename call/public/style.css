@@ -217,6 +217,22 @@ svg { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width: 1
 }
 .link-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
 
+.chip-lan {
+  display: inline-flex; align-items: center; gap: 6px; align-self: flex-start;
+  margin-top: 10px; padding: 5px 11px; border-radius: 999px; font-size: 11px;
+  background: rgba(255, 176, 32, .12); border: 1px solid rgba(255, 176, 32, .32); color: #ffd27a;
+}
+.chip-lan[hidden] { display: none; }
+.chip-link { color: #ffd27a; text-decoration: underline; font-size: 11px; margin-inline-start: 6px; }
+
+.btn-qr { margin-top: 8px; }
+.qr-box {
+  margin: 12px auto 0; padding: 10px; width: 100%; max-width: 230px;
+  background: #fff; border-radius: 16px; box-shadow: 0 14px 34px -16px rgba(0,0,0,.7);
+}
+.qr-box[hidden] { display: none; }
+.qr-box svg { display: block; width: 100%; height: auto; border-radius: 8px; }
+
 /* ───────── شماره‌گیر ───────── */
 .dial-card { display: flex; flex-direction: column; gap: 12px; }
 .dial-display { min-height: 58px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; }
