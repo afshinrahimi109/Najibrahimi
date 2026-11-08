@@ -193,6 +193,14 @@
       <span>نام نمایشی</span>
       <input id="setName" maxlength="24" placeholder="مثلاً علی" />
     </label>
+    <div class="field">
+      <span>لینک تماس مستقیم من</span>
+      <div class="link-field">
+        <input id="myLink" readonly dir="ltr" aria-label="لینک تماس مستقیم" />
+        <button id="btnCopyMyLink" class="icon-btn solid" aria-label="کپی"><svg><use href="#i-copy"/></svg></button>
+      </div>
+      <small class="switch-note">هر کسی این لینک را باز کند، با یک ضربه به تو زنگ می‌زند — حتی اگر برنامه‌ات بسته باشد.</small>
+    </div>
     <label class="field">
       <span>میکروفون</span>
       <select id="setMic"><option value="">پیش‌فرض دستگاه</option></select>
@@ -208,6 +216,10 @@
     <div class="switch-row">
       <span>شماره‌ی ثابت روی این دستگاه</span>
       <button id="setSticky" class="switch" role="switch" aria-checked="true"><i></i></button>
+    </div>
+    <div class="switch-row">
+      <span>زنگ خوردن با برنامه‌ی بسته<br><small class="switch-note">اعلان پوش — روی آیفون باید برنامه نصب شده باشد</small></span>
+      <button id="setPush" class="switch" role="switch" aria-checked="false"><i></i></button>
     </div>
     <div class="sheet-info" id="sheetInfo"></div>
     <button id="btnReset" class="btn btn-soft">پاک کردن تاریخچه و تنظیمات</button>

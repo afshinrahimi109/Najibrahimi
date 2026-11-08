@@ -75,8 +75,11 @@ const el = {
   setCam: $('#setCam'),
   setRing: $('#setRing'),
   setSticky: $('#setSticky'),
+  setPush: $('#setPush'),
   sheetInfo: $('#sheetInfo'),
   btnReset: $('#btnReset'),
+  myLink: $('#myLink'),
+  btnCopyMyLink: $('#btnCopyMyLink'),
   codeGate: $('#codeGate'),
   codeInput: $('#codeInput'),
   btnCode: $('#btnCode'),
@@ -92,10 +95,12 @@ const state = {
   dir: 'out',           // out | in | link
   video: false,
   invite: null,
+  dialTarget: null,
   linkRoom: null,
   linkCreator: false,
   iceServers: [],
   hasTurn: false,
+  vapidKey: '',
   call: null,
   startedAt: 0,
   lastStats: null,
@@ -163,7 +168,12 @@ function onMessage(msg) {
     case 'rejected': return endCall('طرف مقابل تماس را رد کرد.', true);
     case 'cancelled': return endCall('تماس لغو شد.', true);
     case 'timeout': return endCall('کسی پاسخ نداد.', true);
-    case 'call-ended': return endCall(msg.reason === 'hungup' ? 'تماس پایان یافت.' : 'طرف مقابل قطع کرد.', true);
+    case 'call-ended': {
+      if (msg.reason === 'no-answer') return endCall('کسی پاسخ نداد.', true);
+      return endCall(msg.reason === 'hungup' ? 'تماس پایان یافت.' : 'طرف مقابل قطع کرد.', true);
+    }
+    case 'push-ringing': return onPushRinging(msg);
+    case 'push-ok': return refreshPushSwitch();
     case 'error': return onServerError(msg);
     default: return;
   }
@@ -173,11 +183,14 @@ function onWelcome(msg) {
   state.id = msg.id;
   state.iceServers = msg.iceServers || [];
   state.hasTurn = Boolean(msg.hasTurn);
+  state.vapidKey = msg.vapidPublicKey || '';
   if (store.sticky || !store.myId) save({ myId: msg.id });
   if (!store.name) save({ name: msg.name || '' });
   renderMe();
   renderOnline({ peers: msg.peers || [], count: (msg.peers || []).length + 1 });
   updateSheetInfo();
+  refreshPushSwitch();
+  resendPushSubscription();
   maybeShowInvite();
 }
 
@@ -274,6 +287,7 @@ function cancelLink() {
   ringer.stop();
   sig.send({ t: 'hangup' });
   teardown();
+  hideCallScreen();
   state.phase = 'idle';
   state.dir = 'out';
   resetLinkUi();
@@ -316,9 +330,27 @@ async function shareLink() {
 /* ───────── دعوت با لینک ───────── */
 
 function maybeShowInvite() {
+  if (state.phase !== 'idle') return;
   const params = new URLSearchParams(location.search);
+
+  // لینک شخصی: ‎/?to=123456‎  → با یک ضربه به آن شماره زنگ می‌زنیم
+  const to = enDigits(params.get('to') || '').replace(/\D/g, '');
+  if (to.length >= 5) {
+    const known = presenceById(to);
+    state.dialTarget = to;
+    state.dir = 'out';
+    state.phase = 'incoming';
+    el.callName.textContent = known?.name || 'کاربر بی‌شماره';
+    el.callNumber.textContent = fmtId(to);
+    setAvatar(known ? initial(known.name) : '📞');
+    showCallScreen('incoming');
+    setStatus('برای شروع تماس، «تماس» را بزن');
+    $('[data-act="accept"] span').textContent = 'تماس';
+    return;
+  }
+
   const code = (params.get('c') || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  if (!code || code.length < 6 || state.phase !== 'idle' || state.invite) return;
+  if (!code || code.length < 6 || state.invite) return;
   state.invite = code;
   state.dir = 'link';
   state.phase = 'incoming';
@@ -359,14 +391,14 @@ async function joinInvite() {
 /* ───────── رویدادهای اتاق لینک ───────── */
 
 function onJoined(msg) {
-  if (state.dir !== 'link' || !state.call) return;
+  if (!['link', 'push'].includes(state.dir) || !state.call) return;
   state.room = msg.room;
 
   if (!msg.peer) {
     state.phase = 'waiting';
     if (state.linkCreator) return;                  // روی صفحه‌ی خانه منتظر می‌مانیم
     showCallScreen('connecting');
-    setStatus('در انتظار طرف مقابل…');
+    setStatus(state.dir === 'push' ? 'اعلان فرستاده شد — منتظر پاسخ…' : 'در انتظار طرف مقابل…');
     return;
   }
 
@@ -393,7 +425,7 @@ function maybeEnableVideo(msg) {
 }
 
 function onPeerJoined(msg) {
-  if (state.dir !== 'link' || !state.call || state.phase === 'active') return;
+  if (!['link', 'push'].includes(state.dir) || !state.call || state.phase === 'active') return;
   state.peer = msg.peer;
   state.phase = 'connecting';
   showCallScreen('connecting');
@@ -495,7 +527,17 @@ function onIncoming(msg) {
 }
 
 async function acceptCall() {
-  if (state.dir === 'link' && state.invite) return joinInvite();
+  if (state.invite) return joinInvite();
+
+  if (state.dialTarget) {
+    const to = state.dialTarget;
+    state.dialTarget = null;
+    hideCallScreen();
+    state.phase = 'idle';
+    state.dir = 'out';
+    return startOutgoing({ id: to, name: presenceById(to)?.name || 'کاربر بی‌شماره' }, false);
+  }
+
   if (state.phase !== 'incoming') return;
   ringer.stop();
 
@@ -711,6 +753,7 @@ function showCallScreen(phase) {
   document.body.style.overflow = 'hidden';
 
   if (isIncoming) $('[data-act="accept"] span').textContent = state.invite ? 'پیوستن' : 'پاسخ';
+  if (state.dialTarget) $('[data-act="accept"] span').textContent = 'تماس';
 
   const muteBtn = $('[data-act="mute"]');
   muteBtn.classList.remove('off');
@@ -811,7 +854,94 @@ function renderStats(s) {
     }</div>`;
 }
 
+/* ───────── اعلان پوش: زنگ خوردن وقتی برنامه بسته است ───────── */
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+}
+
+function onPushRinging(msg) {
+  state.callId = msg.callId;
+  state.room = msg.room;
+  state.dir = 'push';
+  if (msg.to) state.peer = msg.to;
+  state.phase = 'outgoing';
+  if (!el.callScreen.hidden) {
+    paintPeer();
+    setStatus('زنگ زدیم و برای طرف مقابل اعلان فرستادیم…');
+  }
+}
+
+async function getPushSubscription() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return null;
+  try {
+    const reg = await navigator.serviceWorker.getRegistration();
+    if (!reg) return null;
+    return await reg.pushManager.getSubscription();
+  } catch { return null; }
+}
+
+async function refreshPushSwitch() {
+  if (!el.setPush) return;
+  const sub = await getPushSubscription();
+  el.setPush.setAttribute('aria-checked', String(Boolean(sub)));
+}
+
+/** بعد از هر اتصال، اشتراک موجود را دوباره به سرور معرفی می‌کنیم (شماره عوض شده باشد) */
+async function resendPushSubscription() {
+  const sub = await getPushSubscription();
+  if (sub) sig.send({ t: 'push', subscription: sub.toJSON() });
+}
+
+async function togglePush() {
+  const isOn = el.setPush.getAttribute('aria-checked') === 'true';
+
+  if (isOn) {
+    try {
+      const sub = await getPushSubscription();
+      await sub?.unsubscribe();
+    } catch { /* noop */ }
+    el.setPush.setAttribute('aria-checked', 'false');
+    toast('اعلان تماس خاموش شد.');
+    return;
+  }
+
+  if (!('Notification' in window) || !('PushManager' in window) || !('serviceWorker' in navigator)) {
+    toast('این مرورگر اعلان پوش را پشتیبانی نمی‌کند.', 'err');
+    return;
+  }
+  if (!state.vapidKey) {
+    toast('سرور اعلان پوش را فعال نکرده است.', 'err');
+    return;
+  }
+
+  try {
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') {
+      toast('اجازه‌ی اعلان داده نشد.', 'err');
+      return;
+    }
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(state.vapidKey),
+      });
+    }
+    sig.send({ t: 'push', subscription: sub.toJSON() });
+    el.setPush.setAttribute('aria-checked', 'true');
+    toast('آماده شد ✓ از این به بعد حتی با بسته بودن برنامه هم زنگ می‌خورد.');
+  } catch (err) {
+    toast(`ساخت اشتراک اعلان ناموفق بود: ${err.message || ''}`, 'err');
+  }
+}
+
 /* ───────── پایان تماس ───────── */
+
 
 function endCall(reason, remote = false) {
   if (state.phase === 'idle' && !state.call) return;
@@ -857,6 +987,7 @@ function resetAll() {
   state.callId = null;
   state.room = null;
   state.invite = null;
+  state.dialTarget = null;
   state.startedAt = 0;
   state.lastStats = null;
   state.videoHidden = false;
@@ -879,6 +1010,12 @@ $('#callControls').addEventListener('click', async (e) => {
   if (act === 'reject') {
     ringer.stop();
     clearIncomingNote();
+    if (state.dialTarget) {
+      state.dialTarget = null;
+      hideCallScreen();
+      resetAll();
+      return;
+    }
     if (state.dir === 'link' && state.invite) {
       state.invite = null;
       hideCallScreen();
@@ -893,7 +1030,7 @@ $('#callControls').addEventListener('click', async (e) => {
 
   if (act === 'hangup') {
     clearIncomingNote();
-    if (state.phase === 'waiting') return cancelLink();
+    if (state.phase === 'waiting' && state.dir === 'link') return cancelLink();
     return endCall(state.phase === 'active' ? 'تماس پایان یافت.' : 'تماس لغو شد.');
   }
 
@@ -1039,9 +1176,12 @@ function renderRecents() {
 
 /* ───────── تنظیمات ───────── */
 
+const linkForId = (id) => `${location.origin}${location.pathname}?to=${id}`;
+
 function openSheet() {
   el.sheet.hidden = false;
   el.setName.value = store.name || '';
+  el.myLink.value = state.id ? linkForId(state.id) : '';
   syncSwitches();
   updateSheetInfo();
   fillDevices();
@@ -1087,6 +1227,18 @@ el.setName.oninput = () => {
   sig.send({ t: 'setName', name: store.name });
 };
 
+el.btnCopyMyLink.onclick = async () => {
+  try {
+    await navigator.clipboard.writeText(el.myLink.value);
+    toast('لینک تماس مستقیم کپی شد ✓');
+  } catch {
+    el.myLink.select();
+    document.execCommand?.('copy');
+    toast('لینک انتخاب شد — کپی کن.');
+  }
+};
+
+el.setPush.onclick = togglePush;
 el.setMic.onchange = () => save({ micId: el.setMic.value });
 el.setCam.onchange = () => save({ camId: el.setCam.value });
 

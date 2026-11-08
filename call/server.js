@@ -14,9 +14,11 @@
 import express from 'express';
 import http from 'http';
 import path from 'path';
+import fs from 'fs';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
+import { generateVAPIDKeys, setVapidDetails, sendNotification } from 'web-push';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -45,6 +47,8 @@ const MAX_PEERS = 5000;
 const MAX_ROOM_MEMBERS = 2;       // تماس یکبهیک
 const MAX_MSG_PER_SEC = 90;
 const MAX_FRAME_BYTES = 64 * 1024;
+const PUSH_RING_TIMEOUT = 90_000;  // چقدر منتظر بمانیم تا طرف مقابل اعلان را باز کند
+const MAX_PUSH_SUBS = 20_000;
 
 function iceServers() {
   const list = STUN_URLS.map((urls) => ({ urls }));
@@ -57,6 +61,45 @@ function iceServers() {
   }
   return list;
 }
+
+/* ───────────── Web Push — زنگ خوردن وقتی برنامه بسته است ─────────────
+ * برای این کار به یک جفت کلید VAPID نیاز است. اگر در متغیرهای محیطی نبود،
+ * یک جفت می‌سازیم و در data/vapid.json نگه می‌داریم (روی هاست دائمی امن است).
+ * اگر هاست فایل‌سیستم موقت دارد، کلیدها با هر ری‌استارت عوض می‌شوند و
+ * کاربر باید یک بار دیگر اشتراک اعلان بسازد.
+ */
+
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@bishomare.local';
+const DATA_DIR = path.join(__dirname, 'data');
+const VAPID_FILE = path.join(DATA_DIR, 'vapid.json');
+
+function loadVapid() {
+  const pub = (process.env.VAPID_PUBLIC_KEY || '').trim();
+  const priv = (process.env.VAPID_PRIVATE_KEY || '').trim();
+  if (pub && priv) return { publicKey: pub, privateKey: priv };
+  try {
+    const raw = JSON.parse(fs.readFileSync(VAPID_FILE, 'utf8'));
+    if (raw.publicKey && raw.privateKey) return raw;
+  } catch { /* فایل نیست */ }
+  const keys = generateVAPIDKeys();
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(VAPID_FILE, JSON.stringify(keys, null, 2), { mode: 0o600 });
+  } catch { /* فایل‌سیستم فقط‌خواندنی */ }
+  return keys;
+}
+
+const vapid = loadVapid();
+let pushReady = true;
+try {
+  setVapidDetails(VAPID_SUBJECT, vapid.publicKey, vapid.privateKey);
+} catch (err) {
+  pushReady = false;
+  console.warn('  ⚠️  Web Push غیرفعال شد:', err.message);
+}
+
+/** @type {Map<string, {subscription: object, name: string, updatedAt: number}>} */
+const pushSubs = new Map();
 
 /* ───────────────────────── وضعیت در حافظه ─────────────────────────
  * برای یک ابزار تماس، نگهداشتن وضعیت در حافظه کافی و سریع است.
@@ -224,6 +267,85 @@ function dropCall(call, reason) {
   }
 }
 
+/* ───────────────────── اعلان پوش (زنگ روی اپ بسته) ───────────────────── */
+
+function onPushSubscribe(peer, msg) {
+  if (!peer.authed) return sendError(peer, 'auth', 'ابتدا وارد شو.');
+  const sub = msg.subscription;
+  if (!sub || typeof sub !== 'object' || typeof sub.endpoint !== 'string') {
+    return sendError(peer, 'bad-push', 'اشتراک اعلان معتبر نیست.');
+  }
+  if (pushSubs.size >= MAX_PUSH_SUBS && !pushSubs.has(peer.id)) {
+    return sendError(peer, 'busy', 'ظرفیت اعلان‌ها پر است.');
+  }
+  pushSubs.set(peer.id, {
+    subscription: {
+      endpoint: sub.endpoint.slice(0, 500),
+      keys: { p256dh: String(sub.keys?.p256dh || ''), auth: String(sub.keys?.auth || '') },
+    },
+    name: peer.name,
+    updatedAt: Date.now(),
+  });
+  send(peer, { t: 'push-ok', id: peer.id });
+}
+
+/**
+ * «زنگ با اعلان»: طرف مقابل آنلاین نیست ولی اشتراک اعلان دارد.
+ * یک اتاق برای تماس می‌سازیم، تماس‌گیرنده را داخلش می‌نشانیم و برای طرف
+ * مقابل نوتیفیکیشنی با لینک همان اتاق می‌فرستیم. به‌محض باز کردن لینک،
+ * همان مسیر معمولی «تماس با لینک» تماس را وصل می‌کند.
+ */
+function pushRing(caller, toId, video) {
+  const rec = pushSubs.get(toId);
+  if (!rec) return sendError(caller, 'offline', 'این شماره آنلاین نیست.');
+
+  const room = getRoom(roomCode());
+  if (!room) return sendError(caller, 'busy', 'سرور شلوغ است؛ کمی بعد تلاش کن.');
+
+  room.members.add(caller.id);
+  caller.room = room.code;
+
+  const callId = crypto.randomBytes(6).toString('hex');
+  const name = rec.name || 'کاربر بی‌شماره';
+
+  send(caller, { t: 'push-ringing', callId, room: room.code, to: { id: toId, name } });
+  send(caller, { t: 'joined', room: room.code, peer: null, initiator: false, video: Boolean(video) });
+
+  const payload = JSON.stringify({
+    type: 'incoming',
+    title: '📞 تماس ورودی — بی‌شماره',
+    body: `${caller.name} دارد زنگ می‌زند — برای پاسخ بزن`,
+    from: publicPeer(caller),
+    room: room.code,
+    video: Boolean(video),
+    callId,
+  });
+
+  Promise.resolve()
+    .then(() => sendNotification(rec.subscription, payload, { TTL: 90, urgency: 'high', timeout: 5000 }))
+    .catch((err) => {
+      // اشتراک منقضی شده است
+      if (err && (err.statusCode === 404 || err.statusCode === 410)) pushSubs.delete(toId);
+    });
+
+  // اگر تا این مدت کسی به اتاق نیامد، تماس را تمام می‌کنیم
+  room.ringTimer = setTimeout(() => {
+    room.ringTimer = null;
+    const r = rooms.get(room.code);
+    if (!r || r.members.size >= 2) return;
+    const c = peers.get(caller.id);
+    if (c) {
+      send(c, { t: 'call-ended', reason: 'no-answer' });
+      leaveRoom(c, false);
+    }
+  }, PUSH_RING_TIMEOUT);
+  room.ringTimer.unref?.();
+
+  broadcastPresence();
+  return true;
+}
+
+
 /* ───────────────────────── منطق پیامها ───────────────────────── */
 
 function onHello(peer, msg) {
@@ -254,6 +376,7 @@ function onHello(peer, msg) {
     name: peer.name,
     iceServers: iceServers(),
     hasTurn: Boolean(TURN_URL),
+    vapidPublicKey: pushReady ? vapid.publicKey : '',
     ringTimeout: RING_TIMEOUT_MS,
     peers: [...peers.values()].filter((p) => p.authed && p !== peer).slice(0, 60)
       .map((p) => ({ ...publicPeer(p), busy: !!(p.room || p.dialing) })),
@@ -265,8 +388,13 @@ function onDial(peer, msg) {
   if (!peer.authed) return sendError(peer, 'auth', 'ابتدا وارد شو.');
   if (peer.room || peer.dialing) return sendError(peer, 'busy', 'خودت در یک تماس هستی.');
 
-  const target = peers.get(String(msg.to || ''));
-  if (!target || !target.authed) return sendError(peer, 'offline', 'این شماره آنلاین نیست.');
+  const toId = String(msg.to || '').replace(/[^0-9]/g, '');
+  const target = peers.get(toId);
+  if (!target || !target.authed) {
+    // طرف مقابل آنلاین نیست؛ اگر اعلان پوش دارد با نوتیفیکیشن زنگ می‌زنیم
+    if (pushReady && pushSubs.has(toId)) return pushRing(peer, toId, Boolean(msg.video));
+    return sendError(peer, 'offline', 'این شماره آنلاین نیست.');
+  }
   if (target.id === peer.id) return sendError(peer, 'self', 'نمیتوانی به خودت زنگ بزنی!');
   if (target.room || target.dialing) return sendError(peer, 'busy', 'این شماره مشغول است.');
 
@@ -449,6 +577,7 @@ function dispatch(peer, raw) {
     case 'signal': return onSignal(peer, raw);
     case 'hangup': return onHangup(peer, raw);
     case 'setName': return onSetName(peer, raw);
+    case 'push': return onPushSubscribe(peer, raw);
     default: return;
   }
 }
@@ -483,6 +612,8 @@ app.get('/api/health', (_req, res) => {
     rooms: rooms.size,
     calls: calls.size,
     turn: Boolean(TURN_URL),
+    push: pushReady,
+    pushSubs: pushSubs.size,
     uptime: Math.round(process.uptime()),
   });
 });
@@ -494,6 +625,8 @@ app.get('/api/config', (_req, res) => {
     hasTurn: Boolean(TURN_URL),
     needCode: Boolean(ACCESS_CODE),
     ringTimeout: RING_TIMEOUT_MS,
+    vapidPublicKey: pushReady ? vapid.publicKey : '',
+    push: pushReady,
     serverTime: Date.now(),
   });
 });
@@ -623,6 +756,11 @@ const heartbeat = setInterval(() => {
   for (const p of peers.values()) {
     if (p.transport === 'sse' && !p.res && now - p.alive > 120_000) removePeer(p);
   }
+  // اشتراک‌های اعلانِ خیلی قدیمی را پاک می‌کنیم
+  const pushCutoff = now - 60 * 24 * 60 * 60_000;
+  for (const [id, rec] of pushSubs) {
+    if (rec.updatedAt < pushCutoff) pushSubs.delete(id);
+  }
 }, 30_000);
 heartbeat.unref?.();
 
@@ -630,7 +768,8 @@ server.listen(PORT, HOST, () => {
   console.log(`\n  📞 بیشماره روی http://${HOST}:${PORT} بالا آمد`);
   console.log(`     STUN: ${STUN_URLS.join(', ')}`);
   console.log(`     TURN: ${TURN_URL ? TURN_URL : 'تنظیم نشده (برای شبکههای سخت لازم است)'}`);
-  console.log(`     کد دسترسی: ${ACCESS_CODE ? 'فعال' : 'غیرفعال'}\n`);
+  console.log(`     کد دسترسی: ${ACCESS_CODE ? 'فعال' : 'غیرفعال'}`);
+  console.log(`     اعلان پوش: ${pushReady ? 'فعال (زنگ روی اپ بسته)' : 'غیرفعال'}\n`);
 });
 
 process.on('SIGTERM', () => {

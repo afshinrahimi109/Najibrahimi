@@ -456,6 +456,7 @@ svg { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width: 1
   border: 1px solid var(--line); background: rgba(0,0,0,.32); color: var(--txt); width: 100%;
 }
 .field select { appearance: none; }
+.switch-note { display: block; color: var(--muted-2); font-size: 10.5px; margin-top: 3px; }
 .switch-row {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 12px 0; border-top: 1px solid var(--line); font-size: 13px;

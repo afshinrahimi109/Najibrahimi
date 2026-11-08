@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import * as esbuild from 'esbuild';
+import { WebSocket } from 'ws';
 import { JSDOM, VirtualConsole } from 'jsdom';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -342,8 +343,69 @@ try {
   await waitFor(() => dialA.callState() === 'idle' && B.callState() === 'idle', 'پایان تماس شماره‌ای');
   ok('تماس شماره‌ای درست قطع شد');
 
+  /* ── زنگ با اعلان (اپِ بسته) ── */
+  const off = new WebSocket(`ws://127.0.0.1:${PORT}/ws`);
+  const offMsgs = [];
+  off.on('message', (b) => offMsgs.push(JSON.parse(b.toString())));
+  await new Promise((r) => off.once('open', r));
+  const waitMsg = async (pred, label) => {
+    const t0 = Date.now();
+    for (;;) {
+      const i = offMsgs.findIndex(pred);
+      if (i >= 0) return offMsgs.splice(i, 1)[0];
+      if (Date.now() - t0 > 4000) throw new Error(`تایم‌اوت پیام: ${label}`);
+      await sleep(30);
+    }
+  };
+  off.send(JSON.stringify({ t: 'hello', name: 'رها' }));
+  const offWelcome = await waitMsg((m) => m.t === 'welcome', 'welcome آفلاین');
+  off.send(JSON.stringify({
+    t: 'push',
+    subscription: {
+      endpoint: 'https://127.0.0.1:9/push-test',
+      keys: { p256dh: 'BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8QcYP7DkM', auth: 'tBHItJI5svbpez7KI4CCXg' },
+    },
+  }));
+  await waitMsg((m) => m.t === 'push-ok', 'push-ok');
+  off.close();
+  await sleep(200);
+
+  const offDigits = offWelcome.id.replace(/[۰-۹]/g, (d) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)));
+  for (const ch of offDigits) dialA.click(dialA.q(`#dialpad [data-k="${ch}"]`));
+  dialA.click('#btnDial');
+  await waitFor(() => dialA.text('#callStatus').includes('اعلان'), 'انتظار پاسخ با اعلان');
+  assert.equal(dialA.callState(), 'connecting');
+  ok('تماس با کاربر آفلاین، اعلان می‌فرستد و در حالت «منتظر پاسخ» می‌ماند');
+
+  dialA.click('[data-act="hangup"]');
+  await waitFor(() => dialA.callState() === 'idle', 'لغو تماس با اعلان');
+  ok('لغو تماسِ مبتنی بر اعلان درست کار می‌کند');
+
+  /* ── لینک تماس مستقیم (?to=) ── */
+  const D = makeBrowser({ url: `${BASE}/?to=${latinB}`, name: 'D' });
+  await waitFor(() => D.callState() === 'incoming', 'صفحه‌ی تماس مستقیم');
+  assert.ok(D.text('#callStatus').includes('تماس'));
+  assert.equal(D.q('[data-act="accept"] span').textContent.trim(), 'تماس');
+  ok('باز کردن لینک شخصی، صفحه‌ی «تماس با من» را نشان می‌دهد');
+
+  D.click('[data-act="accept"]');
+  await waitFor(() => B.callState() === 'incoming', 'زنگ در گوشی صاحب لینک');
+  B.click('[data-act="accept"]');
+  await waitFor(() => D.callState() === 'active' && B.callState() === 'active', 'اتصال از لینک شخصی', 12000);
+  ok('تماس از لینک شخصی (?to=) برقرار شد');
+
+  D.click('[data-act="hangup"]');
+  await waitFor(() => D.callState() === 'idle' && B.callState() === 'idle', 'پایان تماس لینک شخصی');
+  ok('تماس لینک شخصی درست قطع شد');
+
+  // لینک شخصی در تنظیمات
+  D.click('#btnSettings');
+  await waitFor(() => D.q('#sheet') && !D.q('#sheet').hidden, 'باز شدن تنظیمات');
+  assert.match(D.q('#myLink').value, /\?to=\d{5,8}/);
+  ok('لینک تماس مستقیم در تنظیمات نمایش داده می‌شود');
+
   /* ── بدون خطای جاوااسکریپت ── */
-  for (const b of [A, B, dialA]) {
+  for (const b of [A, B, dialA, D]) {
     const real = b.errors.filter((e) => e && !/Not implemented|Could not parse CSS/.test(e));
     assert.equal(real.length, 0, `خطای جاوااسکریپت در ${b.name}: ${real.join(' | ')}`);
   }

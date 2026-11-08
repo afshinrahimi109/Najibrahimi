@@ -266,6 +266,50 @@ try {
   assert.equal(incSse.from.id, wWs.id);
   ok('تماس بین کلاینت WebSocket و کلاینت SSE برقرار می‌شود');
 
+  /* ── اعلان پوش: زنگ روی اپِ بسته ── */
+  const reza = await new WsClient().connect();
+  const wr = await reza.hello('رضا');
+  reza.send({
+    t: 'push',
+    subscription: {
+      endpoint: 'https://127.0.0.1:9/push-test',
+      keys: { p256dh: 'BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8QcYP7DkM', auth: 'tBHItJI5svbpez7KI4CCXg' },
+    },
+  });
+  assert.equal((await reza.next('push-ok')).t, 'push-ok');
+  ok('اشتراک اعلان (push) ثبت شد');
+
+  reza.close();
+  await sleep(150); // مطمئن می‌شویم آفلاین شده است
+
+  const caller = await new WsClient().connect();
+  const wc = await caller.hello('تماس‌گیرنده');
+  caller.send({ t: 'dial', to: wr.id, video: false });
+
+  const pushRinging = await caller.next('push-ringing');
+  assert.ok(pushRinging.room);
+  assert.equal(pushRinging.to.id, wr.id);
+  ok('تماس با کاربرِ آفلاینِ دارای اعلان، به «زنگ با اعلان» تبدیل می‌شود');
+
+  const joinedCaller = await caller.next('joined');
+  assert.equal(joinedCaller.peer, null);
+  assert.equal(joinedCaller.room, pushRinging.room);
+  ok('تماس‌گیرنده داخل اتاق انتظار نشسته است');
+
+  // طرف مقابل اعلان را باز می‌کند و به همان اتاق می‌آید
+  const answerer = await new WsClient().connect();
+  const wan = await answerer.hello('پاسخ‌دهنده');
+  answerer.send({ t: 'join', room: pushRinging.room, video: false });
+  const joinedAnswerer = await answerer.next('joined');
+  assert.equal(joinedAnswerer.initiator, true);
+  assert.equal(joinedAnswerer.peer.id, wc.id);
+  const peerArrived = await caller.next('peer-joined');
+  assert.equal(peerArrived.peer.id, wan.id);
+  ok('با باز شدن اعلان، طرف مقابل به اتاق می‌رسد و تماس شکل می‌گیرد');
+
+  caller.send({ t: 'hangup', callId: pushRinging.callId });
+  answerer.close();
+
   /* ── صفحه‌ی اصلی سرو می‌شود ── */
   const page = await fetch(BASE + '/');
   const html = await page.text();
