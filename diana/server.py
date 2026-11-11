@@ -13,6 +13,9 @@ import queue
 import secrets
 import sys
 import threading
+import time
+import urllib.parse
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, unquote
 
@@ -27,6 +30,7 @@ from memory import Memory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 PORT = int(os.environ.get("PORT", "8000"))
+VERSION = "2.1-launch"
 
 # 🔒 وقتی DIANA_TOKEN تنظیم شود (حالت آنلاین/تونل)، تمام درخواست‌ها نیاز به
 # HTTP Basic Auth دارند. بدون آن سرور مثل قبل فقط محلی و بدون رمز است.
@@ -42,12 +46,26 @@ if not AUTH_TOKEN and PUBLIC_HOST:
 
 memory = Memory()
 
-# ---------- گذرگاه رویدادهای زنده (SSE) ----------
+# ---------- گذرگاه رویدادهای زنده (SSE + long-poll) ----------
+# دو مسیر داریم تا اتصال در هر محیطی (پروکسی، iframe، تونل، شبکهٔ موبایل) کار کند:
+#   ۱) SSE  →  GET /api/events           (رویدادها push می‌شوند)
+#   ۲) Poll →  GET /api/events/poll?after=N  (اگر SSE بسته شد، مرورگر خودکار می‌چرخد)
 _subscribers = set()
 _sub_lock = threading.Lock()
+_events = []            # [(id, json_text)] — پنجرهٔ آخرین رویدادها برای long-poll
+_events_lock = threading.Lock()
+_events_next = 1
+EVENT_LOG_MAX = 400
 
 def emit(event: dict):
+    global _events_next
     data = json.dumps(event, ensure_ascii=False)
+    with _events_lock:
+        eid = _events_next
+        _events_next += 1
+        _events.append((eid, data))
+        if len(_events) > EVENT_LOG_MAX:
+            del _events[:len(_events) - EVENT_LOG_MAX]
     with _sub_lock:
         dead = []
         for q in _subscribers:
@@ -57,6 +75,28 @@ def emit(event: dict):
                 dead.append(q)
         for q in dead:
             _subscribers.discard(q)
+
+def events_since(after: int, wait: float = 18.0):
+    """رویدادهای بعد از شناسهٔ داده‌شده؛ اگر نبود تا `wait` ثانیه صبر می‌کند (long-poll)."""
+    deadline = time.time() + max(0.0, min(wait, 25.0))
+    while True:
+        with _events_lock:
+            if _events:
+                latest = _events[-1][0]
+                if after >= latest:          # هیچ رویداد تازه‌ای نیست
+                    if time.time() >= deadline:
+                        return [], latest
+                    sleep_for = 0.4
+                else:
+                    batch = [(i, d) for (i, d) in _events if i > after]
+                    if not batch:            # after قدیمی‌تر از پنجره است → آخرین‌ها را بده
+                        batch = _events[-20:]
+                    return batch, latest
+            elif time.time() >= deadline:
+                return [], 0
+            else:
+                sleep_for = 0.4
+        time.sleep(sleep_for)
 
 brain = Orchestrator(memory, emit)
 
@@ -130,12 +170,29 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- GET ----------
     def do_GET(self):
+        # 🔓 این دو مسیر برای تست اتصال، بدون رمز و بدون لاگ سنگین
+        raw_path = unquote(urlparse(self.path).path)
+        if raw_path in ("/api/ping", "/healthz"):
+            return self._json({"ok": True, "diana": True, "version": VERSION,
+                               "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
         if not self._require_auth():
             return
-        path = unquote(urlparse(self.path).path)
+        path = raw_path
         try:
             if path == "/api/events":
                 return self._sse()
+            if path == "/api/events/poll":
+                qs = urllib.parse.parse_qs(urlparse(self.path).query)
+                after = int((qs.get("after") or ["0"])[0] or 0)
+                wait = float((qs.get("wait") or ["18"])[0] or 18)
+                batch, latest = events_since(after, wait)
+                return self._json({"events": [{"id": i, "data": json.loads(d)} for i, d in batch],
+                                   "last": latest})
+            if path == "/favicon.ico":
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if path == "/api/agents":
                 return self._json(agent_registry.public_registry())
             if path == "/api/status":
@@ -148,6 +205,9 @@ class Handler(BaseHTTPRequestHandler):
                     "user_name": memory.user_name(),
                     "stats": memory.data["stats"],
                     "time": info["time"],
+                    "version": VERSION,
+                    "stream": "sse+poll",
+                    "auth": bool(AUTH_TOKEN),
                     "settings": memory.public_settings(),
                 })
             if path == "/api/memory":
@@ -300,6 +360,13 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return self._json({"error": str(e)}, 500)
 
+    def do_HEAD(self):
+        """بررسی سلامت اتصال: HEAD / → فقط هدرها (برای مانیتور و تست تونل)."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("X-Diana-Version", VERSION)
+        self.end_headers()
+
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -308,14 +375,23 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
+class DianaServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
 def main():
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    server = DianaServer(("0.0.0.0", PORT), Handler)
     server.daemon_threads = True
     print("=" * 58)
     print("🐠 دیانا بیدار شد! سیستم چندعامله با ۱۴۰ ایجنت متخصص آماده‌ست")
     print(f"🌐 آکواریوم دیانا: http://localhost:{PORT}")
     print(f"🧠 مغز ابری: {brain.llm.mode()} | اینترنت سرور: {'✅ وصل' if tools.internet_available() else '📴 قطع — حالت آفلاین فعاله'}")
     print(f"🔒 دسترسی: {'رمزدار (Basic Auth) — کاربر: ' + AUTH_USER if AUTH_TOKEN else 'بدون رمز (فقط محلی)'}")
+    print(f"🔗 تست اتصال: http://localhost:{PORT}/api/ping  |  stream: sse + poll")
+    sandbox = os.environ.get("E2B_SANDBOX_ID", "").strip()
+    if sandbox:
+        print(f"🌍 لینک عمومی (پیش‌نمایش): https://{PORT}-{sandbox}.e2b.app")
     if AUTO_TOKEN:
         print(f"⚠️ رمز خودکار ساخته شد — همین حالا از لاگ کپی کن: {AUTH_TOKEN}")
     print("=" * 58)

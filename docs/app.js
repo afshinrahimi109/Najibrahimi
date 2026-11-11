@@ -388,10 +388,133 @@ function updateProgress() {
   $('#cmdProgress').style.width = Math.round((currentMission.done / currentMission.total) * 100) + '%';
 }
 
+
+// ══════════════════════════════════════════════════════════════
+//  🔗 لایهٔ اتصال مقاوم: SSE → long-poll → تلاش مجدد
+//  هدف: در پروکسی/تونل/iframe/شبکهٔ موبایل هم دیانا زنده بماند.
+// ══════════════════════════════════════════════════════════════
+const Link = {
+  mode: 'idle',            // idle | sse | poll | offline
+  es: null,
+  lastId: 0,
+  retries: 0,
+  pollTimer: null,
+  heartbeatTimer: null,
+  lastEventAt: 0,
+  handler: null,
+};
+
+function linkChip() {
+  const el = $('#linkChip');
+  if (!el) return;
+  const map = {
+    idle: ['🔗', 'در حال اتصال…', 'idle'],
+    sse: ['🟢', 'اتصال زنده (SSE)', 'ok'],
+    poll: ['🟡', 'اتصال زنده (Polling)', 'warn'],
+    offline: ['🔴', 'اتصال قطع — تلاش مجدد…', 'bad'],
+  };
+  const [icon, label, cls] = map[Link.mode] || map.idle;
+  el.textContent = `${icon} ${label}`;
+  el.className = 'link-chip ' + cls;
+  el.title = `آخرین رویداد: ${Link.lastEventAt ? new Date(Link.lastEventAt).toLocaleTimeString('fa-IR') : '—'}` +
+    ` | تلاش‌ها: ${faNum(Link.retries)} | حالت: ${Link.mode}`;
+}
+
+function handleEventData(raw) {
+  let e; try { e = JSON.parse(raw); } catch (_) { return; }
+  Link.lastEventAt = Date.now();
+  if (typeof window.__dianaEventHandler === 'function') window.__dianaEventHandler(e);
+}
+
+/* ---- long-poll (جایگزین SSE وقتی اتصال push بسته می‌شود) ---- */
+async function startPolling() {
+  stopPolling();
+  Link.mode = 'poll'; linkChip();
+  const loop = async () => {
+    if (Link.mode !== 'poll') return;
+    try {
+      const r = await fetch(`/api/events/poll?after=${Link.lastId}&wait=18`, { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      (j.events || []).forEach(ev => { Link.lastId = Math.max(Link.lastId, ev.id || 0); handleEventData(JSON.stringify(ev.data)); });
+      if (j.last) Link.lastId = Math.max(Link.lastId, j.last);
+      Link.retries = 0;
+      Link.pollTimer = setTimeout(loop, 120);
+    } catch (e) {
+      Link.retries++;
+      Link.mode = 'offline'; linkChip();
+      Link.pollTimer = setTimeout(() => { Link.mode = 'poll'; linkChip(); loop(); },
+        Math.min(15000, 1200 * Link.retries));
+    }
+  };
+  loop();
+}
+function stopPolling() { clearTimeout(Link.pollTimer); Link.pollTimer = null; }
+
+/* ---- SSE با fallback خودکار ---- */
+function connectLive() {
+  if (!('EventSource' in window)) { startPolling(); return; }
+  try {
+    const url = '/api/events' + (Link.lastId ? `?after=${Link.lastId}` : '');
+    const es = new EventSource(url);
+    Link.es = es;
+    let opened = false;
+    const openTimer = setTimeout(() => {
+      if (!opened) { try { es.close(); } catch (_) {} startPolling(); }   // پروکسی اجازهٔ push نداد
+    }, 6000);
+    es.onopen = () => { opened = true; clearTimeout(openTimer); Link.mode = 'sse'; Link.retries = 0; linkChip(); };
+    es.onmessage = ev => { if (ev.data && ev.data.startsWith && ev.data.startsWith('{')) handleEventData(ev.data); };
+    es.onerror = () => {
+      clearTimeout(openTimer);
+      try { es.close(); } catch (_) {}
+      Link.retries++;
+      Link.mode = 'offline'; linkChip();
+      // ۱) پول‌بک را امتحان کن ۲) بعد از مدتی دوباره SSE
+      const delay = Math.min(12000, 800 * Link.retries);
+      setTimeout(() => {
+        if (Link.mode === 'offline') startPolling();
+        setTimeout(() => { if (Link.mode === 'poll') connectLive(); }, 45000);
+      }, delay);
+    };
+  } catch (e) { startPolling(); }
+}
+
+/* ---- تپش اتصال: سلامت سرور، تأخیر و نسخه را زنده نشان می‌دهد ---- */
+async function pingServer() {
+  try {
+    const t0 = Date.now();
+    const r = await fetch('/api/ping', { cache: 'no-store' });
+    if (!r.ok) throw new Error('bad');
+    const j = await r.json();
+    const lat = Date.now() - t0;
+    if ($('#linkLatency')) $('#linkLatency').textContent = `⚡ ${faNum(lat)}ms`;
+    if (j.version && $('#linkVersion')) $('#linkVersion').textContent = `v${j.version}`;
+    if (Link.mode === 'idle' || (Link.mode === 'offline' && !Link.pollTimer && !Link.es)) connectLive();
+    return true;
+  } catch (e) {
+    Link.mode = 'offline'; linkChip();
+    return false;
+  }
+}
+
+function startHeartbeat() {
+  clearInterval(Link.heartbeatTimer);
+  pingServer();                                   // همین حالا، تا تأخیر از ابتدا دیده شود
+  Link.heartbeatTimer = setInterval(pingServer, 30000);
+  setTimeout(() => { if (Link.mode === 'idle') startPolling(); }, 4000);
+}
+
+window.__dianaLink = Link;
+window.__dianaReconnect = () => {
+  try { Link.es && Link.es.close(); } catch (_) {}
+  stopPolling(); Link.retries = 0; Link.mode = 'idle'; linkChip(); connectLive();
+  toast('🔗 اتصال را دوباره چک می‌کنم…');
+  fetch('/api/ping', { cache: 'no-store' }).then(r => r.json()).then(() => refreshHomeStats()).catch(() => {});
+};
+
 function connectSSE() {
-  const es = new EventSource('/api/events');
-  es.onmessage = ev => {
-    let e; try { e = JSON.parse(ev.data); } catch (_) { return; }
+  // پیام‌های SSE و Polling از یک مسیر می‌آیند تا رفتار یکسان باشد
+  window.__dianaEventHandler = async e => {
     switch (e.type) {
       case 'mission_created':
         currentMissionId = e.mission.id;
@@ -470,14 +593,14 @@ function connectSSE() {
         cmdLog(`🚀 کارخانهٔ راه‌اندازی روشن شد: ${e.launch?.fields?.business_name || ''}`);
         break;
       case 'launch_stage_started':
-        if (!launchState.current || launchState.current.id !== e.launch_id) break;
+        if (!await syncLaunchFromEvent(e)) break;
         launchState.current.stages[e.index] = { ...(launchState.current.stages[e.index] || {}), ...e.stage, status: 'running' };
         renderLaunchStages(launchState.current.stages, launchState.current.results);
         updateLaunchProgress();
         cmdLog(`▶️ ${e.agent?.emoji || ''} ${e.agent?.fa || ''} — مرحلهٔ «${e.stage?.step || ''}» شروع شد`);
         break;
       case 'launch_stage_done': {
-        if (!launchState.current || launchState.current.id !== e.launch_id) break;
+        if (!await syncLaunchFromEvent(e)) break;
         launchState.current.stages[e.index] = { ...(launchState.current.stages[e.index] || {}), ...e.stage,
           status: 'done', score: e.score, verdict: e.verdict, source: e.source, preview: e.preview };
         launchState.current.results = [...(launchState.current.results || []),
@@ -488,7 +611,7 @@ function connectSSE() {
         break;
       }
       case 'launch_ready': {
-        if (!launchState.current || launchState.current.id !== e.launch_id) break;
+        if (!await syncLaunchFromEvent(e)) break;
         launchState.current.status = 'done';
         launchState.current.score = e.score;
         launchState.current.report_file = e.report_file;
@@ -517,7 +640,8 @@ function connectSSE() {
         break;
     }
   };
-  es.onerror = () => { /* EventSource خودش وصل می‌شه */ };
+  connectLive();
+  startHeartbeat();
 }
 $('#cmdStartBtn').addEventListener('click', startMissionFromCmd);
 $('#cmdGoalInput').addEventListener('keydown', e => { if (e.key === 'Enter') startMissionFromCmd(); });
@@ -693,6 +817,26 @@ function renderLaunchDocs(rec) {
       <span class="doc-icon">${d.icon}</span>
       <span class="doc-body"><b>${esc(d.title)}</b><small>${esc(d.desc)}</small><code>${esc(d.file)}</code></span>
       <span class="doc-dl">⬇️</span></a>`).join('');
+}
+
+async function syncLaunchFromEvent(e) {
+  // اگر کاربر روی صفحهٔ دیگری است یا هنوز چیزی باز نکرده، رویداد خودش کسب‌وکار را باز می‌کند
+  if (launchState.current && launchState.current.id === e.launch_id) return true;
+  if (launchState._syncing === e.launch_id) return false;
+  launchState._syncing = e.launch_id;
+  try {
+    const rec = await api.get('/api/launch/' + e.launch_id);
+    if (!rec || rec.error) return false;
+    launchState.current = rec;
+    fillFields(rec.fields);
+    renderLaunchStages(rec.stages, rec.results);
+    renderAutomation(rec.automation);
+    renderLaunchDocs(rec);
+    renderLaunchHistory();
+    updateLaunchProgress();
+    refreshLaunchMath();
+    return true;
+  } catch (_) { return false; }
 }
 
 async function openLaunch(id) {
@@ -949,6 +1093,7 @@ function updateBrainPill(mode, internet) {
   if ((mode || '').startsWith('local') && settings.cloud_brain) label = 'مغز داخلی + ☁️ ابری رایگان مرورگر';
   else if (!(mode || '').startsWith('local')) label = '☁️ مغز ابری: ' + mode;
   $('#brainModeText').textContent = `🧠 ${label}`;
+  linkChip();
   $('#statusPill').title = `اینترنت سرور: ${internet ? 'متصل ✅' : 'قطع 📴 (مرورگر تو مغز ابری رو تأمین می‌کنه)'} | حالت مغز سرور: ${mode}`;
 }
 

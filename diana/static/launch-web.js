@@ -496,6 +496,13 @@ ${automationMarkdown(L)}
         : { ok: s < 300, status: s, json: async () => o };  // محیط‌های بدون fetch بومی
       const mem = MEM() || {};
       try {
+        // 🔗 سلامت اتصال در نسخهٔ وب (هم‌ارز /api/ping سرور پایتون)
+        if (path === '/api/ping' && method === 'GET') {
+          return json({ ok: true, diana: true, version: 'web-2.1-launch', mode: 'browser', stream: 'local' });
+        }
+        if (path === '/api/events/poll' && method === 'GET') {
+          return json({ events: [], last: 0, stream: 'local' });
+        }
         if (path === '/api/launch' && method === 'GET') {
           const list = [...(mem.launches || [])].reverse().map(r => {
             const { results, plan, report, ...rest } = r;
