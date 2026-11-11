@@ -40,8 +40,9 @@ from memory import Memory
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+DOCS_DIR = os.path.join(os.path.dirname(BASE_DIR), "docs")   # نسخهٔ آفلاین (اختیاری)
 PORT = int(os.environ.get("PORT", "8000"))
-VERSION = "2.2-link"
+VERSION = "2.3-singleport"
 WS_PORT = int(os.environ.get("DIANA_WS_PORT", str(PORT + 1)))
 
 # 🔒 وقتی DIANA_TOKEN تنظیم شود (حالت آنلاین/تونل)، تمام درخواست‌ها نیاز به
@@ -335,8 +336,17 @@ class Handler(BaseHTTPRequestHandler):
     def _static(self, path):
         if path in ("/", ""):
             path = "/index.html"
-        fs_path = os.path.normpath(os.path.join(STATIC_DIR, path.lstrip("/")))
-        if not fs_path.startswith(STATIC_DIR) or not os.path.isfile(fs_path):
+        # نسخهٔ وبِ کاملاً آفلاین (همان اپ، بدون سرور) روی همان لینک:
+        #   /docs   →   docs/index.html  و فایل‌های کنارش
+        if path in ("/docs", "/docs/", "/offline"):
+            path = "/index.html"
+            root = DOCS_DIR
+        else:
+            root = DOCS_DIR if path.startswith("/docs/") else STATIC_DIR
+            if root is DOCS_DIR:
+                path = path[len("/docs"):]
+        fs_path = os.path.normpath(os.path.join(root, path.lstrip("/")))
+        if not fs_path.startswith(root) or not os.path.isfile(fs_path):
             self._json({"error": "not found"}, 404)
             return
         ctype = mimetypes.guess_type(fs_path)[0] or "application/octet-stream"

@@ -318,10 +318,17 @@
             <button class="mini-btn" id="copyLinkBtn">📋 کپی</button>
             <a class="mini-btn" id="openLinkBtn" target="_blank" rel="noopener">↗ باز کردن</a>
           </div>
+          <div class="link-row" style="margin-top:10px">
+            <input id="offlineLink" readonly dir="ltr" value="—">
+            <button class="mini-btn" id="copyOfflineBtn">📋 کپی</button>
+            <a class="mini-btn" id="openOfflineBtn" target="_blank" rel="noopener">↗ باز کردن</a>
+          </div>
+          <p class="conn-note">☁️ **نسخهٔ دوم (بدون سرور):** لینک بالا نسخهٔ کاملاً ساکن دیاناست — حتی اگر سرور خواب باشد،
+          همین دامنه با مسیر <code>/docs</code> باز می‌شود و ارتش ۱۴۰ ایجنت و کارخانهٔ راه‌اندازی بدون سرور کار می‌کند (اطلاعات در حافظهٔ مرورگر).</p>
           <p class="conn-note">اگر لینک پیش‌نمایش عوض شد، از پنل Arena همان لینک تازه را باز کن.
           برای یک **لینک ثابت همیشگی** (ngrok / Cloudflare / Render) فایل <a href="https://github.com/afshinrahimi109/Najibrahimi/blob/main/diana/STATIC-IP.md" target="_blank" rel="noopener">STATIC-IP.md</a> را ببین یا روی سرور خودت <code>python3 online.py --setup</code> را اجرا کن.</p>
         </div>
-        <p class="conn-note" id="connNote">اتصال زنده دو مسیر دارد: SSE و (اگر پروکسی/مرورگر اجازه نداد) Polling خودکار. اگر چیزی قرمز شد، دکمهٔ بالا یا نشانگر بالای صفحه را بزن.</p>
+        <p class="conn-note" id="connNote">اتصال زنده سه مسیر دارد: WebSocket (روی همین پورت)، بعد SSE و در آخر Polling خودکار. اگر چیزی قرمز شد، دکمهٔ بالا یا نشانگر بالای صفحه را بزن.</p>
       </div>
       <button class="primary-btn" id="saveSettingsBtn">💾 ذخیره تنظیمات</button>
       <div class="settings-msg" id="settingsMsg"></div>

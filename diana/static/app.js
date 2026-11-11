@@ -1220,6 +1220,18 @@ function connRow(key, icon, name, val, state) {
   row.querySelector('.c-val').textContent = val;
 }
 
+function fillOfflineLink() {
+  const el = $('#offlineLink');
+  if (!el) return;
+  // نسخهٔ آفلاین (بدون سرور) روی همان دامنه با مسیر /docs
+  const base = location.origin.replace(/\.e2b\.app$/, '.e2b.app');
+  const url = base.startsWith('http') ? base + '/docs' : (location.href.split('#')[0] + 'docs');
+  el.value = url;
+  const open = $('#openOfflineBtn'); if (open) open.href = url;
+  const copy = $('#copyOfflineBtn');
+  if (copy) copy.onclick = () => { navigator.clipboard?.writeText(url); toast('لینک نسخهٔ بدون سرور کپی شد ✅'); };
+}
+
 function fillCurrentLink() {
   const url = location.origin + location.pathname;
   const inp = $('#currentLink');
@@ -1231,6 +1243,7 @@ function fillCurrentLink() {
 async function runConnectionTest() {
   const started = Date.now();
   fillCurrentLink();
+  fillOfflineLink();
   // ۱) سرور
   try {
     const t0 = Date.now();
