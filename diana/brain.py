@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import agents as agent_registry
+import launch as launch_engine
 import local_brain
 import tools
 from llm import LLMClient, DIANA_PERSONA
@@ -42,12 +43,14 @@ class Orchestrator:
         self.memory = memory
         self.emit = emit  # تابع پخش رویداد زنده
         self.llm = LLMClient(memory)
+        # 🚀 کارخانهٔ راه‌اندازی کسب‌وکار (تحقیق → تأمین‌کننده → مشتری → قرارداد → اجرا)
+        self.launch = launch_engine.LaunchEngine(memory, emit, llm=self.llm)
         self.pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="diana-agent")
         self._counter = int(time.time()) % 100000
         self._lock = threading.Lock()
 
     # ================= ورودی اصلی گفتگو =================
-    def handle_message(self, text: str) -> dict:
+    def handle_message(self, text: str, force_launch: bool = False) -> dict:
         text = (text or "").strip()
         if not text:
             return {"kind": "chat", "reply": "🐠 چیزی نگفتی که فرمانده! من اینجام، بگو چی تو ذهنته؟", "source": "local"}
@@ -92,6 +95,29 @@ class Orchestrator:
                          "مثلا بگو: «اسمم علی‌ست» یا «یادت باشه که روز تولدم ۵ فروردینه» تا برای همیشه یادم بمونه!")
             self.memory.log_chat("diana", reply, "local")
             return {"kind": kind, "reply": reply, "source": "local"}
+
+        # ---- 🚀 راه‌اندازی کسب‌وکار: کارخانهٔ ۷ مرحله‌ای ----
+        if kind == "launch" or force_launch:
+            fields = launch_engine.parse_launch_text(text)
+            rec = self.launch.start(fields)
+            reply = (
+                f"عجب فرمانی فرمانده! 🚀🐠 همین حالا **کارخانهٔ راه‌اندازی کسب‌وکار** را روشن کردم:\n\n"
+                f"🏷️ **کسب‌وکار:** «{fields['business_name']}» | 📍 {fields['city'] or 'شهر خودت'}\n"
+                f"💰 **هدف ماهانه:** {launch_engine.fa(int(fields['customers']))} قرارداد × "
+                f"{launch_engine.money(float(fields['ticket']), fields['currency'])}\n\n"
+                "۷ متخصص به‌ترتیب و با خروجی واقعی کار می‌کنند:\n"
+                "۱️⃣ 🔍 تحقیق و اعتبارسنجی بازار  ۲️⃣ 🎁 پیشنهاد و قیمت‌گذاری\n"
+                "۳️⃣ 🏭 پیدا کردن فروشنده و تأمین‌کننده  ۴️⃣ 🎯 پیدا کردن مشتری و اسکریپت پیام\n"
+                "۵️⃣ 🤝 مذاکره و قرارداد  ۶️⃣ ⚙️ اجرای پشت صحنه و تحویل  ۷️⃣ 📣 برند و رشد\n\n"
+                "همراهش **۱۲ قاعدهٔ اتوماسیون** (سرنخ → RFQ → پیشنهاد → قرارداد → فاکتور → اجرا → رضایت) "
+                "و حساب‌وکتاب قیف فروش را هم می‌سازم. گزارش زنده در «🚀 اتاق جنگ» و فایل‌ها در گاوصندوق! "
+                "اگه شهر، مبلغ هر قرارداد یا هدف مشتری را بگویی، همهٔ اعداد را دقیق‌تر می‌کنم."
+            )
+            self.memory.log_chat("diana", reply, "launch")
+            self.emit({"type": "diana_say", "launch_id": rec["id"], "text": reply,
+                       "report": launch_engine.plan_markdown(fields)})
+            return {"kind": "launch", "reply": reply, "launch_id": rec["id"],
+                    "launch": rec, "source": "launch"}
 
         # ---- مأموریت: ورود به چرخه ارکستراتور ----
         if kind == "task":

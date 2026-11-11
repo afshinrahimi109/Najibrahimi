@@ -19,6 +19,7 @@ from urllib.parse import urlparse, unquote
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import agents as agent_registry
+import launch as launch_engine
 import tools
 from brain import Orchestrator
 from memory import Memory
@@ -142,6 +143,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({
                     "online": True, "internet": info["internet"], "llm_mode": brain.llm.mode(),
                     "agents_total": len(agent_registry.AGENTS),
+                    "launches_total": len(memory.data.get("launches", [])),
                     "departments": len(agent_registry.DEPARTMENTS),
                     "user_name": memory.user_name(),
                     "stats": memory.data["stats"],
@@ -169,6 +171,21 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/missions/"):
                 m = memory.get_mission(path.split("/")[-1])
                 return self._json(m or {"error": "not found"}, 200 if m else 404)
+            # 🚀 راه‌اندازی کسب‌وکار
+            if path == "/api/launch":
+                return self._json({"launches": memory.public_state().get("launches", []),
+                                   "stages": [{"id": s["id"], "step": s["step"], "icon": s["icon"],
+                                               "owner": s["owner"], "deliverable": s["deliverable"],
+                                               "why": s["why"]} for s in launch_engine.STAGES],
+                                   "defaults": launch_engine.DEFAULTS})
+            if path.startswith("/api/launch/"):
+                parts = [p for p in path[len("/api/launch/"):].split("/") if p]
+                lid = parts[0] if parts else ""
+                full = len(parts) > 1 and parts[1] == "full"
+                rec = brain.launch.detail(lid, full=full)
+                if not rec:
+                    return self._json({"error": "not found"}, 404)
+                return self._json(rec)
             if path == "/api/settings":
                 return self._json(memory.public_settings())
             return self._static(path)
@@ -227,6 +244,21 @@ class Handler(BaseHTTPRequestHandler):
                 if not goal:
                     return self._json({"error": "هدف مأموریت خالیه"}, 400)
                 return self._json({"mission_id": brain.start_mission(goal)})
+            # 🚀 راه‌اندازی کسب‌وکار (تحقیق → تأمین‌کننده → مشتری → قرارداد → اجرا)
+            if path == "/api/launch":
+                fields = body if isinstance(body, dict) else {}
+                mode = str(body.get("mode", "auto")) if isinstance(body, dict) else "auto"
+                rec = brain.launch.start(fields, mode=mode)
+                return self._json({"ok": True, "launch": rec})
+            if path == "/api/launch/parse":
+                text = str(body.get("text", "")).strip()
+                if not text:
+                    return self._json({"error": "متن خالیه"}, 400)
+                return self._json({"fields": launch_engine.normalize_fields(launch_engine.parse_launch_text(text))})
+            if path == "/api/launch/quote":
+                fields = launch_engine.normalize_fields(body if isinstance(body, dict) else {})
+                return self._json({"fields": fields, "numbers": launch_engine.numbers(fields),
+                                   "plan": launch_engine.plan_markdown(fields)})
             if path == "/api/chatlog":
                 memory.log_chat(str(body.get("role", "diana")), str(body.get("text", "")), str(body.get("source", "browser-cloud")))
                 return self._json({"ok": True})
@@ -280,7 +312,7 @@ def main():
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     server.daemon_threads = True
     print("=" * 58)
-    print("🐠 دیانا بیدار شد! سیستم چندعامله با ۱۲۰ ایجنت متخصص آماده‌ست")
+    print("🐠 دیانا بیدار شد! سیستم چندعامله با ۱۴۰ ایجنت متخصص آماده‌ست")
     print(f"🌐 آکواریوم دیانا: http://localhost:{PORT}")
     print(f"🧠 مغز ابری: {brain.llm.mode()} | اینترنت سرور: {'✅ وصل' if tools.internet_available() else '📴 قطع — حالت آفلاین فعاله'}")
     print(f"🔒 دسترسی: {'رمزدار (Basic Auth) — کاربر: ' + AUTH_USER if AUTH_TOKEN else 'بدون رمز (فقط محلی)'}")

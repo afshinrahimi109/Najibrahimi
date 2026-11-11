@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>دیانا 🐠 | ماهی زنده هوشمند و ارتش ۱۲۰ ایجنت</title>
-<meta name="description" content="دیانا — سیستم چندعامله زنده با مغز ارکستراتور و ۱۲۰ ایجنت متخصص؛ ماهی سه‌بعدی سخنگو که واقعاً کار انجام می‌ده.">
+<title>دیانا 🐠 | ماهی زنده هوشمند و ارتش ۱۴۰ ایجنت</title>
+<meta name="description" content="دیانا — سیستم چندعامله زنده با مغز ارکستراتور و ۱۴۰ ایجنت متخصص؛ ماهی سه‌بعدی سخنگو که واقعاً کار انجام می‌ده.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐠</text></svg>">
 <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;700;800;900&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
@@ -21,12 +21,13 @@
     <div class="brand-fish">🐠</div>
     <div>
       <div class="brand-name">دیانا <span class="crown">👑</span></div>
-      <div class="brand-sub">مغز زنده چندعامله • ۱۲۰ ایجنت متخصص • نسخه وب 🌐</div>
+      <div class="brand-sub">مغز زنده چندعامله • ۱۴۰ ایجنت متخصص • نسخه وب 🌐</div>
     </div>
   </div>
   <nav class="main-nav" id="mainNav">
     <button class="nav-btn active" data-page="home">🏠 آکواریوم</button>
     <button class="nav-btn" data-page="command">🧠 مرکز فرماندهی <span class="live-dot" id="cmdLiveDot" hidden></span></button>
+    <button class="nav-btn" data-page="launch">🚀 اتاق جنگ کسب‌وکار</button>
     <button class="nav-btn" data-page="agents">👥 ارتش ایجنت‌ها</button>
     <button class="nav-btn" data-page="missions">📋 مأموریت‌ها</button>
     <button class="nav-btn" data-page="vault">🗄️ گاوصندوق و حافظه</button>
@@ -57,7 +58,7 @@
         </div>
         <div class="home-stats" id="homeStats">
           <div class="stat"><span class="stat-num" id="statMissions">۰</span><span class="stat-label">مأموریت انجام‌شده</span></div>
-          <div class="stat"><span class="stat-num">۱۲۰</span><span class="stat-label">ایجنت متخصص</span></div>
+          <div class="stat"><span class="stat-num" id="statAgents">۱۴۰</span><span class="stat-label">ایجنت متخصص</span></div>
           <div class="stat"><span class="stat-num" id="statFacts">۰</span><span class="stat-label">خاطره ذخیره‌شده</span></div>
           <div class="stat"><span class="stat-num" id="statFiles">۰</span><span class="stat-label">فایل در گاوصندوق</span></div>
         </div>
@@ -81,6 +82,7 @@
           <button class="chip">برنامه‌ای بنویس که اعداد اول تا ۱۰۰ رو پیدا کنه 💻</button>
           <button class="chip">یه عکس از قلعه‌ای روی کوه در غروب بساز 🎨</button>
           <button class="chip">حساب کن ۴۵ × ۱۲ + ۷ 🧮</button>
+          <button class="chip">یه شرکت راه‌اندازی کن: تحقیق، تأمین‌کننده، مشتری، قرارداد و اجرا 🚀</button>
           <button class="chip">برنامه سفر سه‌روزه به شیراز بچین ✈️</button>
           <button class="chip">یه داستان کوتاه درباره یه ماهی شجاع بنویس 📚</button>
           <button class="chip">چه کارهایی بلدی؟</button>
@@ -126,10 +128,96 @@
     </div>
   </section>
 
+
+  <!-- ================= 🚀 اتاق جنگ راه‌اندازی کسب‌وکار ================= -->
+  <section class="page" id="page-launch">
+    <div class="page-head">
+      <h2>🚀 اتاق جنگ راه‌اندازی کسب‌وکار</h2>
+      <p>هدف را بگو؛ دیانا و ۷ متخصص راه‌اندازی، مرحله‌به‌مرحله <b>تحقیق بازار</b> می‌کنند،
+         <b>تأمین‌کننده و مشتری</b> پیدا می‌کنند، <b>قیمت و قرارداد</b> می‌بندند و
+         <b>اتوماسیون اجرای پشت صحنه</b> را می‌چینند — با عدد، اسکریپت آماده و فایل قابل دانلود.</p>
+    </div>
+
+    <div class="launch-layout">
+      <!-- فرم ورودی -->
+      <div class="glass launch-form">
+        <h4>🎯 کسب‌وکارت را تعریف کن</h4>
+        <label>ایده / کاری که می‌خواهی انجام بدهی *</label>
+        <textarea id="lfIdea" rows="3" placeholder="مثلاً: طراحی سایت و منوی دیجیتال برای کافه‌ها، تحویل ۷ روزه"></textarea>
+        <div class="lf-grid">
+          <div><label>نام کسب‌وکار</label><input id="lfName" placeholder="خالی بگذاری خودم پیشنهاد می‌دهم"></div>
+          <div><label>شهر / بازار</label><input id="lfCity" placeholder="مثلاً اصفهان"></div>
+          <div><label>کانال اصلی جذب</label><input id="lfChannel" placeholder="اینستاگرام و واتساپ"></div>
+          <div><label>واحد پول</label><input id="lfCurrency" placeholder="تومان"></div>
+          <div><label>مبلغ هر قرارداد (میلیون) *</label><input id="lfTicket" type="number" min="0.1" step="0.1" value="5"></div>
+          <div><label>هدف قرارداد در ماه *</label><input id="lfCustomers" type="number" min="1" value="20"></div>
+          <div><label>ظرفیت اجرا در ماه</label><input id="lfCapacity" type="number" min="1" value="30"></div>
+          <div><label>نرخ تبدیل سرنخ → قرارداد (٪)</label><input id="lfConv" type="number" min="1" max="90" step="0.5" value="5"></div>
+          <div><label>هزینهٔ جذب هر مشتری (میلیون)</label><input id="lfCac" type="number" min="0" step="0.1" value="0.4"></div>
+          <div><label>تأمین‌کننده‌های فعلی (با کاما)</label><input id="lfSuppliers" placeholder="چاپخانه نقش جهان، فریلنسر سئو"></div>
+        </div>
+        <label>هدف فرمانده (اختیاری)</label>
+        <input id="lfGoal" placeholder="مثلاً: تا ۹۰ روز اول ۱۵ قرارداد ببندم">
+        <div class="lf-actions">
+          <button class="primary-btn" id="lfStartBtn">🚀 شروع راه‌اندازی</button>
+          <button class="mini-btn" id="lfParseBtn" title="متن آزاد را می‌خوانم و فیلدها را پر می‌کنم">🧠 از متن آزاد پر کن</button>
+        </div>
+        <div class="lf-note" id="lfNote">همه‌چیز در گاوصندوق دیانا ذخیره می‌شود؛ هیچ داده‌ای بیرون نمی‌رود.</div>
+      </div>
+
+      <!-- حساب‌وکتاب زنده + مراحل -->
+      <div class="launch-live">
+        <div class="glass launch-math" id="lfMath">
+          <h4>💰 حساب‌وکتاب زندهٔ کسب‌وکار</h4>
+          <div class="lm-grid">
+            <div class="lm-card"><span class="lm-num" id="lmRevenue">—</span><span class="lm-label">درآمد ماهانه هدف</span></div>
+            <div class="lm-card"><span class="lm-num" id="lmLeads">—</span><span class="lm-label">سرنخ لازم در ماه</span></div>
+            <div class="lm-card"><span class="lm-num" id="lmMeetings">—</span><span class="lm-label">جلسهٔ لازم در ماه</span></div>
+            <div class="lm-card"><span class="lm-num" id="lmPerDay">—</span><span class="lm-label">پیام/تماس در روز</span></div>
+          </div>
+          <div class="lm-note" id="lmNote">عدد‌ها را وارد کن تا قیف فروش و ظرفیت اجرا را همین‌جا حساب کنم.</div>
+        </div>
+
+        <div class="glass launch-timeline-card">
+          <div class="lt-head">
+            <h4 id="ltTitle">🗺️ نقشهٔ ۷ مرحلهٔ راه‌اندازی</h4>
+            <div class="lt-progress-wrap"><div class="lt-progress" id="ltProgress"></div></div>
+          </div>
+          <div class="launch-timeline" id="ltStages"><div class="empty-box">فرم بالا را پر کن و «شروع راه‌اندازی» را بزن 🚀</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="glass launch-docs" id="lfDocs">
+      <h4>📄 اسناد آمادهٔ استفاده</h4>
+      <p class="docs-note">این‌ها را دیانا از روی اعداد همین کسب‌وکار ساخته — فقط جای [کروشه]‌ها را پر کن.</p>
+      <div class="docs-grid" id="lfDocsGrid"><div class="empty-box">با شروع راه‌اندازی، پیش‌نویس قرارداد و قالب RFQ اینجا آماده می‌شوند 📄</div></div>
+    </div>
+
+    <div class="launch-bottom">
+      <div class="glass">
+        <div class="lb-head"><h4>⚙️ شبکهٔ اتوماسیون پشت صحنه</h4><span class="hint-chip">۱۲ قاعده از سرنخ تا رضایت‌سنجی</span></div>
+        <div class="automation-grid" id="lfAutomation"><div class="empty-box">پس از راه‌اندازی، زنجیرهٔ خودکار کارها اینجا چیده می‌شود ⚙️</div></div>
+      </div>
+      <div class="glass">
+        <div class="lb-head"><h4>🚀 کسب‌وکارهای راه‌اندازی‌شده</h4><span class="hint-chip" id="lfHistoryCount"></span></div>
+        <div class="launch-history" id="lfHistory"><div class="empty-box">هنوز کسب‌وکاری راه‌اندازی نکرده‌ای.</div></div>
+      </div>
+    </div>
+
+    <!-- مودال جزئیات مرحله -->
+    <div class="modal-backdrop" id="stageModal" hidden>
+      <div class="modal glass wide">
+        <button class="modal-close" id="stageModalClose">✖</button>
+        <div id="stageModalBody"></div>
+      </div>
+    </div>
+  </section>
+
   <!-- ================= ارتش ایجنت‌ها ================= -->
   <section class="page" id="page-agents">
     <div class="page-head">
-      <h2>👥 ارتش ۱۲۰ ایجنت متخصص دیانا</h2>
+      <h2>👥 ارتش ۱۴۰ ایجنت متخصص دیانا</h2>
       <p>۱۲ دپارتمان × ۱۰ متخصص حرفه‌ای برای تمام کارهای مجازی و روزمره. روی هر ایجنت کلیک کن و مستقیم بهش مأموریت بده!</p>
     </div>
     <div class="glass agents-toolbar">
@@ -212,7 +300,8 @@
       <div class="settings-msg" id="settingsMsg"></div>
       <div class="about-box">
         <h4>🐠 درباره دیانا</h4>
-        <p>دیانا یک سیستم چندعامله زنده با معماری ارکستراتور–کارگر است (همان الگوی سیستم تحقیقاتی کلود): مغز رهبر کار را تجزیه می‌کند، ۱۲۰ ایجنت متخصص در ۱۲ دپارتمان به‌صورت موازی با ابزارهای واقعی (اجرای کد، جستجوی وب، ساخت فایل و عکس، محاسبات و حافظه) اجرا می‌کنند، ارزیاب کیفیت خروجی‌ها را نمره می‌دهد و دیانا نتیجه نهایی را ترکیب و با صدا اعلام می‌کند.</p>
+        <p>دیانا یک سیستم چندعامله زنده با معماری ارکستراتور–کارگر است (همان الگوی سیستم تحقیقاتی کلود): مغز رهبر کار را تجزیه می‌کند، ۱۴۰ ایجنت متخصص در ۱۲ دپارتمان به‌صورت موازی با ابزارهای واقعی (اجرای کد، جستجوی وب، ساخت فایل و عکس، محاسبات و حافظه) اجرا می‌کنند، ارزیاب کیفیت خروجی‌ها را نمره می‌دهد و دیانا نتیجه نهایی را ترکیب و با صدا اعلام می‌کند.</p>
+        <p>🚀 <b>کارخانهٔ راه‌اندازی کسب‌وکار:</b> ۲۰ متخصص در دپارتمان «راه‌اندازی و اجرای کسب‌وکار» به‌اضافهٔ موتور ۷ مرحله‌ای: تحقیق بازار، پیشنهاد و قیمت، تأمین‌کننده، مشتری، قرارداد، اجرا و برند — با ۱۲ قاعدهٔ اتوماسیون پشت صحنه.</p>
         <p>🌌 پنج بُعد دیانا: <b>سه بُعد فضا</b> (آکواریوم سه‌بعدی و ماهی زنده)، <b>بُعد زمان</b> (حافظه ماندگار روی هاست) و <b>بُعد احساس</b> (شخصیت، حالت‌های روحی و واکنش زنده ماهی به فعالیت ایجنت‌ها).</p>
       </div>
     </div>
@@ -243,7 +332,9 @@
   }
 </script>
 <script src="agents-data.js"></script>
+<script src="launch-data.js"></script>
 <script src="browser-backend.js"></script>
+<script src="launch-web.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

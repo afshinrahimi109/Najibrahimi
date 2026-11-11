@@ -122,6 +122,7 @@ function dianaSay(text, { speakIt = true } = {}) {
 function goPage(name) {
   $$('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.page === name));
   $$('.page').forEach(p => p.classList.toggle('active', p.id === 'page-' + name));
+  if (name === 'launch') loadLaunchPage();
   if (name === 'agents') loadAgentsPage();
   if (name === 'missions') loadMissionsPage();
   if (name === 'vault') loadVaultPage();
@@ -138,6 +139,7 @@ const chatBox = $('#chatMessages');
 function scrollChat() { chatBox.scrollTop = chatBox.scrollHeight; }
 function srcBadge(source) {
   const map = {
+    launch: '🚀 کارخانهٔ راه‌اندازی',
     local: '🧠 مغز داخلی', orchestrator: '⚡ ارکستراتور',
     pollinations: '☁️ مغز ابری رایگان', 'pollinations-get': '☁️ مغز ابری رایگان',
     'pollinations-browser': '☁️ مغز ابری رایگان', groq: '☁️ Groq', gemini: '☁️ Gemini', openrouter: '☁️ OpenRouter',
@@ -161,7 +163,7 @@ function addTyping() {
 }
 function removeTyping() { $('#typingMsg')?.remove(); }
 
-const DIANA_SYSTEM_BROWSER = `تو «دیانا» هستی؛ یک ماهی طلایی زنده، باهوش، مهربان و پرانرژی که مغز یک سیستم چندعامله با ۱۲۰ ایجنت متخصص هستی و در آکواریوم سه‌بعدی زندگی می‌کنی. صمیمی و کمک‌کننده‌ای، گاهی ایموجی 🐠💙🫧 به‌کار می‌بری ولی کم. همیشه به زبان کاربر جواب بده (فارسی نوشت، فارسی). پاسخ مفید، دقیق، گرم و نه‌چندان طولانی بده.`;
+const DIANA_SYSTEM_BROWSER = `تو «دیانا» هستی؛ یک ماهی طلایی زنده، باهوش، مهربان و پرانرژی که مغز یک سیستم چندعامله با ۱۴۰ ایجنت متخصص هستی و در آکواریوم سه‌بعدی زندگی می‌کنی. صمیمی و کمک‌کننده‌ای، گاهی ایموجی 🐠💙🫧 به‌کار می‌بری ولی کم. همیشه به زبان کاربر جواب بده (فارسی نوشت، فارسی). پاسخ مفید، دقیق، گرم و نه‌چندان طولانی بده.`;
 
 async function pollinationsChat(msgs, timeoutMs = 45000) {
   // مغز ابری رایگان از سمت مرورگر — Pollinations بدون کلید و ثبت‌نام
@@ -242,7 +244,22 @@ async function sendMessage(rawText) {
   try {
     const res = await api.post('/api/message', { text });
     removeTyping();
-    if (res.kind === 'mission') {
+    if (res.kind === 'launch') {
+      addBubble('diana', res.reply, 'launch',
+        `<br><button class="go-cmd" onclick="goPage('launch')">🚀 مشاهدهٔ اتاق جنگ راه‌اندازی</button>`);
+      chatHistory.push({ role: 'assistant', content: res.reply });
+      dianaSay('کارخانهٔ راه‌اندازی روشن شد فرمانده! تیم هفت نفره‌ام شروع کردند.');
+      if (res.launch) {
+        launchState.current = res.launch;
+        launchState.launches = [res.launch, ...launchState.launches.filter(l => l.id !== res.launch.id)];
+        if (!launchState.current.stages?.length) launchState.current.stages = [];
+        renderLaunchStages(launchState.current.stages, []);
+        renderLaunchHistory();
+        updateLaunchProgress();
+        fillFields(res.launch.fields);
+        refreshLaunchMath();
+      }
+    } else if (res.kind === 'mission') {
       currentMissionId = res.mission_id;
       addBubble('diana', res.reply, 'orchestrator',
         `<br><button class="go-cmd" onclick="goPage('command')">🧠 مشاهده زنده در مرکز فرماندهی</button>`);
@@ -297,7 +314,16 @@ $('#quickChips').addEventListener('click', e => {
     toast('✏️ اسمت رو جای سه‌نقطه بنویس و ارسال کن تا دیانا یاد بگیره!');
     return;
   }
-  sendMessage(c.textContent.replace(/\s*[🔬💻🎨🧮✈️📚]\s*$/u, '').trim());
+  const txt = c.textContent.replace(/\s*[🔬💻🎨🧮✈️📚🚀]\s*$/u, '').trim();
+  // چیپ راه‌اندازی: فرم اتاق جنگ را با متن آماده باز می‌کند
+  if (c.textContent.includes('شرکت راه‌اندازی کن')) {
+    goPage('launch');
+    if (!$('#lfIdea').value) $('#lfIdea').value = txt;
+    parseLaunchTextNow();
+    toast('🚀 فرم راه‌اندازی آماده شد — ایده را دقیق کن و «شروع راه‌اندازی» را بزن');
+    return;
+  }
+  sendMessage(txt);
 });
 $('#clearChatBtn').addEventListener('click', () => { chatBox.innerHTML = ''; toast('🧹 نمای گفتگو پاک شد (حافظه دیانا سر جاشه)'); });
 $('#voiceQuickToggle').addEventListener('click', async () => {
@@ -439,6 +465,50 @@ function connectSSE() {
         dianaSay(e.text);
         break;
       }
+      // 🚀 رویدادهای راه‌اندازی کسب‌وکار
+      case 'launch_created':
+        cmdLog(`🚀 کارخانهٔ راه‌اندازی روشن شد: ${e.launch?.fields?.business_name || ''}`);
+        break;
+      case 'launch_stage_started':
+        if (!launchState.current || launchState.current.id !== e.launch_id) break;
+        launchState.current.stages[e.index] = { ...(launchState.current.stages[e.index] || {}), ...e.stage, status: 'running' };
+        renderLaunchStages(launchState.current.stages, launchState.current.results);
+        updateLaunchProgress();
+        cmdLog(`▶️ ${e.agent?.emoji || ''} ${e.agent?.fa || ''} — مرحلهٔ «${e.stage?.step || ''}» شروع شد`);
+        break;
+      case 'launch_stage_done': {
+        if (!launchState.current || launchState.current.id !== e.launch_id) break;
+        launchState.current.stages[e.index] = { ...(launchState.current.stages[e.index] || {}), ...e.stage,
+          status: 'done', score: e.score, verdict: e.verdict, source: e.source, preview: e.preview };
+        launchState.current.results = [...(launchState.current.results || []),
+          { index: e.index, stage: e.stage, agent: e.agent, score: e.score, verdict: e.verdict, source: e.source, artifact: e.artifact, output: e.preview }];
+        renderLaunchStages(launchState.current.stages, launchState.current.results);
+        updateLaunchProgress();
+        cmdLog(`✅ ${e.agent?.emoji || ''} ${e.agent?.fa || ''} — «${e.stage?.step || ''}» تحویل شد (${faNum(e.score)}/۱۰۰)`);
+        break;
+      }
+      case 'launch_ready': {
+        if (!launchState.current || launchState.current.id !== e.launch_id) break;
+        launchState.current.status = 'done';
+        launchState.current.score = e.score;
+        launchState.current.report_file = e.report_file;
+        renderAutomation(e.automation);
+        renderLaunchDocs(launchState.current);
+        renderLaunchStages(launchState.current.stages, launchState.current.results);
+        updateLaunchProgress();
+        renderLaunchHistory();
+        cmdLog(`🎁 بستهٔ کامل راه‌اندازی آماده شد — ${faNum(e.stages)} مرحله، امتیاز ${faNum(e.score)}/۱۰۰`);
+        toast('🎉 بستهٔ کامل راه‌اندازی آماده شد! گزارش و نقشهٔ اتوماسیون در گاوصندوق است');
+        Fish.setMood('celebrate'); setFishMood('🎉 کسب‌وکار راه‌اندازی شد!');
+        if (e.report) addBubble('diana', `🚀 بستهٔ راه‌اندازی «${launchState.current.fields?.business_name || ''}» آماده شد — امتیاز کیفی ${faNum(e.score)}/۱۰۰.`, 'launch',
+          `<details style="margin-top:8px"><summary style="cursor:pointer;color:#fde68a;font-size:12px">📄 مشاهده بستهٔ کامل</summary><div class="markdown" style="margin-top:8px">${md(e.report)}</div></details>`);
+        goPage('launch');
+        break;
+      }
+      case 'launch_failed':
+        if (launchState.current) launchState.current.status = 'failed';
+        toast('❌ راه‌اندازی نیمه‌کاره ماند: ' + e.error);
+        break;
       case 'mission_failed':
         $('#brainOrb').classList.remove('thinking');
         $('#cmdLiveDot').hidden = true; setActiveAgents(0);
@@ -459,6 +529,267 @@ async function startMissionFromCmd() {
   toast('🚀 مأموریت شروع شد! ارکستراتور در حال برنامه‌ریزیه...');
   dianaSay('مأموریت جدید رو از مرکز فرماندهی گرفتم! دارم ارتشم رو به خط می‌کنم 🧠⚡');
 }
+
+
+// ══════════════════════════════════════════════════════════════
+//  🚀 اتاق جنگ راه‌اندازی کسب‌وکار
+// ══════════════════════════════════════════════════════════════
+let launchState = { stages: [], launches: [], current: null, busy: false };
+
+function lfFields() {
+  const val = id => ($(id)?.value || '').trim();
+  return {
+    idea: val('#lfIdea'),
+    business_name: val('#lfName'),
+    city: val('#lfCity'),
+    channel: val('#lfChannel') || 'اینستاگرام و واتساپ',
+    currency: val('#lfCurrency') || 'تومان',
+    ticket: parseFloat(val('#lfTicket')) || 5,
+    customers: parseInt(val('#lfCustomers')) || 20,
+    capacity: parseInt(val('#lfCapacity')) || 30,
+    conversion: parseFloat(val('#lfConv')) || 5,
+    cac: parseFloat(val('#lfCac')) || 0,
+    suppliers: val('#lfSuppliers'),
+    goal: val('#lfGoal'),
+  };
+}
+
+function fillFields(f) {
+  if (!f) return;
+  if (f.idea) $('#lfIdea').value = f.idea;
+  if (f.business_name && f.business_name !== 'کسب‌وکار جدید') $('#lfName').value = f.business_name;
+  if (f.city) $('#lfCity').value = f.city;
+  if (f.channel) $('#lfChannel').value = f.channel;
+  if (f.currency) $('#lfCurrency').value = f.currency;
+  if (f.ticket) $('#lfTicket').value = f.ticket;
+  if (f.customers) $('#lfCustomers').value = f.customers;
+  if (f.capacity) $('#lfCapacity').value = f.capacity;
+  if (f.conversion) $('#lfConv').value = f.conversion;
+  if (f.cac) $('#lfCac').value = f.cac;
+  if (Array.isArray(f.suppliers)) $('#lfSuppliers').value = f.suppliers.join('، ');
+  if (f.goal) $('#lfGoal').value = f.goal;
+}
+
+// محاسبهٔ محلی قیف (همان فرمول سرور) برای بازخورد فوری
+function localNumbers(f) {
+  const ticket = Math.max(0.01, +f.ticket || 5);
+  const customers = Math.max(1, +f.customers || 20);
+  const cap = Math.max(1, +f.capacity || 30);
+  const conv = Math.min(90, Math.max(1, +f.conversion || 5));
+  const cac = Math.max(0, +f.cac || 0);
+  const revenue = ticket * customers;
+  const leads = Math.ceil(customers / (conv / 100));
+  return {
+    ticket, customers, cap, conv, cac, revenue, leads,
+    meetings: Math.max(1, Math.ceil(leads * 0.15)),
+    perDay: Math.ceil(leads / 22),
+    marketing: cac * customers,
+    capPct: (customers / cap) * 100,
+  };
+}
+
+function refreshLaunchMath() {
+  const n = localNumbers(lfFields());
+  const cur = ($('#lfCurrency')?.value || 'تومان').trim() || 'تومان';
+  $('#lmRevenue').textContent = `${faNum(+n.revenue.toFixed(1))} م`;
+  const unit = cur === 'تومان' ? 'میلیون تومان' : cur === 'ریال' ? 'میلیون ریال' : `میلیون ${cur}`;
+  const lbl = $('#lmRevenue')?.parentElement?.querySelector('.lm-label');
+  if (lbl) lbl.textContent = `درآمد ماهانه هدف (${unit})`;
+  $('#lmLeads').textContent = faNum(n.leads);
+  $('#lmMeetings').textContent = faNum(n.meetings);
+  $('#lmPerDay').textContent = faNum(n.perDay);
+  const note = $('#lmNote');
+  let txt, cls = 'ok';
+  if (n.capPct > 100) { cls = 'bad'; txt = `🛑 هدف از ظرفیت بیشتر است (${faNum(Math.round(n.capPct))}٪). قبل از فروش ظرفیت را بالا ببر.`; }
+  else if (n.capPct > 80) { cls = 'warn'; txt = `⚠️ ظرفیت تقریباً پر است (${faNum(Math.round(n.capPct))}٪). یک تأمین‌کنندهٔ پشتیبان لازم داری.`; }
+  else txt = `✅ ظرفیت کافی است (${faNum(Math.round(n.capPct))}٪ اشغال) — با ${faNum(Math.round(n.marketing))} میلیون هزینهٔ جذب، سود خالص ${faNum(Math.round(n.revenue - n.marketing))} میلیون می‌شود.`;
+  note.textContent = txt;
+  note.className = 'lm-note ' + cls;
+}
+
+function renderLaunchStages(stages, results) {
+  const box = $('#ltStages');
+  if (!stages || !stages.length) {
+    box.innerHTML = '<div class="empty-box">فرم بالا را پر کن و «شروع راه‌اندازی» را بزن 🚀</div>';
+    return;
+  }
+  box.innerHTML = stages.map((s, i) => {
+    const st = s.status || 'pending';
+    const res = (results || []).find(r => r.stage && r.stage.id === s.id);
+    const statusTxt = st === 'done'
+      ? `<span class="lt-score">${faNum(s.score ?? res?.score ?? 0)}/۱۰۰</span> ✅ انجام شد`
+      : st === 'running' ? '<span class="spinner"></span> در حال اجرا توسط متخصص…'
+      : '⏸️ در صف اجرا';
+    return `<div class="lt-stage ${st}" data-stage-index="${i}">
+      <div class="lt-icon">${st === 'done' ? '✅' : s.icon}</div>
+      <div class="lt-body">
+        <div class="lt-step">${faNum(i + 1)}. ${esc(s.step)}</div>
+        <div class="lt-deliv">${esc(s.deliverable || '')}</div>
+        <div class="lt-meta"><span>${statusTxt}</span>${s.source === 'cloud' ? '<span>🧠 مغز ابری</span>' : (st === 'done' ? '<span>📚 کتاب راهنما</span>' : '')}</div>
+      </div>
+      ${st === 'done' ? `<button class="lt-open" data-open-stage="${i}">📄 مشاهده</button>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function updateLaunchProgress() {
+  const stages = launchState.current?.stages || [];
+  const done = stages.filter(s => s.status === 'done').length;
+  $('#ltProgress').style.width = stages.length ? Math.round((done / stages.length) * 100) + '%' : '0%';
+  if (launchState.current) {
+    $('#ltTitle').textContent = `🗺️ ${launchState.current.fields?.business_name || 'کسب‌وکار'} — ${faNum(done)} از ${faNum(stages.length)} مرحله`;
+  }
+}
+
+function renderAutomation(specs) {
+  const box = $('#lfAutomation');
+  if (!specs || !specs.length) {
+    box.innerHTML = '<div class="empty-box">پس از راه‌اندازی، زنجیرهٔ خودکار کارها اینجا چیده می‌شود ⚙️</div>';
+    return;
+  }
+  box.innerHTML = specs.map(s => `<div class="auto-row">
+      <div class="ar-id">${esc(s.id)}</div>
+      <div><div class="ar-title">${esc(s.title)}</div>
+      <div class="ar-trigger">${esc(s.trigger)}</div>
+      <div class="ar-action">${esc(s.action)}</div>
+      <div class="ar-sys">🔌 ${(s.systems || []).map(esc).join(' • ')}</div></div>
+    </div>`).join('');
+}
+
+function renderLaunchHistory() {
+  const box = $('#lfHistory');
+  const list = launchState.launches || [];
+  $('#lfHistoryCount').textContent = list.length ? `${faNum(list.length)} کسب‌وکار` : '';
+  if (!list.length) {
+    box.innerHTML = '<div class="empty-box">هنوز کسب‌وکاری راه‌اندازی نکرده‌ای.</div>';
+    return;
+  }
+  box.innerHTML = list.map(l => {
+    const f = l.fields || {};
+    const badge = l.status === 'done' ? `<span class="lh-badge">✅ ${faNum(l.score ?? 0)}/۱۰۰</span>`
+      : l.status === 'running' ? '<span class="lh-badge run">⚡ در حال اجرا</span>'
+      : l.status === 'failed' ? '<span class="lh-badge" style="color:#fda4af">❌ ناموفق</span>' : '';
+    return `<div class="lh-item ${launchState.current?.id === l.id ? 'active' : ''}" data-launch-id="${l.id}">
+      <div class="lh-name">${esc(f.business_name || 'کسب‌وکار')}</div>
+      <div class="lh-meta">${badge}<span>${esc(f.city || '—')}</span><span>${esc(l.ts || '')}</span></div>
+    </div>`;
+  }).join('');
+}
+
+function renderLaunchDocs(rec) {
+  const box = $('#lfDocsGrid');
+  if (!rec || !rec.plan_file) {
+    box.innerHTML = '<div class="empty-box">با شروع راه‌اندازی، پیش‌نویس قرارداد و قالب RFQ اینجا آماده می‌شوند 📄</div>';
+    return;
+  }
+  const docs = [
+    { icon: '🗺️', title: 'برنامهٔ مادر', desc: 'اعداد، ۷ مرحله و تقویم ۹۰ روزه', file: rec.plan_file },
+    { icon: '📜', title: 'پیش‌نویس قرارداد', desc: 'قرارداد ۱۵ بندی با پیش‌پرداخت و جریمه', file: rec.contract_file },
+    { icon: '📨', title: 'قالب RFQ تأمین‌کننده', desc: 'درخواست قیمت آمادهٔ ارسال', file: rec.rfq_file },
+    { icon: '🎁', title: 'بستهٔ کامل', desc: 'گزارش نهایی + ۷ سند مرحله', file: rec.report_file },
+    { icon: '⚙️', title: 'نقشهٔ اتوماسیون', desc: '۱۲ قاعده از سرنخ تا رضایت', file: rec.automation_file },
+  ].filter(d => d.file);
+  box.innerHTML = docs.map(d => `<a class="doc-card" href="/api/files/${encodeURIComponent(d.file)}/download">
+      <span class="doc-icon">${d.icon}</span>
+      <span class="doc-body"><b>${esc(d.title)}</b><small>${esc(d.desc)}</small><code>${esc(d.file)}</code></span>
+      <span class="doc-dl">⬇️</span></a>`).join('');
+}
+
+async function openLaunch(id) {
+  const rec = await api.get('/api/launch/' + id);
+  if (!rec || rec.error) { toast('این کسب‌وکار پیدا نشد'); return; }
+  launchState.current = rec;
+  fillFields(rec.fields);
+  renderLaunchStages(rec.stages, rec.results);
+  renderAutomation(rec.automation);
+  renderLaunchDocs(rec);
+  renderLaunchHistory();
+  updateLaunchProgress();
+  $('#ltProgress').style.width = rec.status === 'done' ? '100%' : $('#ltProgress').style.width;
+}
+
+async function loadLaunchPage() {
+  try {
+    const data = await api.get('/api/launch');
+    launchState.stages = data.stages || [];
+    launchState.launches = data.launches || [];
+    if (!launchState.current) {
+      const latest = launchState.launches[0];
+      if (latest) await openLaunch(latest.id);
+      else renderLaunchStages(launchState.stages);
+    } else {
+      await openLaunch(launchState.current.id);
+    }
+    renderAutomation(launchState.current?.automation);
+    renderLaunchHistory();
+    refreshLaunchMath();
+  } catch (e) { toast('بارگذاری اتاق جنگ ناموفق بود'); }
+}
+
+async function startLaunch() {
+  const f = lfFields();
+  if (!f.idea) { toast('🎯 اول ایده یا کار کسب‌وکارت را بنویس'); $('#lfIdea').focus(); return; }
+  if (launchState.busy) return;
+  launchState.busy = true;
+  $('#lfStartBtn').disabled = true;
+  $('#lfStartBtn').textContent = '⏳ در حال راه‌اندازی…';
+  $('#lfNote').textContent = '۷ متخصص شروع کردند: تحقیق → قیمت → تأمین‌کننده → مشتری → قرارداد → اجرا → برند';
+  try {
+    const r = await api.post('/api/launch', f);
+    if (r.launch) {
+      launchState.current = r.launch;
+      launchState.launches = [r.launch, ...launchState.launches.filter(l => l.id !== r.launch.id)];
+      renderLaunchStages(r.launch.stages, []);
+      renderLaunchDocs(r.launch);
+      renderLaunchHistory();
+      updateLaunchProgress();
+      toast('🚀 راه‌اندازی شروع شد! مراحل را همین‌جا زنده ببین');
+      dianaSay('کارخانهٔ راه‌اندازی روشن شد! تیم ۷ نفره‌ام شروع کردند 🚀');
+    } else {
+      toast('❌ ' + (r.error || 'شروع نشد'));
+    }
+  } catch (e) { toast('❌ ارتباط با سرور قطع شد'); }
+  finally {
+    launchState.busy = false;
+    $('#lfStartBtn').disabled = false;
+    $('#lfStartBtn').textContent = '🚀 شروع راه‌اندازی';
+  }
+}
+
+async function parseLaunchTextNow() {
+  const text = ($('#lfIdea').value || '').trim();
+  if (!text) { toast('✏️ اول متن یا ایده را در کادر اول بنویس'); return; }
+  try {
+    const r = await api.post('/api/launch/parse', { text });
+    fillFields(r.fields);
+    refreshLaunchMath();
+    toast('🧠 فیلدها از متن تو خوانده شد — بازبینی کن');
+  } catch (e) { toast('خواندن متن ناموفق بود'); }
+}
+
+$('#lfStartBtn').addEventListener('click', startLaunch);
+$('#lfParseBtn').addEventListener('click', parseLaunchTextNow);
+['#lfIdea', '#lfTicket', '#lfCustomers', '#lfCapacity', '#lfConv', '#lfCac', '#lfCurrency', '#lfChannel', '#lfCity', '#lfName']
+  .forEach(sel => { const el = $(sel); if (el) el.addEventListener('input', refreshLaunchMath); });
+$('#lfHistory').addEventListener('click', e => {
+  const it = e.target.closest('.lh-item'); if (!it) return;
+  openLaunch(it.dataset.launchId);
+});
+$('#ltStages').addEventListener('click', e => {
+  const btn = e.target.closest('[data-open-stage]'); if (!btn) return;
+  const idx = +btn.dataset.openStage;
+  const res = (launchState.current?.results || []).find(r => r.index === idx) || (launchState.current?.results || [])[idx];
+  const stage = launchState.current?.stages?.[idx];
+  const body = `<div class="stage-doc"><h3>${stage?.icon || ''} ${esc(stage?.step || 'مرحله')}</h3>
+    <div class="sd-meta">${res?.agent ? `متخصص: ${res.agent.emoji} ${esc(res.agent.fa)} • ` : ''}امتیاز ارزیاب: ${faNum(res?.score ?? stage?.score ?? 0)}/۱۰۰</div>
+    <div class="markdown">${md(res?.output || stage?.preview || 'خروجی این مرحله هنوز آماده نیست.')}</div>
+    ${res?.artifact ? `<br><a class="mini-btn" href="/api/files/${encodeURIComponent(res.artifact.name)}/download">⬇️ دانلود سند این مرحله (${esc(res.artifact.name)})</a>` : ''}
+  </div>`;
+  $('#stageModalBody').innerHTML = body;
+  $('#stageModal').hidden = false;
+});
+$('#stageModalClose').addEventListener('click', () => $('#stageModal').hidden = true);
+$('#stageModal').addEventListener('click', e => { if (e.target.id === 'stageModal') e.target.hidden = true; });
 
 // ---------- صفحه ارتش ایجنت‌ها ----------
 let activeDept = 'all', selectedAgent = null;
@@ -628,6 +959,7 @@ async function refreshHomeStats() {
     settings.voice = st.settings.voice; settings.cloud_brain = st.settings.cloud_brain;
     userName = st.user_name || '';
     $('#statMissions').textContent = faNum(st.stats.missions_done || 0);
+    if ($('#statAgents') && st.agents_total) $('#statAgents').textContent = faNum(st.agents_total);
     $('#statFiles').textContent = faNum(filesRes.files.length);
     $('#voiceQuickToggle').textContent = settings.voice ? '🔊' : '🔇';
     updateBrainPill(st.llm_mode, st.internet);
@@ -658,9 +990,9 @@ async function init() {
   const name = userName ? ` ${userName} جان` : '';
   const greeting = hasHistory
     ? `برگشتی${name}! 🐠💙 دلم برات تنگ شده بود! همه‌چیز رو یادم بود و ارتشم آماده‌ست. امروز چه مأموریتی داریم؟`
-    : `سلام${name}! 🐠👑 من **دیانا**م — ماهیِ طلاییِ زنده و مغز ارکستراتور ارتش ۱۲۰ ایجنت متخصصت!\n\nمی‌تونم برات **تحقیق واقعی** کنم، **کد بنویسم و اجراش کنم**، **عکس بسازم**، فایل درست کنم، برنامه‌ریزی کنم و هرچی بگی یادم بمونه 🧠\n\nاولین قدم: بهم بگو اسمت چیه؟ مثلاً بنویس: «اسمم علی هست» — یا مستقیم یه مأموریت از چیپ‌های بالا انتخاب کن! 🚀`;
+    : `سلام${name}! 🐠👑 من **دیانا**م — ماهیِ طلاییِ زنده و مغز ارکستراتور ارتش ۱۴۰ ایجنت متخصصت!\n\nمی‌تونم برات **تحقیق واقعی** کنم، **کد بنویسم و اجراش کنم**، **عکس بسازم**، فایل درست کنم، برنامه‌ریزی کنم و هرچی بگی یادم بمونه 🧠\n\nاولین قدم: بهم بگو اسمت چیه؟ مثلاً بنویس: «اسمم علی هست» — یا مستقیم یه مأموریت از چیپ‌های بالا انتخاب کن! 🚀`;
   addBubble('diana', greeting, 'orchestrator');
-  showSpeechBubble(hasHistory ? `برگشتی${name}! دلم برات تنگ شده بود 🐠💙` : 'سلام! من دیانام، ماهی زنده و مغز ارتش ۱۲۰ ایجنته‌ات! 🐠👑');
+  showSpeechBubble(hasHistory ? `برگشتی${name}! دلم برات تنگ شده بود 🐠💙` : 'سلام! من دیانام، ماهی زنده و مغز ارتش ۱۴۰ ایجنته‌ات! 🐠👑');
   Fish.say();
   // پخش صدا بعد از اولین تعامل کاربر (محدودیت مرورگرها)
   document.addEventListener('pointerdown', () => {
@@ -669,7 +1001,7 @@ async function init() {
       speak(hasHistory ? `برگشتی${name}! دلم برات تنگ شده بود!` : 'سلام فرمانده! من دیانام، ماهی زنده و مغز ارتش صد و بیست ایجنتت! بگو چی بسازیم؟');
     }
   }, { once: true });
-  cmdLog('🐠 دیانا بیدار شد — ارکستراتور و ارتش ۱۲۰ ایجنت در حالت آماده‌باش');
+  cmdLog('🐠 دیانا بیدار شد — ارکستراتور و ارتش ۱۴۰ ایجنت در حالت آماده‌باش');
   // غذا دادن خودکار برای خوش‌آمد (نمایش تعامل)
   setTimeout(() => Fish.feed(), 2500);
 }

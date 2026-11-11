@@ -23,6 +23,7 @@ DEFAULT_MEMORY = {
     "facts": [],
     "conversations": [],
     "missions": [],
+    "launches": [],     # 🚀 کسب‌وکارهای راه‌اندازی‌شده (launch.py)
     "reminders": [],
     "stats": {"missions_done": 0, "messages": 0, "agents_runs": {}},
 }
@@ -152,6 +153,27 @@ class Memory:
             self.save()
 
     # ---------- یادآوری ----------
+    # ---------- 🚀 راه‌اندازی کسب‌وکار ----------
+    def add_launch(self, launch):
+        with self.lock:
+            self.data.setdefault("launches", []).append(launch)
+            self.data["launches"] = self.data["launches"][-40:]
+            self.save()
+
+    def update_launch(self, launch_id, **fields):
+        with self.lock:
+            for it in self.data.setdefault("launches", []):
+                if it["id"] == launch_id:
+                    it.update(fields)
+                    break
+            self.save()
+
+    def get_launch(self, launch_id):
+        for it in self.data.get("launches", []):
+            if it["id"] == launch_id:
+                return it
+        return None
+
     def add_reminder(self, text):
         with self.lock:
             r = {"id": int(time.time() * 1000), "text": text.strip()[:300],
@@ -169,6 +191,10 @@ class Memory:
             "stats": self.data["stats"],
             "missions": list(reversed(self.data["missions"][-30:])),
             "conversations": self.data["conversations"][-60:],
+            "launches": [
+                {k: v for k, v in it.items() if k not in ("results", "plan", "report")}
+                for it in reversed(self.data.get("launches", [])[-20:])
+            ],
         }
 
     def public_settings(self):
