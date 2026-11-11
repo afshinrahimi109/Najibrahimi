@@ -4,6 +4,7 @@
 فقط کتابخانه استاندارد پایتون: بدون pip install، روی هر هاست رایگان، کامپیوتر و ترموکس اجرا می‌شه.
 اجرا:  python3 server.py   →   http://localhost:8000
 """
+import asyncio
 import base64
 import hmac
 import json
@@ -30,7 +31,8 @@ from memory import Memory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 PORT = int(os.environ.get("PORT", "8000"))
-VERSION = "2.1-launch"
+VERSION = "2.2-link"
+WS_PORT = int(os.environ.get("DIANA_WS_PORT", str(PORT + 1)))
 
 # 🔒 وقتی DIANA_TOKEN تنظیم شود (حالت آنلاین/تونل)، تمام درخواست‌ها نیاز به
 # HTTP Basic Auth دارند. بدون آن سرور مثل قبل فقط محلی و بدون رمز است.
@@ -133,6 +135,56 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
         return False
 
+    # ---------- 🔌 WebSocket (همان پورت، پروکسی‌پسند) ----------
+    def _ws_expected_key(self):
+        """تأیید Origin/توکن برای اتصال WebSocket (اگر رمز تنظیم شده باشد)."""
+        if not AUTH_TOKEN:
+            return True
+        token = (self.headers.get("X-Diana-Token") or "").strip()
+        if token and hmac.compare_digest(token, AUTH_TOKEN):
+            return True
+        # مرورگر برای WebSocket نمی‌تواند هدر Basic بفرستد؛ رمز را از query می‌خوانیم
+        qs = urllib.parse.parse_qs(urlparse(self.path).query)
+        qtok = (qs.get("token") or [""])[0]
+        return bool(qtok) and hmac.compare_digest(qtok, AUTH_TOKEN)
+
+    def do_WEBSOCKET(self, ws):
+        """جریان زندهٔ رویدادها روی WebSocket — در پیش‌نمایش/پروکسی همان پورت کار می‌کند."""
+        if not self._ws_expected_key():
+            ws.close(1008, "unauthorized")
+            return
+        qs = urllib.parse.parse_qs(urlparse(self.path).query)
+        try:
+            after = int((qs.get("after") or ["0"])[0] or 0)
+        except Exception:
+            after = 0
+        # رویدادهای عقب‌مانده
+        for i, d in events_since(after, wait=0)[0]:
+            ws.send(json.dumps({"id": i, "data": json.loads(d)}, ensure_ascii=False))
+        import select
+        while True:
+            batch, latest = events_since(after, wait=12)
+            for i, d in batch:
+                after = max(after, i)
+                ws.send(json.dumps({"id": i, "data": json.loads(d)}, ensure_ascii=False))
+            ws.ping(b"diana")
+            # آیا کلاینت بسته است یا پیامی فرستاده؟ (پیام‌ها فقط برای keep-alive/درخواست تازه)
+            try:
+                r, _, _ = select.select([ws.socket], [], [], 0.05)
+                if r:
+                    op, data = ws.recv()
+                    if op in ("close", None):
+                        return
+                    if op == "text" and data:
+                        try:
+                            msg = json.loads(data)
+                        except Exception:
+                            msg = {}
+                        if str(msg.get("type")) == "sync":
+                            after = int(msg.get("after") or after)
+            except Exception:
+                return
+
     # ---------- ابزارها ----------
     def _json(self, obj, status=200):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -174,6 +226,7 @@ class Handler(BaseHTTPRequestHandler):
         raw_path = unquote(urlparse(self.path).path)
         if raw_path in ("/api/ping", "/healthz"):
             return self._json({"ok": True, "diana": True, "version": VERSION,
+                               "ws_port": WS_PORT, "http_port": PORT,
                                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
         if not self._require_auth():
             return
@@ -206,7 +259,8 @@ class Handler(BaseHTTPRequestHandler):
                     "stats": memory.data["stats"],
                     "time": info["time"],
                     "version": VERSION,
-                    "stream": "sse+poll",
+                    "stream": "ws+sse+poll",
+                    "ws_port": WS_PORT,
                     "auth": bool(AUTH_TOKEN),
                     "settings": memory.public_settings(),
                 })
@@ -380,6 +434,56 @@ class DianaServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
+async def _serve_async(server):
+    """سرور HTTP + WebSocket روی یک پورت؛ اگر websockets نصب نباشد، فقط HTTP."""
+    try:
+        import websockets
+        from websockets.asyncio.server import serve as ws_serve
+    except Exception:
+        websockets = None
+    http_srv = await asyncio.to_thread(
+        lambda: server.serve_forever()) if False else None
+    # HTTP را در نخ جدا اجرا می‌کنیم و WebSocket را در حلقهٔ asyncio
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    if websockets is None:
+        print("ℹ️ بستهٔ websockets نصب نیست: جریان زنده از SSE/Polling استفاده می‌کند")
+        print("   (نصب اختیاری: pip install websockets — برای WebSocket روی همان پورت)")
+        while True:
+            await asyncio.sleep(3600)
+        return
+
+    async def stream(ws):
+        """پل: رویدادهای گذرگاه داخلی → WebSocket"""
+        qs = urllib.parse.parse_qs(urlparse(ws.request.path).query)
+        if AUTH_TOKEN:
+            token = (qs.get("token") or [""])[0] or (ws.request.headers.get("X-Diana-Token") or "")
+            if not (token and hmac.compare_digest(token, AUTH_TOKEN)):
+                await ws.close(code=1008, reason="unauthorized")
+                return
+        try:
+            after = int((qs.get("after") or ["0"])[0] or 0)
+        except Exception:
+            after = 0
+        for i, d in events_since(after, wait=0)[0]:
+            await ws.send(json.dumps({"id": i, "data": json.loads(d)}, ensure_ascii=False))
+        while True:
+            batch, latest = await asyncio.to_thread(events_since, after, 10)
+            for i, d in batch:
+                after = max(after, i)
+                await ws.send(json.dumps({"id": i, "data": json.loads(d)}, ensure_ascii=False))
+            if not batch:
+                try:
+                    await asyncio.wait_for(ws.ping(), timeout=5)
+                except Exception:
+                    return
+
+    async with ws_serve(stream, "0.0.0.0", WS_PORT, ping_interval=None, max_size=2 ** 22):
+        print(f"🔌 WebSocket زنده: ws://localhost:{WS_PORT}  (پیش‌نمایش: wss://{WS_PORT}-<sandbox>.e2b.app)")
+        while True:
+            await asyncio.sleep(3600)
+
+
 def main():
     server = DianaServer(("0.0.0.0", PORT), Handler)
     server.daemon_threads = True
@@ -396,7 +500,7 @@ def main():
         print(f"⚠️ رمز خودکار ساخته شد — همین حالا از لاگ کپی کن: {AUTH_TOKEN}")
     print("=" * 58)
     try:
-        server.serve_forever()
+        asyncio.run(_serve_async(server))
     except KeyboardInterrupt:
         print("\n🐠 دیانا رفت بخوابه... خداحافظ فرمانده!")
 

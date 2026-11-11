@@ -394,7 +394,9 @@ function updateProgress() {
 //  هدف: در پروکسی/تونل/iframe/شبکهٔ موبایل هم دیانا زنده بماند.
 // ══════════════════════════════════════════════════════════════
 const Link = {
-  mode: 'idle',            // idle | sse | poll | offline
+  mode: 'idle',            // idle | ws | sse | poll | offline
+  ws: null,
+  wsPort: null,
   es: null,
   lastId: 0,
   retries: 0,
@@ -409,6 +411,7 @@ function linkChip() {
   if (!el) return;
   const map = {
     idle: ['🔗', 'در حال اتصال…', 'idle'],
+    ws: ['🟢', 'اتصال زنده (WebSocket)', 'ok'],
     sse: ['🟢', 'اتصال زنده (SSE)', 'ok'],
     poll: ['🟡', 'اتصال زنده (Polling)', 'warn'],
     offline: ['🔴', 'اتصال قطع — تلاش مجدد…', 'bad'],
@@ -424,6 +427,55 @@ function handleEventData(raw) {
   let e; try { e = JSON.parse(raw); } catch (_) { return; }
   Link.lastEventAt = Date.now();
   if (typeof window.__dianaEventHandler === 'function') window.__dianaEventHandler(e);
+}
+
+/* ---- WebSocket: مقاوم‌ترین مسیر، حتی پشت پروکسی پیش‌نمایش ---- */
+function wsUrl() {
+  const port = Link.wsPort;
+  if (!port) return null;
+  const host = location.hostname;
+  // الگوی پیش‌نمایش Arena: {port}-{sandbox}.e2b.app  →  همان میزبان با پورت WebSocket
+  const m = host.match(/^(\d+)-(.+)$/);
+  if (m) return `wss://${port}-${m[2]}/stream`;
+  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  return `${scheme}://${host}:${port}/stream`;
+}
+
+function connectWS() {
+  if (!('WebSocket' in window)) return false;
+  const base = wsUrl();
+  if (!base) return false;          // پورت WebSocket هنوز از سرور نرسیده
+  let sock;
+  try { sock = new WebSocket(base + '?after=' + (Link.lastId || 0)); } catch (e) { return false; }
+  Link.ws = sock;
+  let opened = false;
+  const openTimer = setTimeout(() => { if (!opened) { try { sock.close(); } catch (_) {} connectSSECompat(); } }, 4000);
+  sock.onopen = () => {
+    opened = true; clearTimeout(openTimer); Link.mode = 'ws'; Link.retries = 0;
+    stopPolling();
+    try { Link.es && Link.es.close(); } catch (_) {}
+    Link.wsTriedAt = 0;
+    linkChip();
+  };
+  sock.onmessage = ev => {
+    if (typeof ev.data !== 'string' || ev.data[0] !== '{') return;
+    let msg; try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    if (msg && msg.id) Link.lastId = Math.max(Link.lastId, msg.id);
+    handleEventData(JSON.stringify(msg && msg.data ? msg.data : msg));
+  };
+  sock.onerror = () => {};
+  sock.onclose = () => {
+    clearTimeout(openTimer);
+    if (Link.mode === 'ws') { Link.mode = 'offline'; linkChip(); }
+    if (Link.ws === sock) Link.ws = null;
+    Link.retries++;
+    setTimeout(() => {
+      if (Link.mode === 'offline') connectSSECompat();
+      else if (Link.mode !== 'ws') connectSSECompat();
+      setTimeout(() => { if (Link.mode === 'poll' || Link.mode === 'offline') connectWS(); }, 45000);
+    }, Math.min(10000, 900 * Link.retries));
+  };
+  return true;
 }
 
 /* ---- long-poll (جایگزین SSE وقتی اتصال push بسته می‌شود) ---- */
@@ -451,8 +503,30 @@ async function startPolling() {
 }
 function stopPolling() { clearTimeout(Link.pollTimer); Link.pollTimer = null; }
 
-/* ---- SSE با fallback خودکار ---- */
+/* ---- زنجیرهٔ اتصال: WebSocket → SSE → Polling ---- */
 function connectLive() {
+  // ۱) WebSocket (بدون محدودیت‌های SSE در پروکسی‌ها)
+  if (Link.wsPort) { if (connectWS()) return; }
+  else {
+    // پورت WebSocket هنوز معلوم نیست؛ پس از ping دوباره تلاش می‌کنیم
+    pingServer().then(() => { if (!connectWS()) connectSSECompat(); });
+    return;
+  }
+  // ۲) اگر WebSocket در دسترس نبود → SSE
+  connectSSECompat();
+}
+
+/* ارتقای خودکار از Polling/SSE به WebSocket (هر ۶۰ ثانیه حداکثر یک تلاش) */
+function upgradeToWS() {
+  if (Link.mode === 'ws') return;
+  const now = Date.now();
+  if (Link.wsTriedAt && now - Link.wsTriedAt < 60000) return;
+  Link.wsTriedAt = now;
+  connectWS();
+}
+
+/* ---- SSE با fallback خودکار ---- */
+function connectSSECompat() {
   if (!('EventSource' in window)) { startPolling(); return; }
   try {
     const url = '/api/events' + (Link.lastId ? `?after=${Link.lastId}` : '');
@@ -473,7 +547,7 @@ function connectLive() {
       const delay = Math.min(12000, 800 * Link.retries);
       setTimeout(() => {
         if (Link.mode === 'offline') startPolling();
-        setTimeout(() => { if (Link.mode === 'poll') connectLive(); }, 45000);
+        setTimeout(() => { if (Link.mode === 'poll') connectWS(); }, 45000);
       }, delay);
     };
   } catch (e) { startPolling(); }
@@ -489,7 +563,9 @@ async function pingServer() {
     const lat = Date.now() - t0;
     if ($('#linkLatency')) $('#linkLatency').textContent = `⚡ ${faNum(lat)}ms`;
     if (j.version && $('#linkVersion')) $('#linkVersion').textContent = `v${j.version}`;
+    if (j.ws_port && !Link.wsPort) Link.wsPort = parseInt(j.ws_port, 10) || null;
     if (Link.mode === 'idle' || (Link.mode === 'offline' && !Link.pollTimer && !Link.es)) connectLive();
+    else if (Link.mode === 'poll' || Link.mode === 'sse') upgradeToWS();
     return true;
   } catch (e) {
     Link.mode = 'offline'; linkChip();
@@ -499,14 +575,19 @@ async function pingServer() {
 
 function startHeartbeat() {
   clearInterval(Link.heartbeatTimer);
-  pingServer();                                   // همین حالا، تا تأخیر از ابتدا دیده شود
   Link.heartbeatTimer = setInterval(pingServer, 30000);
-  setTimeout(() => { if (Link.mode === 'idle') startPolling(); }, 4000);
+  // اول یک ping بزن تا پورت WebSocket معلوم شود، بعد زنجیرهٔ اتصال را شروع کن
+  setTimeout(async () => {
+    await pingServer();
+    if (Link.mode === 'idle' || Link.mode === 'offline') connectLive();
+  }, 120);
+  setTimeout(() => { if (Link.mode === 'idle') startPolling(); }, 6000);
 }
 
 window.__dianaLink = Link;
 window.__dianaReconnect = () => {
   try { Link.es && Link.es.close(); } catch (_) {}
+  try { Link.ws && Link.ws.close(); } catch (_) {}
   stopPolling(); Link.retries = 0; Link.mode = 'idle'; linkChip(); connectLive();
   toast('🔗 اتصال را دوباره چک می‌کنم…');
   fetch('/api/ping', { cache: 'no-store' }).then(r => r.json()).then(() => refreshHomeStats()).catch(() => {});
@@ -1136,6 +1217,7 @@ async function runConnectionTest() {
     const ms = Date.now() - t0;
     connRow('server', '🟢', 'سرور دیانا', `متصل • ${faNum(ms)}ms • v${j.version || '—'}`, 'ok');
     if ($('#linkVersion')) $('#linkVersion').textContent = 'v' + (j.version || '—');
+    if (j.ws_port) Link.wsPort = parseInt(j.ws_port, 10) || Link.wsPort;
     if ($('#linkLatency')) $('#linkLatency').textContent = `⚡ ${faNum(ms)}ms`;
   } catch (e) {
     connRow('server', '🔴', 'سرور دیانا', 'قطع — سرور اجرا نشده یا آدرس عوض شده', 'bad');
@@ -1155,7 +1237,8 @@ async function runConnectionTest() {
   } catch (e) { connRow('status', '🔴', 'وضعیت و مغز', 'خطا در خواندن /api/status', 'bad'); }
   // ۳) جریان زنده
   try {
-    if (Link.mode === 'sse') connRow('stream', '🟢', 'جریان زندهٔ رویدادها', 'SSE متصل (push)', 'ok');
+    if (Link.mode === 'ws') connRow('stream', '🟢', 'جریان زندهٔ رویدادها', `WebSocket متصل (push) • پورت ${Link.wsPort || '—'}`, 'ok');
+    else if (Link.mode === 'sse') connRow('stream', '🟢', 'جریان زندهٔ رویدادها', 'SSE متصل (push)', 'ok');
     else if (Link.mode === 'poll') connRow('stream', '🟡', 'جریان زندهٔ رویدادها', 'Polling فعال (SSE بسته بود)', 'warn');
     else {
       const r = await fetch(`/api/events/poll?after=${Link.lastId}&wait=1`, { cache: 'no-store' });
@@ -1174,7 +1257,7 @@ async function runConnectionTest() {
   const secs = ((Date.now() - started) / 1000).toFixed(1);
   if ($('#connNote')) $('#connNote').textContent =
     `آخرین تست: ${new Date().toLocaleTimeString('fa-IR')} (${faNum(secs)} ثانیه) — ` +
-    `حالت اتصال زنده: ${Link.mode === 'sse' ? 'SSE 🟢' : Link.mode === 'poll' ? 'Polling 🟡' : 'بدون اتصال 🔴'}. ` +
+    `حالت اتصال زنده: ${Link.mode === 'ws' ? 'WebSocket 🟢' : Link.mode === 'sse' ? 'SSE 🟢' : Link.mode === 'poll' ? 'Polling 🟡' : 'بدون اتصال 🔴'}. ` +
     'اگر «سرور» قرمز است، سرور دیانا را اجرا کن (python3 server.py) و آدرس پیش‌نمایش را باز کن.';
 }
 
