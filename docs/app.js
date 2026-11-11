@@ -122,10 +122,11 @@ function dianaSay(text, { speakIt = true } = {}) {
 function goPage(name) {
   $$('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.page === name));
   $$('.page').forEach(p => p.classList.toggle('active', p.id === 'page-' + name));
+  if (name === 'launch') loadLaunchPage();
   if (name === 'agents') loadAgentsPage();
   if (name === 'missions') loadMissionsPage();
   if (name === 'vault') loadVaultPage();
-  if (name === 'settings') loadSettingsPage();
+  if (name === 'settings') { loadSettingsPage(); runConnectionTest(); }
   if (name === 'home') refreshHomeStats();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -138,6 +139,7 @@ const chatBox = $('#chatMessages');
 function scrollChat() { chatBox.scrollTop = chatBox.scrollHeight; }
 function srcBadge(source) {
   const map = {
+    launch: '🚀 کارخانهٔ راه‌اندازی',
     local: '🧠 مغز داخلی', orchestrator: '⚡ ارکستراتور',
     pollinations: '☁️ مغز ابری رایگان', 'pollinations-get': '☁️ مغز ابری رایگان',
     'pollinations-browser': '☁️ مغز ابری رایگان', groq: '☁️ Groq', gemini: '☁️ Gemini', openrouter: '☁️ OpenRouter',
@@ -161,7 +163,7 @@ function addTyping() {
 }
 function removeTyping() { $('#typingMsg')?.remove(); }
 
-const DIANA_SYSTEM_BROWSER = `تو «دیانا» هستی؛ یک ماهی طلایی زنده، باهوش، مهربان و پرانرژی که مغز یک سیستم چندعامله با ۱۲۰ ایجنت متخصص هستی و در آکواریوم سه‌بعدی زندگی می‌کنی. صمیمی و کمک‌کننده‌ای، گاهی ایموجی 🐠💙🫧 به‌کار می‌بری ولی کم. همیشه به زبان کاربر جواب بده (فارسی نوشت، فارسی). پاسخ مفید، دقیق، گرم و نه‌چندان طولانی بده.`;
+const DIANA_SYSTEM_BROWSER = `تو «دیانا» هستی؛ یک ماهی طلایی زنده، باهوش، مهربان و پرانرژی که مغز یک سیستم چندعامله با ۱۴۰ ایجنت متخصص هستی و در آکواریوم سه‌بعدی زندگی می‌کنی. صمیمی و کمک‌کننده‌ای، گاهی ایموجی 🐠💙🫧 به‌کار می‌بری ولی کم. همیشه به زبان کاربر جواب بده (فارسی نوشت، فارسی). پاسخ مفید، دقیق، گرم و نه‌چندان طولانی بده.`;
 
 async function pollinationsChat(msgs, timeoutMs = 45000) {
   // مغز ابری رایگان از سمت مرورگر — Pollinations بدون کلید و ثبت‌نام
@@ -242,7 +244,22 @@ async function sendMessage(rawText) {
   try {
     const res = await api.post('/api/message', { text });
     removeTyping();
-    if (res.kind === 'mission') {
+    if (res.kind === 'launch') {
+      addBubble('diana', res.reply, 'launch',
+        `<br><button class="go-cmd" onclick="goPage('launch')">🚀 مشاهدهٔ اتاق جنگ راه‌اندازی</button>`);
+      chatHistory.push({ role: 'assistant', content: res.reply });
+      dianaSay('کارخانهٔ راه‌اندازی روشن شد فرمانده! تیم هفت نفره‌ام شروع کردند.');
+      if (res.launch) {
+        launchState.current = res.launch;
+        launchState.launches = [res.launch, ...launchState.launches.filter(l => l.id !== res.launch.id)];
+        if (!launchState.current.stages?.length) launchState.current.stages = [];
+        renderLaunchStages(launchState.current.stages, []);
+        renderLaunchHistory();
+        updateLaunchProgress();
+        fillFields(res.launch.fields);
+        refreshLaunchMath();
+      }
+    } else if (res.kind === 'mission') {
       currentMissionId = res.mission_id;
       addBubble('diana', res.reply, 'orchestrator',
         `<br><button class="go-cmd" onclick="goPage('command')">🧠 مشاهده زنده در مرکز فرماندهی</button>`);
@@ -297,7 +314,16 @@ $('#quickChips').addEventListener('click', e => {
     toast('✏️ اسمت رو جای سه‌نقطه بنویس و ارسال کن تا دیانا یاد بگیره!');
     return;
   }
-  sendMessage(c.textContent.replace(/\s*[🔬💻🎨🧮✈️📚]\s*$/u, '').trim());
+  const txt = c.textContent.replace(/\s*[🔬💻🎨🧮✈️📚🚀]\s*$/u, '').trim();
+  // چیپ راه‌اندازی: فرم اتاق جنگ را با متن آماده باز می‌کند
+  if (c.textContent.includes('شرکت راه‌اندازی کن')) {
+    goPage('launch');
+    if (!$('#lfIdea').value) $('#lfIdea').value = txt;
+    parseLaunchTextNow();
+    toast('🚀 فرم راه‌اندازی آماده شد — ایده را دقیق کن و «شروع راه‌اندازی» را بزن');
+    return;
+  }
+  sendMessage(txt);
 });
 $('#clearChatBtn').addEventListener('click', () => { chatBox.innerHTML = ''; toast('🧹 نمای گفتگو پاک شد (حافظه دیانا سر جاشه)'); });
 $('#voiceQuickToggle').addEventListener('click', async () => {
@@ -362,10 +388,240 @@ function updateProgress() {
   $('#cmdProgress').style.width = Math.round((currentMission.done / currentMission.total) * 100) + '%';
 }
 
+
+// ══════════════════════════════════════════════════════════════
+//  🔗 لایهٔ اتصال مقاوم: SSE → long-poll → تلاش مجدد
+//  هدف: در پروکسی/تونل/iframe/شبکهٔ موبایل هم دیانا زنده بماند.
+// ══════════════════════════════════════════════════════════════
+const Link = {
+  mode: 'idle',            // idle | ws | sse | poll | offline
+  ws: null,
+  wsTry: 0,
+  wsPort: null,
+  es: null,
+  lastId: 0,
+  retries: 0,
+  pollTimer: null,
+  heartbeatTimer: null,
+  lastEventAt: 0,
+  handler: null,
+};
+
+function linkChip() {
+  const el = $('#linkChip');
+  if (!el) return;
+  const map = {
+    idle: ['🔗', 'در حال اتصال…', 'idle'],
+    ws: ['🟢', 'اتصال زنده (WebSocket)', 'ok'],
+    sse: ['🟢', 'اتصال زنده (SSE)', 'ok'],
+    poll: ['🟡', 'اتصال زنده (Polling)', 'warn'],
+    offline: ['🔴', 'اتصال قطع — تلاش مجدد…', 'bad'],
+    local: ['🟢', 'نسخهٔ بدون سرور (مرورگر)', 'ok'],
+  };
+  const [icon, label, cls] = map[Link.mode] || map.idle;
+  el.textContent = `${icon} ${label}`;
+  el.className = 'link-chip ' + cls;
+  el.title = `آخرین رویداد: ${Link.lastEventAt ? new Date(Link.lastEventAt).toLocaleTimeString('fa-IR') : '—'}` +
+    ` | تلاش‌ها: ${faNum(Link.retries)} | حالت: ${Link.mode}`;
+}
+
+function handleEventData(raw) {
+  let e; try { e = JSON.parse(raw); } catch (_) { return; }
+  Link.lastEventAt = Date.now();
+  if (typeof window.__dianaEventHandler === 'function') window.__dianaEventHandler(e);
+}
+
+/* ---- WebSocket: مقاوم‌ترین مسیر، حتی پشت پروکسی پیش‌نمایش ---- */
+/* دو مسیر امتحان می‌شود:
+   ۱) همان میزبان/همان پورت:  /stream   (پروکسی پیش‌نمایش Arena همین را می‌فرستد)
+   ۲) پورت دوم سرور:          wss://{ws_port}-{sandbox}.e2b.app/stream */
+function wsCandidates() {
+  const out = [];
+  const qs = (location.search || '');
+  const token = (new URLSearchParams(qs).get('token') || '').trim();
+  const q = '?after=' + (Link.lastId || 0) + (token ? '&token=' + encodeURIComponent(token) : '');
+  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  // ۱) همان مبدأ (بهترین حالت: داخل پروکسی پیش‌نمایش)
+  out.push(`${scheme}://${location.host}/stream${q}`);
+  // ۲) پورت اختصاصی WebSocket
+  if (Link.wsPort) {
+    const host = location.hostname;
+    const m = host.match(/^(\d+)-(.+)$/);
+    if (m) out.push(`wss://${Link.wsPort}-${m[2]}/stream${q}`);
+    else out.push(`${scheme}://${host}:${Link.wsPort}/stream${q}`);
+  }
+  return [...new Set(out)];
+}
+
+function connectWS() {
+  if (!('WebSocket' in window)) return false;
+  const list = wsCandidates();
+  if (!list.length) return false;      // پورت WebSocket هنوز از سرور نرسیده
+  const idx = Math.min(Link.wsTry || 0, list.length - 1);
+  const base = list[idx];
+  let sock;
+  try { sock = new WebSocket(base); } catch (e) { return false; }
+  Link.ws = sock;
+  let opened = false;
+  const openTimer = setTimeout(() => {
+    if (opened) return;
+    try { sock.close(); } catch (_) {}
+    if (idx + 1 < list.length) { Link.wsTry = idx + 1; if (connectWS()) return; }
+    Link.wsTry = 0;
+    connectSSECompat();
+  }, 4000);
+  sock.onopen = () => {
+    opened = true; clearTimeout(openTimer); Link.mode = 'ws'; Link.retries = 0; Link.wsTry = 0;
+    stopPolling();
+    try { Link.es && Link.es.close(); } catch (_) {}
+    Link.wsTriedAt = 0;
+    linkChip();
+  };
+  sock.onmessage = ev => {
+    if (typeof ev.data !== 'string' || ev.data[0] !== '{') return;
+    let msg; try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    if (msg && msg.id) Link.lastId = Math.max(Link.lastId, msg.id);
+    handleEventData(JSON.stringify(msg && msg.data ? msg.data : msg));
+  };
+  sock.onerror = () => {};
+  sock.onclose = () => {
+    clearTimeout(openTimer);
+    if (Link.mode === 'ws') { Link.mode = 'offline'; linkChip(); }
+    if (Link.ws === sock) Link.ws = null;
+    Link.retries++;
+    setTimeout(() => {
+      if (Link.mode === 'ws') return;
+      const list = wsCandidates();
+      if (!opened && (Link.wsTry || 0) + 1 < list.length) { Link.wsTry = (Link.wsTry || 0) + 1; connectWS(); return; }
+      connectSSECompat();
+      setTimeout(() => { if (Link.mode === 'poll' || Link.mode === 'offline') connectWS(); }, 45000);
+    }, Math.min(10000, 900 * Link.retries));
+  };
+  return true;
+}
+
+/* ---- long-poll (جایگزین SSE وقتی اتصال push بسته می‌شود) ---- */
+async function startPolling() {
+  stopPolling();
+  Link.mode = 'poll'; linkChip();
+  const loop = async () => {
+    if (Link.mode !== 'poll') return;
+    try {
+      const r = await fetch(`/api/events/poll?after=${Link.lastId}&wait=18`, { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      (j.events || []).forEach(ev => { Link.lastId = Math.max(Link.lastId, ev.id || 0); handleEventData(JSON.stringify(ev.data)); });
+      if (j.last) Link.lastId = Math.max(Link.lastId, j.last);
+      Link.retries = 0;
+      Link.pollTimer = setTimeout(loop, 120);
+    } catch (e) {
+      Link.retries++;
+      Link.mode = 'offline'; linkChip();
+      Link.pollTimer = setTimeout(() => { Link.mode = 'poll'; linkChip(); loop(); },
+        Math.min(15000, 1200 * Link.retries));
+    }
+  };
+  loop();
+}
+function stopPolling() { clearTimeout(Link.pollTimer); Link.pollTimer = null; }
+
+/* ---- زنجیرهٔ اتصال: WebSocket → SSE → Polling ---- */
+function connectLive() {
+  if (Link.mode === 'local') return;          // نسخهٔ بدون سرور: کانال شبکه لازم نیست
+  if (Link._connecting) return;              // جلوگیری از حلقهٔ بازگشتی
+  // ۱) WebSocket (بدون محدودیت‌های SSE در پروکسی‌ها)
+  if (Link.wsPort) { if (!connectWS()) connectSSECompat(); return; }  // ۲) وگرنه SSE
+  // پورت WebSocket معلوم نیست: یک‌بار ping می‌زنیم و بعد تصمیم می‌گیریم
+  Link._connecting = true;
+  pingServer().then(() => {
+    Link._connecting = false;
+    if (Link.wsPort && connectWS()) return;
+    connectSSECompat();
+  });
+}
+
+/* ارتقای خودکار از Polling/SSE به WebSocket (هر ۶۰ ثانیه حداکثر یک تلاش) */
+function upgradeToWS() {
+  if (Link.mode === 'ws') return;
+  const now = Date.now();
+  if (Link.wsTriedAt && now - Link.wsTriedAt < 60000) return;
+  Link.wsTriedAt = now;
+  connectWS();
+}
+
+/* ---- SSE با fallback خودکار ---- */
+function connectSSECompat() {
+  if (!('EventSource' in window)) { startPolling(); return; }
+  try {
+    const url = '/api/events' + (Link.lastId ? `?after=${Link.lastId}` : '');
+    const es = new EventSource(url);
+    Link.es = es;
+    let opened = false;
+    const openTimer = setTimeout(() => {
+      if (!opened) { try { es.close(); } catch (_) {} startPolling(); }   // پروکسی اجازهٔ push نداد
+    }, 6000);
+    es.onopen = () => { opened = true; clearTimeout(openTimer); Link.mode = 'sse'; Link.retries = 0; linkChip(); };
+    es.onmessage = ev => { if (ev.data && ev.data.startsWith && ev.data.startsWith('{')) handleEventData(ev.data); };
+    es.onerror = () => {
+      clearTimeout(openTimer);
+      try { es.close(); } catch (_) {}
+      Link.retries++;
+      Link.mode = 'offline'; linkChip();
+      // ۱) پول‌بک را امتحان کن ۲) بعد از مدتی دوباره SSE
+      const delay = Math.min(12000, 800 * Link.retries);
+      setTimeout(() => {
+        if (Link.mode === 'offline') startPolling();
+        setTimeout(() => { if (Link.mode === 'poll') connectWS(); }, 45000);
+      }, delay);
+    };
+  } catch (e) { startPolling(); }
+}
+
+/* ---- تپش اتصال: سلامت سرور، تأخیر و نسخه را زنده نشان می‌دهد ---- */
+async function pingServer() {
+  try {
+    const t0 = Date.now();
+    const r = await fetch('/api/ping', { cache: 'no-store', signal: AbortSignal.timeout(7000) });
+    if (!r.ok) throw new Error('bad');
+    const j = await r.json();
+    const lat = Date.now() - t0;
+    if ($('#linkLatency')) $('#linkLatency').textContent = `⚡ ${faNum(lat)}ms`;
+    if (j.version && $('#linkVersion')) $('#linkVersion').textContent = `v${j.version}`;
+    // نسخهٔ کاملاً آفلاین (docs/): مغز و رویدادها همه در همین مرورگر اجرا می‌شوند
+    if (String(j.version || '').startsWith('web')) { Link.mode = 'local'; linkChip(); return true; }
+    if (j.ws_port && !Link.wsPort) Link.wsPort = parseInt(j.ws_port, 10) || null;
+    if (Link.mode === 'offline' && !Link.pollTimer && !Link.es && !Link._connecting) connectLive();
+    else if (Link.wsPort && (Link.mode === 'poll' || Link.mode === 'sse')) upgradeToWS();
+    return true;
+  } catch (e) {
+    Link.mode = 'offline'; linkChip();
+    return false;
+  }
+}
+
+function startHeartbeat() {
+  clearInterval(Link.heartbeatTimer);
+  Link.heartbeatTimer = setInterval(pingServer, 30000);
+  // اول یک ping بزن تا پورت WebSocket معلوم شود، بعد زنجیرهٔ اتصال را شروع کن
+  setTimeout(async () => {
+    await pingServer();
+    if ((Link.mode === 'idle' || Link.mode === 'offline') && Link.mode !== 'local') connectLive();
+  }, 120);
+  setTimeout(() => { if (Link.mode === 'idle' && Link.mode !== 'local') { Link.mode = 'offline'; linkChip(); startPolling(); } }, 6000);
+}
+
+window.__dianaLink = Link;
+window.__dianaReconnect = () => {
+  try { Link.es && Link.es.close(); } catch (_) {}
+  try { Link.ws && Link.ws.close(); } catch (_) {}
+  stopPolling(); Link.retries = 0; Link.mode = 'idle'; linkChip(); connectLive();
+  toast('🔗 اتصال را دوباره چک می‌کنم…');
+  fetch('/api/ping', { cache: 'no-store' }).then(r => r.json()).then(() => refreshHomeStats()).catch(() => {});
+};
+
 function connectSSE() {
-  const es = new EventSource('/api/events');
-  es.onmessage = ev => {
-    let e; try { e = JSON.parse(ev.data); } catch (_) { return; }
+  // پیام‌های SSE و Polling از یک مسیر می‌آیند تا رفتار یکسان باشد
+  window.__dianaEventHandler = async e => {
     switch (e.type) {
       case 'mission_created':
         currentMissionId = e.mission.id;
@@ -439,6 +695,50 @@ function connectSSE() {
         dianaSay(e.text);
         break;
       }
+      // 🚀 رویدادهای راه‌اندازی کسب‌وکار
+      case 'launch_created':
+        cmdLog(`🚀 کارخانهٔ راه‌اندازی روشن شد: ${e.launch?.fields?.business_name || ''}`);
+        break;
+      case 'launch_stage_started':
+        if (!await syncLaunchFromEvent(e)) break;
+        launchState.current.stages[e.index] = { ...(launchState.current.stages[e.index] || {}), ...e.stage, status: 'running' };
+        renderLaunchStages(launchState.current.stages, launchState.current.results);
+        updateLaunchProgress();
+        cmdLog(`▶️ ${e.agent?.emoji || ''} ${e.agent?.fa || ''} — مرحلهٔ «${e.stage?.step || ''}» شروع شد`);
+        break;
+      case 'launch_stage_done': {
+        if (!await syncLaunchFromEvent(e)) break;
+        launchState.current.stages[e.index] = { ...(launchState.current.stages[e.index] || {}), ...e.stage,
+          status: 'done', score: e.score, verdict: e.verdict, source: e.source, preview: e.preview };
+        launchState.current.results = [...(launchState.current.results || []),
+          { index: e.index, stage: e.stage, agent: e.agent, score: e.score, verdict: e.verdict, source: e.source, artifact: e.artifact, output: e.preview }];
+        renderLaunchStages(launchState.current.stages, launchState.current.results);
+        updateLaunchProgress();
+        cmdLog(`✅ ${e.agent?.emoji || ''} ${e.agent?.fa || ''} — «${e.stage?.step || ''}» تحویل شد (${faNum(e.score)}/۱۰۰)`);
+        break;
+      }
+      case 'launch_ready': {
+        if (!await syncLaunchFromEvent(e)) break;
+        launchState.current.status = 'done';
+        launchState.current.score = e.score;
+        launchState.current.report_file = e.report_file;
+        renderAutomation(e.automation);
+        renderLaunchDocs(launchState.current);
+        renderLaunchStages(launchState.current.stages, launchState.current.results);
+        updateLaunchProgress();
+        renderLaunchHistory();
+        cmdLog(`🎁 بستهٔ کامل راه‌اندازی آماده شد — ${faNum(e.stages)} مرحله، امتیاز ${faNum(e.score)}/۱۰۰`);
+        toast('🎉 بستهٔ کامل راه‌اندازی آماده شد! گزارش و نقشهٔ اتوماسیون در گاوصندوق است');
+        Fish.setMood('celebrate'); setFishMood('🎉 کسب‌وکار راه‌اندازی شد!');
+        if (e.report) addBubble('diana', `🚀 بستهٔ راه‌اندازی «${launchState.current.fields?.business_name || ''}» آماده شد — امتیاز کیفی ${faNum(e.score)}/۱۰۰.`, 'launch',
+          `<details style="margin-top:8px"><summary style="cursor:pointer;color:#fde68a;font-size:12px">📄 مشاهده بستهٔ کامل</summary><div class="markdown" style="margin-top:8px">${md(e.report)}</div></details>`);
+        goPage('launch');
+        break;
+      }
+      case 'launch_failed':
+        if (launchState.current) launchState.current.status = 'failed';
+        toast('❌ راه‌اندازی نیمه‌کاره ماند: ' + e.error);
+        break;
       case 'mission_failed':
         $('#brainOrb').classList.remove('thinking');
         $('#cmdLiveDot').hidden = true; setActiveAgents(0);
@@ -447,7 +747,8 @@ function connectSSE() {
         break;
     }
   };
-  es.onerror = () => { /* EventSource خودش وصل می‌شه */ };
+  connectLive();
+  startHeartbeat();
 }
 $('#cmdStartBtn').addEventListener('click', startMissionFromCmd);
 $('#cmdGoalInput').addEventListener('keydown', e => { if (e.key === 'Enter') startMissionFromCmd(); });
@@ -459,6 +760,287 @@ async function startMissionFromCmd() {
   toast('🚀 مأموریت شروع شد! ارکستراتور در حال برنامه‌ریزیه...');
   dianaSay('مأموریت جدید رو از مرکز فرماندهی گرفتم! دارم ارتشم رو به خط می‌کنم 🧠⚡');
 }
+
+
+// ══════════════════════════════════════════════════════════════
+//  🚀 اتاق جنگ راه‌اندازی کسب‌وکار
+// ══════════════════════════════════════════════════════════════
+let launchState = { stages: [], launches: [], current: null, busy: false };
+
+function lfFields() {
+  const val = id => ($(id)?.value || '').trim();
+  return {
+    idea: val('#lfIdea'),
+    business_name: val('#lfName'),
+    city: val('#lfCity'),
+    channel: val('#lfChannel') || 'اینستاگرام و واتساپ',
+    currency: val('#lfCurrency') || 'تومان',
+    ticket: parseFloat(val('#lfTicket')) || 5,
+    customers: parseInt(val('#lfCustomers')) || 20,
+    capacity: parseInt(val('#lfCapacity')) || 30,
+    conversion: parseFloat(val('#lfConv')) || 5,
+    cac: parseFloat(val('#lfCac')) || 0,
+    suppliers: val('#lfSuppliers'),
+    goal: val('#lfGoal'),
+  };
+}
+
+function fillFields(f) {
+  if (!f) return;
+  if (f.idea) $('#lfIdea').value = f.idea;
+  if (f.business_name && f.business_name !== 'کسب‌وکار جدید') $('#lfName').value = f.business_name;
+  if (f.city) $('#lfCity').value = f.city;
+  if (f.channel) $('#lfChannel').value = f.channel;
+  if (f.currency) $('#lfCurrency').value = f.currency;
+  if (f.ticket) $('#lfTicket').value = f.ticket;
+  if (f.customers) $('#lfCustomers').value = f.customers;
+  if (f.capacity) $('#lfCapacity').value = f.capacity;
+  if (f.conversion) $('#lfConv').value = f.conversion;
+  if (f.cac) $('#lfCac').value = f.cac;
+  if (Array.isArray(f.suppliers)) $('#lfSuppliers').value = f.suppliers.join('، ');
+  if (f.goal) $('#lfGoal').value = f.goal;
+}
+
+// محاسبهٔ محلی قیف (همان فرمول سرور) برای بازخورد فوری
+function localNumbers(f) {
+  const ticket = Math.max(0.01, +f.ticket || 5);
+  const customers = Math.max(1, +f.customers || 20);
+  const cap = Math.max(1, +f.capacity || 30);
+  const conv = Math.min(90, Math.max(1, +f.conversion || 5));
+  const cac = Math.max(0, +f.cac || 0);
+  const revenue = ticket * customers;
+  const leads = Math.ceil(customers / (conv / 100));
+  return {
+    ticket, customers, cap, conv, cac, revenue, leads,
+    meetings: Math.max(1, Math.ceil(leads * 0.15)),
+    perDay: Math.ceil(leads / 22),
+    marketing: cac * customers,
+    capPct: (customers / cap) * 100,
+  };
+}
+
+function refreshLaunchMath() {
+  const n = localNumbers(lfFields());
+  const cur = ($('#lfCurrency')?.value || 'تومان').trim() || 'تومان';
+  $('#lmRevenue').textContent = `${faNum(+n.revenue.toFixed(1))} م`;
+  const unit = cur === 'تومان' ? 'میلیون تومان' : cur === 'ریال' ? 'میلیون ریال' : `میلیون ${cur}`;
+  const lbl = $('#lmRevenue')?.parentElement?.querySelector('.lm-label');
+  if (lbl) lbl.textContent = `درآمد ماهانه هدف (${unit})`;
+  $('#lmLeads').textContent = faNum(n.leads);
+  $('#lmMeetings').textContent = faNum(n.meetings);
+  $('#lmPerDay').textContent = faNum(n.perDay);
+  const note = $('#lmNote');
+  let txt, cls = 'ok';
+  if (n.capPct > 100) { cls = 'bad'; txt = `🛑 هدف از ظرفیت بیشتر است (${faNum(Math.round(n.capPct))}٪). قبل از فروش ظرفیت را بالا ببر.`; }
+  else if (n.capPct > 80) { cls = 'warn'; txt = `⚠️ ظرفیت تقریباً پر است (${faNum(Math.round(n.capPct))}٪). یک تأمین‌کنندهٔ پشتیبان لازم داری.`; }
+  else txt = `✅ ظرفیت کافی است (${faNum(Math.round(n.capPct))}٪ اشغال) — با ${faNum(Math.round(n.marketing))} میلیون هزینهٔ جذب، سود خالص ${faNum(Math.round(n.revenue - n.marketing))} میلیون می‌شود.`;
+  note.textContent = txt;
+  note.className = 'lm-note ' + cls;
+}
+
+function renderLaunchStages(stages, results) {
+  const box = $('#ltStages');
+  if (!stages || !stages.length) {
+    box.innerHTML = '<div class="empty-box">فرم بالا را پر کن و «شروع راه‌اندازی» را بزن 🚀</div>';
+    return;
+  }
+  box.innerHTML = stages.map((s, i) => {
+    const st = s.status || 'pending';
+    const res = (results || []).find(r => r.stage && r.stage.id === s.id);
+    const statusTxt = st === 'done'
+      ? `<span class="lt-score">${faNum(s.score ?? res?.score ?? 0)}/۱۰۰</span> ✅ انجام شد`
+      : st === 'running' ? '<span class="spinner"></span> در حال اجرا توسط متخصص…'
+      : '⏸️ در صف اجرا';
+    return `<div class="lt-stage ${st}" data-stage-index="${i}">
+      <div class="lt-icon">${st === 'done' ? '✅' : s.icon}</div>
+      <div class="lt-body">
+        <div class="lt-step">${faNum(i + 1)}. ${esc(s.step)}</div>
+        <div class="lt-deliv">${esc(s.deliverable || '')}</div>
+        <div class="lt-meta"><span>${statusTxt}</span>${s.source === 'cloud' ? '<span>🧠 مغز ابری</span>' : (st === 'done' ? '<span>📚 کتاب راهنما</span>' : '')}</div>
+      </div>
+      ${st === 'done' ? `<button class="lt-open" data-open-stage="${i}">📄 مشاهده</button>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function updateLaunchProgress() {
+  const stages = launchState.current?.stages || [];
+  const done = stages.filter(s => s.status === 'done').length;
+  $('#ltProgress').style.width = stages.length ? Math.round((done / stages.length) * 100) + '%' : '0%';
+  if (launchState.current) {
+    $('#ltTitle').textContent = `🗺️ ${launchState.current.fields?.business_name || 'کسب‌وکار'} — ${faNum(done)} از ${faNum(stages.length)} مرحله`;
+  }
+}
+
+function renderAutomation(specs) {
+  const box = $('#lfAutomation');
+  if (!specs || !specs.length) {
+    box.innerHTML = '<div class="empty-box">پس از راه‌اندازی، زنجیرهٔ خودکار کارها اینجا چیده می‌شود ⚙️</div>';
+    return;
+  }
+  box.innerHTML = specs.map(s => `<div class="auto-row">
+      <div class="ar-id">${esc(s.id)}</div>
+      <div><div class="ar-title">${esc(s.title)}</div>
+      <div class="ar-trigger">${esc(s.trigger)}</div>
+      <div class="ar-action">${esc(s.action)}</div>
+      <div class="ar-sys">🔌 ${(s.systems || []).map(esc).join(' • ')}</div></div>
+    </div>`).join('');
+}
+
+function renderLaunchHistory() {
+  const box = $('#lfHistory');
+  const list = launchState.launches || [];
+  $('#lfHistoryCount').textContent = list.length ? `${faNum(list.length)} کسب‌وکار` : '';
+  if (!list.length) {
+    box.innerHTML = '<div class="empty-box">هنوز کسب‌وکاری راه‌اندازی نکرده‌ای.</div>';
+    return;
+  }
+  box.innerHTML = list.map(l => {
+    const f = l.fields || {};
+    const badge = l.status === 'done' ? `<span class="lh-badge">✅ ${faNum(l.score ?? 0)}/۱۰۰</span>`
+      : l.status === 'running' ? '<span class="lh-badge run">⚡ در حال اجرا</span>'
+      : l.status === 'failed' ? '<span class="lh-badge" style="color:#fda4af">❌ ناموفق</span>' : '';
+    return `<div class="lh-item ${launchState.current?.id === l.id ? 'active' : ''}" data-launch-id="${l.id}">
+      <div class="lh-name">${esc(f.business_name || 'کسب‌وکار')}</div>
+      <div class="lh-meta">${badge}<span>${esc(f.city || '—')}</span><span>${esc(l.ts || '')}</span></div>
+    </div>`;
+  }).join('');
+}
+
+function renderLaunchDocs(rec) {
+  const box = $('#lfDocsGrid');
+  if (!rec || !rec.plan_file) {
+    box.innerHTML = '<div class="empty-box">با شروع راه‌اندازی، پیش‌نویس قرارداد و قالب RFQ اینجا آماده می‌شوند 📄</div>';
+    return;
+  }
+  const docs = [
+    { icon: '🗺️', title: 'برنامهٔ مادر', desc: 'اعداد، ۷ مرحله و تقویم ۹۰ روزه', file: rec.plan_file },
+    { icon: '📜', title: 'پیش‌نویس قرارداد', desc: 'قرارداد ۱۵ بندی با پیش‌پرداخت و جریمه', file: rec.contract_file },
+    { icon: '📨', title: 'قالب RFQ تأمین‌کننده', desc: 'درخواست قیمت آمادهٔ ارسال', file: rec.rfq_file },
+    { icon: '🎁', title: 'بستهٔ کامل', desc: 'گزارش نهایی + ۷ سند مرحله', file: rec.report_file },
+    { icon: '⚙️', title: 'نقشهٔ اتوماسیون', desc: '۱۲ قاعده از سرنخ تا رضایت', file: rec.automation_file },
+  ].filter(d => d.file);
+  box.innerHTML = docs.map(d => `<a class="doc-card" href="/api/files/${encodeURIComponent(d.file)}/download">
+      <span class="doc-icon">${d.icon}</span>
+      <span class="doc-body"><b>${esc(d.title)}</b><small>${esc(d.desc)}</small><code>${esc(d.file)}</code></span>
+      <span class="doc-dl">⬇️</span></a>`).join('');
+}
+
+async function syncLaunchFromEvent(e) {
+  // اگر کاربر روی صفحهٔ دیگری است یا هنوز چیزی باز نکرده، رویداد خودش کسب‌وکار را باز می‌کند
+  if (launchState.current && launchState.current.id === e.launch_id) return true;
+  if (launchState._syncing === e.launch_id) return false;
+  launchState._syncing = e.launch_id;
+  try {
+    const rec = await api.get('/api/launch/' + e.launch_id);
+    if (!rec || rec.error) return false;
+    launchState.current = rec;
+    fillFields(rec.fields);
+    renderLaunchStages(rec.stages, rec.results);
+    renderAutomation(rec.automation);
+    renderLaunchDocs(rec);
+    renderLaunchHistory();
+    updateLaunchProgress();
+    refreshLaunchMath();
+    return true;
+  } catch (_) { return false; }
+}
+
+async function openLaunch(id) {
+  const rec = await api.get('/api/launch/' + id);
+  if (!rec || rec.error) { toast('این کسب‌وکار پیدا نشد'); return; }
+  launchState.current = rec;
+  fillFields(rec.fields);
+  renderLaunchStages(rec.stages, rec.results);
+  renderAutomation(rec.automation);
+  renderLaunchDocs(rec);
+  renderLaunchHistory();
+  updateLaunchProgress();
+  $('#ltProgress').style.width = rec.status === 'done' ? '100%' : $('#ltProgress').style.width;
+}
+
+async function loadLaunchPage() {
+  try {
+    const data = await api.get('/api/launch');
+    launchState.stages = data.stages || [];
+    launchState.launches = data.launches || [];
+    if (!launchState.current) {
+      const latest = launchState.launches[0];
+      if (latest) await openLaunch(latest.id);
+      else renderLaunchStages(launchState.stages);
+    } else {
+      await openLaunch(launchState.current.id);
+    }
+    renderAutomation(launchState.current?.automation);
+    renderLaunchHistory();
+    refreshLaunchMath();
+  } catch (e) { toast('بارگذاری اتاق جنگ ناموفق بود'); }
+}
+
+async function startLaunch() {
+  const f = lfFields();
+  if (!f.idea) { toast('🎯 اول ایده یا کار کسب‌وکارت را بنویس'); $('#lfIdea').focus(); return; }
+  if (launchState.busy) return;
+  launchState.busy = true;
+  $('#lfStartBtn').disabled = true;
+  $('#lfStartBtn').textContent = '⏳ در حال راه‌اندازی…';
+  $('#lfNote').textContent = '۷ متخصص شروع کردند: تحقیق → قیمت → تأمین‌کننده → مشتری → قرارداد → اجرا → برند';
+  try {
+    const r = await api.post('/api/launch', f);
+    if (r.launch) {
+      launchState.current = r.launch;
+      launchState.launches = [r.launch, ...launchState.launches.filter(l => l.id !== r.launch.id)];
+      renderLaunchStages(r.launch.stages, []);
+      renderLaunchDocs(r.launch);
+      renderLaunchHistory();
+      updateLaunchProgress();
+      toast('🚀 راه‌اندازی شروع شد! مراحل را همین‌جا زنده ببین');
+      dianaSay('کارخانهٔ راه‌اندازی روشن شد! تیم ۷ نفره‌ام شروع کردند 🚀');
+    } else {
+      toast('❌ ' + (r.error || 'شروع نشد'));
+    }
+  } catch (e) { toast('❌ ارتباط با سرور قطع شد'); }
+  finally {
+    launchState.busy = false;
+    $('#lfStartBtn').disabled = false;
+    $('#lfStartBtn').textContent = '🚀 شروع راه‌اندازی';
+  }
+}
+
+async function parseLaunchTextNow() {
+  const text = ($('#lfIdea').value || '').trim();
+  if (!text) { toast('✏️ اول متن یا ایده را در کادر اول بنویس'); return; }
+  try {
+    const r = await api.post('/api/launch/parse', { text });
+    fillFields(r.fields);
+    refreshLaunchMath();
+    toast('🧠 فیلدها از متن تو خوانده شد — بازبینی کن');
+  } catch (e) { toast('خواندن متن ناموفق بود'); }
+}
+
+$('#lfStartBtn').addEventListener('click', startLaunch);
+$('#lfParseBtn').addEventListener('click', parseLaunchTextNow);
+['#lfIdea', '#lfTicket', '#lfCustomers', '#lfCapacity', '#lfConv', '#lfCac', '#lfCurrency', '#lfChannel', '#lfCity', '#lfName']
+  .forEach(sel => { const el = $(sel); if (el) el.addEventListener('input', refreshLaunchMath); });
+$('#lfHistory').addEventListener('click', e => {
+  const it = e.target.closest('.lh-item'); if (!it) return;
+  openLaunch(it.dataset.launchId);
+});
+$('#ltStages').addEventListener('click', e => {
+  const btn = e.target.closest('[data-open-stage]'); if (!btn) return;
+  const idx = +btn.dataset.openStage;
+  const res = (launchState.current?.results || []).find(r => r.index === idx) || (launchState.current?.results || [])[idx];
+  const stage = launchState.current?.stages?.[idx];
+  const body = `<div class="stage-doc"><h3>${stage?.icon || ''} ${esc(stage?.step || 'مرحله')}</h3>
+    <div class="sd-meta">${res?.agent ? `متخصص: ${res.agent.emoji} ${esc(res.agent.fa)} • ` : ''}امتیاز ارزیاب: ${faNum(res?.score ?? stage?.score ?? 0)}/۱۰۰</div>
+    <div class="markdown">${md(res?.output || stage?.preview || 'خروجی این مرحله هنوز آماده نیست.')}</div>
+    ${res?.artifact ? `<br><a class="mini-btn" href="/api/files/${encodeURIComponent(res.artifact.name)}/download">⬇️ دانلود سند این مرحله (${esc(res.artifact.name)})</a>` : ''}
+  </div>`;
+  $('#stageModalBody').innerHTML = body;
+  $('#stageModal').hidden = false;
+});
+$('#stageModalClose').addEventListener('click', () => $('#stageModal').hidden = true);
+$('#stageModal').addEventListener('click', e => { if (e.target.id === 'stageModal') e.target.hidden = true; });
 
 // ---------- صفحه ارتش ایجنت‌ها ----------
 let activeDept = 'all', selectedAgent = null;
@@ -601,6 +1183,13 @@ async function loadSettingsPage() {
 }
 $('#setVoice').addEventListener('click', e => { settings.voice = !settings.voice; setToggle(e.target, settings.voice); });
 $('#setCloud').addEventListener('click', e => { settings.cloud_brain = !settings.cloud_brain; setToggle(e.target, settings.cloud_brain); });
+document.addEventListener('click', e => { if (e.target.closest('#connRetestBtn')) { toast('🔗 در حال تست اتصال…'); runConnectionTest(); } });
+document.addEventListener('click', async e => {
+  if (!e.target.closest('#copyLinkBtn')) return;
+  const url = $('#currentLink')?.value || '';
+  try { await navigator.clipboard.writeText(url); toast('📋 لینک کپی شد: ' + url); }
+  catch (_) { $('#currentLink')?.select(); toast('📋 با Ctrl+C کپی کن'); }
+});
 $('#saveSettingsBtn').addEventListener('click', async () => {
   const body = {
     user_name: $('#setName').value.trim(), voice: settings.voice, cloud_brain: settings.cloud_brain,
@@ -618,7 +1207,97 @@ function updateBrainPill(mode, internet) {
   if ((mode || '').startsWith('local') && settings.cloud_brain) label = 'مغز داخلی + ☁️ ابری رایگان مرورگر';
   else if (!(mode || '').startsWith('local')) label = '☁️ مغز ابری: ' + mode;
   $('#brainModeText').textContent = `🧠 ${label}`;
+  linkChip();
   $('#statusPill').title = `اینترنت سرور: ${internet ? 'متصل ✅' : 'قطع 📴 (مرورگر تو مغز ابری رو تأمین می‌کنه)'} | حالت مغز سرور: ${mode}`;
+}
+
+
+// ══════════════════════════════════════════════════════════════
+//  🔗 عیب‌یاب اتصال (صفحهٔ تنظیمات)
+// ══════════════════════════════════════════════════════════════
+function connRow(key, icon, name, val, state) {
+  const row = document.querySelector(`.conn-row[data-check="${key}"]`);
+  if (!row) return;
+  row.className = 'conn-row ' + state;
+  row.querySelector('.c-ic').textContent = icon;
+  row.querySelector('.c-name').textContent = name;
+  row.querySelector('.c-val').textContent = val;
+}
+
+function fillOfflineLink() {
+  const el = $('#offlineLink');
+  if (!el) return;
+  // نسخهٔ آفلاین (بدون سرور) روی همان دامنه با مسیر /docs
+  const base = location.origin.replace(/\.e2b\.app$/, '.e2b.app');
+  const url = base.startsWith('http') ? base + '/docs' : (location.href.split('#')[0] + 'docs');
+  el.value = url;
+  const open = $('#openOfflineBtn'); if (open) open.href = url;
+  const copy = $('#copyOfflineBtn');
+  if (copy) copy.onclick = () => { navigator.clipboard?.writeText(url); toast('لینک نسخهٔ بدون سرور کپی شد ✅'); };
+}
+
+function fillCurrentLink() {
+  const url = location.origin + location.pathname;
+  const inp = $('#currentLink');
+  if (inp) inp.value = url;
+  const open = $('#openLinkBtn');
+  if (open) open.href = url;
+}
+
+async function runConnectionTest() {
+  const started = Date.now();
+  fillCurrentLink();
+  fillOfflineLink();
+  // ۱) سرور
+  try {
+    const t0 = Date.now();
+    const r = await fetch('/api/ping', { cache: 'no-store' });
+    const j = await r.json();
+    const ms = Date.now() - t0;
+    connRow('server', '🟢', 'سرور دیانا', `متصل • ${faNum(ms)}ms • v${j.version || '—'}`, 'ok');
+    if ($('#linkVersion')) $('#linkVersion').textContent = 'v' + (j.version || '—');
+    if (j.ws_port) Link.wsPort = parseInt(j.ws_port, 10) || Link.wsPort;
+    if ($('#linkLatency')) $('#linkLatency').textContent = `⚡ ${faNum(ms)}ms`;
+  } catch (e) {
+    connRow('server', '🔴', 'سرور دیانا', 'قطع — سرور اجرا نشده یا آدرس عوض شده', 'bad');
+  }
+  // ۲) وضعیت و مغز
+  try {
+    const st = await api.get('/api/status');
+    if (st && st.online) {
+      const local = String(st.llm_mode || '').startsWith('local');
+      connRow('status', '🟢', 'وضعیت و مغز',
+        `${faNum(st.agents_total)} ایجنت • ${faNum(st.departments || 0)} دپارتمان • مغز: ${st.llm_mode}`, 'ok');
+      connRow('cloud', local ? '🟡' : '🟢', 'مغز ابری رایگان',
+        local ? 'سرور آفلاین است؛ مغز ابری از مرورگر تو تأمین می‌شود' : `فعال: ${st.llm_mode}`, local ? 'warn' : 'ok');
+    } else {
+      connRow('status', '🔴', 'وضعیت و مغز', 'پاسخ نامعتبر از سرور', 'bad');
+    }
+  } catch (e) { connRow('status', '🔴', 'وضعیت و مغز', 'خطا در خواندن /api/status', 'bad'); }
+  // ۳) جریان زنده
+  try {
+    if (Link.mode === 'ws') connRow('stream', '🟢', 'جریان زندهٔ رویدادها', `WebSocket متصل (push) • پورت ${Link.wsPort || '—'}`, 'ok');
+    else if (Link.mode === 'sse') connRow('stream', '🟢', 'جریان زندهٔ رویدادها', 'SSE متصل (push)', 'ok');
+    else if (Link.mode === 'poll') connRow('stream', '🟡', 'جریان زندهٔ رویدادها', 'Polling فعال (SSE بسته بود)', 'warn');
+    else {
+      const r = await fetch(`/api/events/poll?after=${Link.lastId}&wait=1`, { cache: 'no-store' });
+      const j = await r.json();
+      connRow('stream', '🟡', 'جریان زندهٔ رویدادها',
+        j && typeof j.last === 'number' ? `سرور پاسخ داد (${faNum((j.events || []).length)} رویداد) — در حال اتصال` : 'پاسخ نامعتبر', 'warn');
+      connectLive();
+    }
+  } catch (e) { connRow('stream', '🔴', 'جریان زندهٔ رویدادها', 'نه SSE و نه Polling پاسخ نداد', 'bad'); }
+  // ۴) گاوصندوق و حافظه
+  try {
+    const [files, mem] = await Promise.all([api.get('/api/files'), api.get('/api/memory')]);
+    connRow('vault', '🟢', 'گاوصندوق و حافظه',
+      `${faNum((files.files || []).length)} فایل • ${faNum((mem.facts || []).length)} خاطره • ${faNum((mem.launches || []).length)} کسب‌وکار`, 'ok');
+  } catch (e) { connRow('vault', '🔴', 'گاوصندوق و حافظه', 'خطا در خواندن فایل‌ها/حافظه', 'bad'); }
+  const secs = ((Date.now() - started) / 1000).toFixed(1);
+  if ($('#connNote')) $('#connNote').textContent =
+    `آخرین تست: ${new Date().toLocaleTimeString('fa-IR')} (${faNum(secs)} ثانیه) — ` +
+    `حالت اتصال زنده: ${Link.mode === 'ws' ? 'WebSocket 🟢' : Link.mode === 'sse' ? 'SSE 🟢' : Link.mode === 'poll' ? 'Polling 🟡' : 'بدون اتصال 🔴'}. ` +
+    'اگر «سرور» قرمز است، سرور دیانا را اجرا کن (python3 server.py) و آدرس پیش‌نمایش را باز کن.';
 }
 
 // ---------- آمار خانه و راه‌اندازی ----------
@@ -628,6 +1307,7 @@ async function refreshHomeStats() {
     settings.voice = st.settings.voice; settings.cloud_brain = st.settings.cloud_brain;
     userName = st.user_name || '';
     $('#statMissions').textContent = faNum(st.stats.missions_done || 0);
+    if ($('#statAgents') && st.agents_total) $('#statAgents').textContent = faNum(st.agents_total);
     $('#statFiles').textContent = faNum(filesRes.files.length);
     $('#voiceQuickToggle').textContent = settings.voice ? '🔊' : '🔇';
     updateBrainPill(st.llm_mode, st.internet);
@@ -658,9 +1338,9 @@ async function init() {
   const name = userName ? ` ${userName} جان` : '';
   const greeting = hasHistory
     ? `برگشتی${name}! 🐠💙 دلم برات تنگ شده بود! همه‌چیز رو یادم بود و ارتشم آماده‌ست. امروز چه مأموریتی داریم؟`
-    : `سلام${name}! 🐠👑 من **دیانا**م — ماهیِ طلاییِ زنده و مغز ارکستراتور ارتش ۱۲۰ ایجنت متخصصت!\n\nمی‌تونم برات **تحقیق واقعی** کنم، **کد بنویسم و اجراش کنم**، **عکس بسازم**، فایل درست کنم، برنامه‌ریزی کنم و هرچی بگی یادم بمونه 🧠\n\nاولین قدم: بهم بگو اسمت چیه؟ مثلاً بنویس: «اسمم علی هست» — یا مستقیم یه مأموریت از چیپ‌های بالا انتخاب کن! 🚀`;
+    : `سلام${name}! 🐠👑 من **دیانا**م — ماهیِ طلاییِ زنده و مغز ارکستراتور ارتش ۱۴۰ ایجنت متخصصت!\n\nمی‌تونم برات **تحقیق واقعی** کنم، **کد بنویسم و اجراش کنم**، **عکس بسازم**، فایل درست کنم، برنامه‌ریزی کنم و هرچی بگی یادم بمونه 🧠\n\nاولین قدم: بهم بگو اسمت چیه؟ مثلاً بنویس: «اسمم علی هست» — یا مستقیم یه مأموریت از چیپ‌های بالا انتخاب کن! 🚀`;
   addBubble('diana', greeting, 'orchestrator');
-  showSpeechBubble(hasHistory ? `برگشتی${name}! دلم برات تنگ شده بود 🐠💙` : 'سلام! من دیانام، ماهی زنده و مغز ارتش ۱۲۰ ایجنته‌ات! 🐠👑');
+  showSpeechBubble(hasHistory ? `برگشتی${name}! دلم برات تنگ شده بود 🐠💙` : 'سلام! من دیانام، ماهی زنده و مغز ارتش ۱۴۰ ایجنته‌ات! 🐠👑');
   Fish.say();
   // پخش صدا بعد از اولین تعامل کاربر (محدودیت مرورگرها)
   document.addEventListener('pointerdown', () => {
@@ -669,7 +1349,7 @@ async function init() {
       speak(hasHistory ? `برگشتی${name}! دلم برات تنگ شده بود!` : 'سلام فرمانده! من دیانام، ماهی زنده و مغز ارتش صد و بیست ایجنتت! بگو چی بسازیم؟');
     }
   }, { once: true });
-  cmdLog('🐠 دیانا بیدار شد — ارکستراتور و ارتش ۱۲۰ ایجنت در حالت آماده‌باش');
+  cmdLog('🐠 دیانا بیدار شد — ارکستراتور و ارتش ۱۴۰ ایجنت در حالت آماده‌باش');
   // غذا دادن خودکار برای خوش‌آمد (نمایش تعامل)
   setTimeout(() => Fish.feed(), 2500);
 }

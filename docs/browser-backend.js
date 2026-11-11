@@ -12,10 +12,15 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { _memStore[k] = v; } },
 };
 let MEM = store.get('diana_web_memory', null);
-if (!MEM) MEM = { profile: { user_name: '', born: new Date().toISOString() }, facts: [], conversations: [], missions: [], reminders: [], stats: { missions_done: 0, messages: 0, agents_runs: {} } };
+if (!MEM) MEM = { profile: { user_name: '', born: new Date().toISOString() }, facts: [], conversations: [], missions: [], launches: [], reminders: [], stats: { missions_done: 0, messages: 0, agents_runs: {} } };
+if (!Array.isArray(MEM.launches)) MEM.launches = [];
 let SETTINGS = store.get('diana_web_settings', { voice: true, cloud_brain: true, groq_key: '', gemini_key: '', openrouter_key: '' });
 let FILES = store.get('diana_web_files', {});
 const saveMem = () => store.set('diana_web_memory', MEM);
+// 🌐 پل ارتباط با موتور راه‌اندازی کسب‌وکار در نسخهٔ وب (launch-web.js)
+window.DIANA_MEM = MEM;
+window.DianaSaveMem = saveMem;
+window.vaultWrite = (name, content) => vaultWrite(name, content);
 const saveSettings = () => store.set('diana_web_settings', SETTINGS);
 const saveFiles = () => store.set('diana_web_files', FILES);
 
@@ -37,6 +42,19 @@ function isEnglish(t) { const L = (String(t).match(/[A-Za-z]/g) || []).length, A
 
 /* ============ تشخیص نیت (مغز آفلاین فارسی) ============ */
 const TASK_VERBS = ['بساز','درست کن','بنویس','جستجو کن','سرچ کن','بگرد','تحقیق کن','محاسبه کن','حساب کن','کد بنویس','برنامه بنویس','ترجمه کن','خلاصه کن','عکس بساز','نقاشی','تصویر بساز','فایل بساز','ذخیره کن','برنامه ریزی کن','برنامه بچین','تحلیل کن','گزارش','اجرا کن','انجام بده','لیست کن','پیدا کن','بررسی کن','آموزش بده','یاد بده','طراحی کن','حل کن','make','create','write','search','research','calculate','code','translate','summarize','generate','build','draw','analyze'];
+const LAUNCH_SIGNALS = ['شرکت راه اندازی', 'شرکت راه‌اندازی', 'کسب و کار راه اندازی', 'کسب‌وکار راه‌اندازی',
+  'راه اندازی کسب', 'راه‌اندازی کسب', 'کسب و کار بساز', 'کسب‌وکار بساز', 'شرکت بساز', 'استارتاپ راه اندازی',
+  'استارتاپ بساز', 'بیزینس راه اندازی', 'بیزینس بساز', 'کارخانه راه اندازی', 'مغازه راه اندازی', 'فروشگاه راه اندازی'];
+const LAUNCH_TOKENS = ['فروشنده', 'تأمین کننده', 'تامین کننده', 'تأمین‌کننده', 'مشتری پیدا', 'پیدا کردن مشتری',
+  'قرارداد ببند', 'قرارداد بسته', 'همه کار رو خودش', 'خودش انجام بده', 'پشت صحنه'];
+function isLaunchRequest(t) {
+  if (LAUNCH_SIGNALS.some(sig => t.includes(sig))) return true;
+  const biz = ['شرکت', 'کسب و کار', 'کسب‌وکار', 'بیزینس', 'استارتاپ', 'استارت آپ'].some(w => t.includes(w));
+  const start = ['راه انداز', 'راه‌انداز', 'بساز', 'شروع کن', 'بخوام داشته باشم'].some(w => t.includes(w));
+  const chain = LAUNCH_TOKENS.filter(tok => t.includes(tok)).length >= 2;
+  return !!(biz && (start || chain) && chain);
+}
+
 function classify(text) {
   const raw = (text || '').trim(), t = norm(raw), en = isEnglish(raw);
   let m = raw.match(/(?:اسمم|نامم|اسم من)\s+([^\s،.؟!]{2,20})/);
@@ -49,6 +67,8 @@ function classify(text) {
   }
   if (['یادته','یادت هست','چی ازم میدونی','از من چی یادته','what do you remember'].some(p => t.includes(p))) return { kind: 'recall', en };
   if (['یادم بنداز','یاداوری کن','یادآوری کن','remind me'].some(p => t.includes(p))) return { kind: 'reminder', en };
+  // 🚀 درخواست راه‌اندازی کسب‌وکار (هم‌ارز local_brain._is_launch_request)
+  if (isLaunchRequest(t)) return { kind: 'launch', en, text: raw };
   const short = raw.length <= 32;
   if (short && ['سلام','درود','هی','hi','hello','hey','salam'].some(g => t === g || t.startsWith(g + ' '))) return { kind: 'greeting', en };
   if (raw.length <= 42 && ['خداحافظ','بای','فعلا','bye','goodbye'].some(f => t.includes(f))) return { kind: 'farewell', en };
@@ -464,7 +484,15 @@ function heuristicProgram(ins) {
 const ES_SET = new Set();
 class FakeEventSource { constructor() { this.onmessage = null; this.onerror = null; ES_SET.add(this); } close() { ES_SET.delete(this); } }
 window.EventSource = FakeEventSource;
-function emit(e) { const d = JSON.stringify(e); ES_SET.forEach(es => { try { es.onmessage && es.onmessage({ data: d }); } catch (_) {} }); }
+function emit(e) {
+  const d = JSON.stringify(e);
+  ES_SET.forEach(es => { try { es.onmessage && es.onmessage({ data: d }); } catch (_) {} });
+  // پل مستقیم به بدنهٔ رابط کاربری (نسخهٔ بدون سرور، EventSource فِیک را دور می‌زند)
+  setTimeout(() => {
+    try { if (typeof window.__dianaEventHandler === 'function') window.__dianaEventHandler(JSON.parse(d)); } catch (_) {}
+  }, 0);
+}
+window.DianaEmit = emit;   // پل رویدادهای زنده برای launch-web.js
 
 /* ============ ارکستراتور 🧠 ============ */
 const pubAgent = a => ({ id: a.id, fa: a.fa, en: a.en, emoji: a.emoji, dept: a.dept, dept_fa: a.dept_fa, dept_emoji: a.dept_emoji, color: a.color, executor: a.executor, desc: a.desc });
@@ -643,6 +671,24 @@ async function handleMessage(text) {
     } else reply = 'هنوز چیزی ازت به خاطرم نسپردی فرمانده 🐠💭\nمثلاً بگو: «اسمم علی است» یا «یادت باشه که روز تولدم ۵ فروردین است» تا برای همیشه یادم بمونه!';
     logChat('diana', reply, 'local'); return { kind, reply, source: 'local' };
   }
+  if (kind === 'launch' && window.DianaLaunch) {
+    const fields = window.DianaLaunch.parseLaunchText(text);
+    const rec = window.DianaLaunch.prepare(fields);
+    const faN = window.DianaLaunch.fa;
+    const n = window.DianaLaunch.numbers(fields);
+    const reply = `عجب فرمانی فرمانده! 🚀🐠 **کارخانهٔ راه‌اندازی کسب‌وکار** را روشن کردم:\n\n` +
+      `🏷️ **کسب‌وکار:** «${fields.business_name}» | 📍 ${fields.city || 'شهر خودت'}\n` +
+      `💰 **هدف ماهانه:** ${faN(fields.customers)} قرارداد × ${window.DianaLaunch.money(n.ticket, n.cur)}\n\n` +
+      `۷ متخصص به‌ترتیب کار می‌کنند:\n۱️⃣ 🔍 تحقیق بازار  ۲️⃣ 🎁 پیشنهاد و قیمت  ۳️⃣ 🏭 تأمین‌کننده  ` +
+      `۴️⃣ 🎯 پیدا کردن مشتری  ۵️⃣ 🤝 قرارداد  ۶️⃣ ⚙️ اجرای پشت صحنه  ۷️⃣ 📣 برند\n\n` +
+      `همراهش ۱۲ قاعدهٔ اتوماسیون (سرنخ → RFQ → پیشنهاد → قرارداد → فاکتور → اجرا → رضایت) هم ساخته می‌شود. ` +
+      `گزارش در «🚀 اتاق جنگ کسب‌وکار» و فایل‌ها در گاوصندوق!`;
+    logChat('diana', reply, 'launch');
+    // اجرای پس‌زمینه
+    window.DianaLaunch.runLaunch(fields, 'auto', rec.id).catch(e => console.warn('launch failed', e));
+    if (window.DianaEmit) window.DianaEmit({ type: 'diana_say', launch_id: rec.id, text: reply, report: window.DianaLaunch.planMarkdown(fields) });
+    return { kind: 'launch', reply, launch_id: rec.id, launch: window.DianaLaunch.publicRec(rec), source: 'launch' };
+  }
   if (kind === 'task') {
     const mid = startMission(text);
     const reply = 'چشم فرمانده! 🐠🧠 مأموریت رو گرفتم و دارم تجزیه‌اش می‌کنم...\n\nمتخصص‌های مناسب رو موازی به کار می‌اندازم، ارزیاب کیفیت روشون نظارت می‌کنه و خودم نتیجه نهایی رو ترکیب می‌کنم. تو صفحه **«مرکز فرماندهی»** می‌تونی زنده ببینی مغزم چطور کار می‌کنه! ⚡';
@@ -670,13 +716,14 @@ function publicSettings() {
 }
 function publicState() {
   return { profile: MEM.profile, facts: MEM.facts.slice(-100), reminders: MEM.reminders.filter(r => !r.done).slice(-50),
-           stats: MEM.stats, missions: [...MEM.missions].slice(-30).reverse(), conversations: MEM.conversations.slice(-60) };
+           stats: MEM.stats, missions: [...MEM.missions].slice(-30).reverse(), conversations: MEM.conversations.slice(-60),
+           launches: (MEM.launches || []).slice(-20).reverse().map(l => { const { results, plan, report, ...rest } = l; return rest; }) };
 }
 const jsonResp = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } });
 async function handleApi(path, method, body) {
   if (method === 'GET') {
     if (path === '/api/agents') return jsonResp(window.AGENTS_DATA);
-    if (path === '/api/status') return jsonResp({ online: true, internet: typeof navigator !== 'undefined' ? navigator.onLine : true, llm_mode: llmMode(), agents_total: AGENTS.length, departments: DEPARTMENTS.length, user_name: MEM.profile.user_name, stats: MEM.stats, time: stamp(), settings: publicSettings() });
+    if (path === '/api/status') return jsonResp({ online: true, internet: typeof navigator !== 'undefined' ? navigator.onLine : true, llm_mode: llmMode(), agents_total: AGENTS.length, departments: DEPARTMENTS.length, launches_total: (MEM.launches || []).length, user_name: MEM.profile.user_name, stats: MEM.stats, time: stamp(), settings: publicSettings() });
     if (path === '/api/memory') return jsonResp(publicState());
     if (path === '/api/files') return jsonResp({ files: Object.entries(FILES).map(([name, f]) => ({ name, size: new TextEncoder().encode(f.content).length, modified: f.modified })).sort((a, b) => a.name.localeCompare(b.name)) });
     if (path === '/api/settings') return jsonResp(publicSettings());

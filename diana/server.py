@@ -4,28 +4,46 @@
 فقط کتابخانه استاندارد پایتون: بدون pip install، روی هر هاست رایگان، کامپیوتر و ترموکس اجرا می‌شه.
 اجرا:  python3 server.py   →   http://localhost:8000
 """
+import asyncio
 import base64
+import hashlib
 import hmac
 import json
 import mimetypes
 import os
 import queue
 import secrets
+import socket
 import sys
 import threading
+import time
+import urllib.parse
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, unquote
+
+try:  # پشتیبانی WebSocket روی همان پورت HTTP (بدون کتابخانهٔ بیرونی)
+    from websockets.frames import Frame as _WSFrame, Opcode as _WSOpcode
+    from websockets.exceptions import ConnectionClosed as _WSClosed
+except Exception:  # pragma: no cover
+    _WSFrame = None
+    _WSOpcode = None
+    _WSClosed = Exception
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import agents as agent_registry
+import launch as launch_engine
 import tools
 from brain import Orchestrator
 from memory import Memory
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+DOCS_DIR = os.path.join(os.path.dirname(BASE_DIR), "docs")   # نسخهٔ آفلاین (اختیاری)
 PORT = int(os.environ.get("PORT", "8000"))
+VERSION = "2.3-singleport"
+WS_PORT = int(os.environ.get("DIANA_WS_PORT", str(PORT + 1)))
 
 # 🔒 وقتی DIANA_TOKEN تنظیم شود (حالت آنلاین/تونل)، تمام درخواست‌ها نیاز به
 # HTTP Basic Auth دارند. بدون آن سرور مثل قبل فقط محلی و بدون رمز است.
@@ -41,12 +59,26 @@ if not AUTH_TOKEN and PUBLIC_HOST:
 
 memory = Memory()
 
-# ---------- گذرگاه رویدادهای زنده (SSE) ----------
+# ---------- گذرگاه رویدادهای زنده (SSE + long-poll) ----------
+# دو مسیر داریم تا اتصال در هر محیطی (پروکسی، iframe، تونل، شبکهٔ موبایل) کار کند:
+#   ۱) SSE  →  GET /api/events           (رویدادها push می‌شوند)
+#   ۲) Poll →  GET /api/events/poll?after=N  (اگر SSE بسته شد، مرورگر خودکار می‌چرخد)
 _subscribers = set()
 _sub_lock = threading.Lock()
+_events = []            # [(id, json_text)] — پنجرهٔ آخرین رویدادها برای long-poll
+_events_lock = threading.Lock()
+_events_next = 1
+EVENT_LOG_MAX = 400
 
 def emit(event: dict):
+    global _events_next
     data = json.dumps(event, ensure_ascii=False)
+    with _events_lock:
+        eid = _events_next
+        _events_next += 1
+        _events.append((eid, data))
+        if len(_events) > EVENT_LOG_MAX:
+            del _events[:len(_events) - EVENT_LOG_MAX]
     with _sub_lock:
         dead = []
         for q in _subscribers:
@@ -56,6 +88,28 @@ def emit(event: dict):
                 dead.append(q)
         for q in dead:
             _subscribers.discard(q)
+
+def events_since(after: int, wait: float = 18.0):
+    """رویدادهای بعد از شناسهٔ داده‌شده؛ اگر نبود تا `wait` ثانیه صبر می‌کند (long-poll)."""
+    deadline = time.time() + max(0.0, min(wait, 25.0))
+    while True:
+        with _events_lock:
+            if _events:
+                latest = _events[-1][0]
+                if after >= latest:          # هیچ رویداد تازه‌ای نیست
+                    if time.time() >= deadline:
+                        return [], latest
+                    sleep_for = 0.4
+                else:
+                    batch = [(i, d) for (i, d) in _events if i > after]
+                    if not batch:            # after قدیمی‌تر از پنجره است → آخرین‌ها را بده
+                        batch = _events[-20:]
+                    return batch, latest
+            elif time.time() >= deadline:
+                return [], 0
+            else:
+                sleep_for = 0.4
+        time.sleep(sleep_for)
 
 brain = Orchestrator(memory, emit)
 
@@ -92,6 +146,175 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
         return False
 
+    # ---------- 🔌 WebSocket (همان پورت، پروکسی‌پسند) ----------
+    def _ws_expected_key(self):
+        """تأیید Origin/توکن برای اتصال WebSocket (اگر رمز تنظیم شده باشد)."""
+        if not AUTH_TOKEN:
+            return True
+        token = (self.headers.get("X-Diana-Token") or "").strip()
+        if token and hmac.compare_digest(token, AUTH_TOKEN):
+            return True
+        # مرورگر برای WebSocket نمی‌تواند هدر Basic بفرستد؛ رمز را از query می‌خوانیم
+        qs = urllib.parse.parse_qs(urlparse(self.path).query)
+        qtok = (qs.get("token") or [""])[0]
+        return bool(qtok) and hmac.compare_digest(qtok, AUTH_TOKEN)
+
+    def do_WEBSOCKET(self, ws):
+        """جریان زندهٔ رویدادها روی WebSocket — در پیش‌نمایش/پروکسی همان پورت کار می‌کند."""
+        if not self._ws_expected_key():
+            ws.close(1008, "unauthorized")
+            return
+        qs = urllib.parse.parse_qs(urlparse(self.path).query)
+        try:
+            after = int((qs.get("after") or ["0"])[0] or 0)
+        except Exception:
+            after = 0
+        # رویدادهای عقب‌مانده
+        for i, d in events_since(after, wait=0)[0]:
+            ws.send(json.dumps({"id": i, "data": json.loads(d)}, ensure_ascii=False))
+        import select
+        while True:
+            batch, latest = events_since(after, wait=12)
+            for i, d in batch:
+                after = max(after, i)
+                ws.send(json.dumps({"id": i, "data": json.loads(d)}, ensure_ascii=False))
+            ws.ping(b"diana")
+            # آیا کلاینت بسته است یا پیامی فرستاده؟ (پیام‌ها فقط برای keep-alive/درخواست تازه)
+            try:
+                r, _, _ = select.select([ws.socket], [], [], 0.05)
+                if r:
+                    op, data = ws.recv()
+                    if op in ("close", None):
+                        return
+                    if op == "text" and data:
+                        try:
+                            msg = json.loads(data)
+                        except Exception:
+                            msg = {}
+                        if str(msg.get("type")) == "sync":
+                            after = int(msg.get("after") or after)
+            except Exception:
+                return
+
+    # ---------- 🔌 WebSocket روی همان پورت HTTP ----------
+    def _ws_bridge(self):
+        """ارتقا به WebSocket و پل‌زدن رویدادها — بدون نیاز به پورت دوم (پروکسی‌پسند)."""
+        if _WSFrame is None:
+            return self._json({"error": "websockets not installed"}, 501)
+        import socket as _socket
+        key = (self.headers.get("Sec-WebSocket-Key") or "").strip()
+        if not key:
+            return self._json({"error": "bad handshake"}, 400)
+        accept = base64.b64encode(hashlib.sha1(
+            (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+        self.wfile.write(
+            ("HTTP/1.1 101 Switching Protocols\r\n"
+             "Upgrade: websocket\r\n"
+             "Connection: Upgrade\r\n"
+             f"Sec-WebSocket-Accept: {accept}\r\n\r\n").encode())
+        self.wfile.flush()
+        self.close_connection = True
+        sock = self.connection
+        sock.settimeout(1.0)
+
+        def send_text(txt):
+            sock.sendall(_WSFrame(_WSOpcode.TEXT, txt.encode("utf-8")).serialize(mask=False))
+
+        buf = b""
+        try:  # رویدادهای عقب‌مانده
+            qs = urllib.parse.parse_qs(urlparse(self.path).query)
+            after = int((qs.get("after") or ["0"])[0] or 0)
+        except Exception:
+            after = 0
+        try:
+            for i, d in events_since(after, wait=0)[0]:
+                after = max(after, i)
+                send_text(json.dumps({"id": i, "data": json.loads(d)}, ensure_ascii=False))
+        except Exception:
+            return
+        last_ping = time.time()
+        while True:
+            # ۱) رویدادهای تازه را بفرست
+            try:
+                batch, _latest = events_since(after, wait=0)
+            except Exception:
+                batch = []
+            for i, d in batch:
+                after = max(after, i)
+                try:
+                    send_text(json.dumps({"id": i, "data": json.loads(d)}, ensure_ascii=False))
+                except Exception:
+                    return
+            # ۲) فریم‌های ورودی (close / ping / pong / sync)
+            try:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    return
+                buf += chunk
+                while len(buf) >= 2:
+                    fin = bool(buf[0] & 0x80)
+                    op = buf[0] & 0x0F
+                    masked = bool(buf[1] & 0x80)
+                    ln = buf[1] & 0x7F
+                    off = 2
+                    if ln == 126:
+                        if len(buf) < 4:
+                            break
+                        ln = int.from_bytes(buf[2:4], "big"); off = 4
+                    elif ln == 127:
+                        if len(buf) < 10:
+                            break
+                        ln = int.from_bytes(buf[2:10], "big"); off = 10
+                    mask = b""
+                    if masked:
+                        if len(buf) < off + 4:
+                            break
+                        mask = buf[off:off + 4]; off += 4
+                    if len(buf) < off + ln:
+                        break
+                    payload = bytearray(buf[off:off + ln])
+                    buf = buf[off + ln:]
+                    if masked:
+                        payload = bytearray(b ^ mask[i % 4] for i, b in enumerate(payload))
+                    data = bytes(payload)
+                    if op == 0x8:                       # close
+                        try:
+                            sock.sendall(_WSFrame(_WSOpcode.CLOSE, data[:2]).serialize(mask=False))
+                        except Exception:
+                            pass
+                        return
+                    if op == 0x9:                       # ping → pong
+                        try:
+                            sock.sendall(_WSFrame(_WSOpcode.PONG, data).serialize(mask=False))
+                        except Exception:
+                            return
+                    elif op == 0xA:                     # pong
+                        pass
+                    elif op in (0x1, 0x2) and data:     # text/binary
+                        try:
+                            msg = json.loads(data.decode("utf-8", "ignore"))
+                        except Exception:
+                            msg = {}
+                        if isinstance(msg, dict) and str(msg.get("type")) == "sync":
+                            try:
+                                after = int(msg.get("after") or after)
+                            except Exception:
+                                pass
+                    if fin is False:
+                        pass
+            except (socket.timeout, TimeoutError):
+                pass
+            except OSError:
+                return
+            # ۳) ping هر ۲۵ ثانیه تا پروکسی اتصال را نبندد
+            if time.time() - last_ping > 25:
+                last_ping = time.time()
+                try:
+                    sock.sendall(_WSFrame(_WSOpcode.PING, b"diana").serialize(mask=False))
+                except Exception:
+                    return
+            time.sleep(0.12)
+
     # ---------- ابزارها ----------
     def _json(self, obj, status=200):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -113,8 +336,17 @@ class Handler(BaseHTTPRequestHandler):
     def _static(self, path):
         if path in ("/", ""):
             path = "/index.html"
-        fs_path = os.path.normpath(os.path.join(STATIC_DIR, path.lstrip("/")))
-        if not fs_path.startswith(STATIC_DIR) or not os.path.isfile(fs_path):
+        # نسخهٔ وبِ کاملاً آفلاین (همان اپ، بدون سرور) روی همان لینک:
+        #   /docs   →   docs/index.html  و فایل‌های کنارش
+        if path in ("/docs", "/docs/", "/offline"):
+            path = "/index.html"
+            root = DOCS_DIR
+        else:
+            root = DOCS_DIR if path.startswith("/docs/") else STATIC_DIR
+            if root is DOCS_DIR:
+                path = path[len("/docs"):]
+        fs_path = os.path.normpath(os.path.join(root, path.lstrip("/")))
+        if not fs_path.startswith(root) or not os.path.isfile(fs_path):
             self._json({"error": "not found"}, 404)
             return
         ctype = mimetypes.guess_type(fs_path)[0] or "application/octet-stream"
@@ -129,12 +361,33 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- GET ----------
     def do_GET(self):
+        # 🔓 این دو مسیر برای تست اتصال، بدون رمز و بدون لاگ سنگین
+        raw_path = unquote(urlparse(self.path).path)
+        if raw_path in ("/api/ping", "/healthz"):
+            return self._json({"ok": True, "diana": True, "version": VERSION,
+                               "ws_port": WS_PORT, "http_port": PORT,
+                               "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+        # 🔌 اگر مرورگر روی همین پورت ارتقا به WebSocket خواست: /stream
+        if raw_path in ("/stream", "/ws") and self.headers.get("Upgrade", "").lower() == "websocket":
+            return self._ws_bridge()
         if not self._require_auth():
             return
-        path = unquote(urlparse(self.path).path)
+        path = raw_path
         try:
             if path == "/api/events":
                 return self._sse()
+            if path == "/api/events/poll":
+                qs = urllib.parse.parse_qs(urlparse(self.path).query)
+                after = int((qs.get("after") or ["0"])[0] or 0)
+                wait = float((qs.get("wait") or ["18"])[0] or 18)
+                batch, latest = events_since(after, wait)
+                return self._json({"events": [{"id": i, "data": json.loads(d)} for i, d in batch],
+                                   "last": latest})
+            if path == "/favicon.ico":
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if path == "/api/agents":
                 return self._json(agent_registry.public_registry())
             if path == "/api/status":
@@ -142,10 +395,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({
                     "online": True, "internet": info["internet"], "llm_mode": brain.llm.mode(),
                     "agents_total": len(agent_registry.AGENTS),
+                    "launches_total": len(memory.data.get("launches", [])),
                     "departments": len(agent_registry.DEPARTMENTS),
                     "user_name": memory.user_name(),
                     "stats": memory.data["stats"],
                     "time": info["time"],
+                    "version": VERSION,
+                    "stream": "ws+sse+poll",
+                    "ws_port": WS_PORT,
+                    "auth": bool(AUTH_TOKEN),
                     "settings": memory.public_settings(),
                 })
             if path == "/api/memory":
@@ -169,6 +427,21 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/missions/"):
                 m = memory.get_mission(path.split("/")[-1])
                 return self._json(m or {"error": "not found"}, 200 if m else 404)
+            # 🚀 راه‌اندازی کسب‌وکار
+            if path == "/api/launch":
+                return self._json({"launches": memory.public_state().get("launches", []),
+                                   "stages": [{"id": s["id"], "step": s["step"], "icon": s["icon"],
+                                               "owner": s["owner"], "deliverable": s["deliverable"],
+                                               "why": s["why"]} for s in launch_engine.STAGES],
+                                   "defaults": launch_engine.DEFAULTS})
+            if path.startswith("/api/launch/"):
+                parts = [p for p in path[len("/api/launch/"):].split("/") if p]
+                lid = parts[0] if parts else ""
+                full = len(parts) > 1 and parts[1] == "full"
+                rec = brain.launch.detail(lid, full=full)
+                if not rec:
+                    return self._json({"error": "not found"}, 404)
+                return self._json(rec)
             if path == "/api/settings":
                 return self._json(memory.public_settings())
             return self._static(path)
@@ -227,6 +500,21 @@ class Handler(BaseHTTPRequestHandler):
                 if not goal:
                     return self._json({"error": "هدف مأموریت خالیه"}, 400)
                 return self._json({"mission_id": brain.start_mission(goal)})
+            # 🚀 راه‌اندازی کسب‌وکار (تحقیق → تأمین‌کننده → مشتری → قرارداد → اجرا)
+            if path == "/api/launch":
+                fields = body if isinstance(body, dict) else {}
+                mode = str(body.get("mode", "auto")) if isinstance(body, dict) else "auto"
+                rec = brain.launch.start(fields, mode=mode)
+                return self._json({"ok": True, "launch": rec})
+            if path == "/api/launch/parse":
+                text = str(body.get("text", "")).strip()
+                if not text:
+                    return self._json({"error": "متن خالیه"}, 400)
+                return self._json({"fields": launch_engine.normalize_fields(launch_engine.parse_launch_text(text))})
+            if path == "/api/launch/quote":
+                fields = launch_engine.normalize_fields(body if isinstance(body, dict) else {})
+                return self._json({"fields": fields, "numbers": launch_engine.numbers(fields),
+                                   "plan": launch_engine.plan_markdown(fields)})
             if path == "/api/chatlog":
                 memory.log_chat(str(body.get("role", "diana")), str(body.get("text", "")), str(body.get("source", "browser-cloud")))
                 return self._json({"ok": True})
@@ -268,6 +556,13 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return self._json({"error": str(e)}, 500)
 
+    def do_HEAD(self):
+        """بررسی سلامت اتصال: HEAD / → فقط هدرها (برای مانیتور و تست تونل)."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("X-Diana-Version", VERSION)
+        self.end_headers()
+
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -276,19 +571,78 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
+class DianaServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+async def _serve_async(server):
+    """سرور HTTP + WebSocket روی یک پورت؛ اگر websockets نصب نباشد، فقط HTTP."""
+    try:
+        import websockets
+        from websockets.asyncio.server import serve as ws_serve
+    except Exception:
+        websockets = None
+    http_srv = await asyncio.to_thread(
+        lambda: server.serve_forever()) if False else None
+    # HTTP را در نخ جدا اجرا می‌کنیم و WebSocket را در حلقهٔ asyncio
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    if websockets is None:
+        print("ℹ️ بستهٔ websockets نصب نیست: جریان زنده از SSE/Polling استفاده می‌کند")
+        print("   (نصب اختیاری: pip install websockets — برای WebSocket روی همان پورت)")
+        while True:
+            await asyncio.sleep(3600)
+        return
+
+    async def stream(ws):
+        """پل: رویدادهای گذرگاه داخلی → WebSocket"""
+        qs = urllib.parse.parse_qs(urlparse(ws.request.path).query)
+        if AUTH_TOKEN:
+            token = (qs.get("token") or [""])[0] or (ws.request.headers.get("X-Diana-Token") or "")
+            if not (token and hmac.compare_digest(token, AUTH_TOKEN)):
+                await ws.close(code=1008, reason="unauthorized")
+                return
+        try:
+            after = int((qs.get("after") or ["0"])[0] or 0)
+        except Exception:
+            after = 0
+        for i, d in events_since(after, wait=0)[0]:
+            await ws.send(json.dumps({"id": i, "data": json.loads(d)}, ensure_ascii=False))
+        while True:
+            batch, latest = await asyncio.to_thread(events_since, after, 10)
+            for i, d in batch:
+                after = max(after, i)
+                await ws.send(json.dumps({"id": i, "data": json.loads(d)}, ensure_ascii=False))
+            if not batch:
+                try:
+                    await asyncio.wait_for(ws.ping(), timeout=5)
+                except Exception:
+                    return
+
+    async with ws_serve(stream, "0.0.0.0", WS_PORT, ping_interval=None, max_size=2 ** 22):
+        print(f"🔌 WebSocket زنده: ws://localhost:{WS_PORT}  (پیش‌نمایش: wss://{WS_PORT}-<sandbox>.e2b.app)")
+        while True:
+            await asyncio.sleep(3600)
+
+
 def main():
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    server = DianaServer(("0.0.0.0", PORT), Handler)
     server.daemon_threads = True
     print("=" * 58)
-    print("🐠 دیانا بیدار شد! سیستم چندعامله با ۱۲۰ ایجنت متخصص آماده‌ست")
+    print("🐠 دیانا بیدار شد! سیستم چندعامله با ۱۴۰ ایجنت متخصص آماده‌ست")
     print(f"🌐 آکواریوم دیانا: http://localhost:{PORT}")
     print(f"🧠 مغز ابری: {brain.llm.mode()} | اینترنت سرور: {'✅ وصل' if tools.internet_available() else '📴 قطع — حالت آفلاین فعاله'}")
     print(f"🔒 دسترسی: {'رمزدار (Basic Auth) — کاربر: ' + AUTH_USER if AUTH_TOKEN else 'بدون رمز (فقط محلی)'}")
+    print(f"🔗 تست اتصال: http://localhost:{PORT}/api/ping  |  stream: sse + poll")
+    sandbox = os.environ.get("E2B_SANDBOX_ID", "").strip()
+    if sandbox:
+        print(f"🌍 لینک عمومی (پیش‌نمایش): https://{PORT}-{sandbox}.e2b.app")
     if AUTO_TOKEN:
         print(f"⚠️ رمز خودکار ساخته شد — همین حالا از لاگ کپی کن: {AUTH_TOKEN}")
     print("=" * 58)
     try:
-        server.serve_forever()
+        asyncio.run(_serve_async(server))
     except KeyboardInterrupt:
         print("\n🐠 دیانا رفت بخوابه... خداحافظ فرمانده!")
 
