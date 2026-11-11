@@ -6,12 +6,14 @@
 """
 import asyncio
 import base64
+import hashlib
 import hmac
 import json
 import mimetypes
 import os
 import queue
 import secrets
+import socket
 import sys
 import threading
 import time
@@ -19,6 +21,14 @@ import urllib.parse
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, unquote
+
+try:  # پشتیبانی WebSocket روی همان پورت HTTP (بدون کتابخانهٔ بیرونی)
+    from websockets.frames import Frame as _WSFrame, Opcode as _WSOpcode
+    from websockets.exceptions import ConnectionClosed as _WSClosed
+except Exception:  # pragma: no cover
+    _WSFrame = None
+    _WSOpcode = None
+    _WSClosed = Exception
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -185,6 +195,125 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 return
 
+    # ---------- 🔌 WebSocket روی همان پورت HTTP ----------
+    def _ws_bridge(self):
+        """ارتقا به WebSocket و پل‌زدن رویدادها — بدون نیاز به پورت دوم (پروکسی‌پسند)."""
+        if _WSFrame is None:
+            return self._json({"error": "websockets not installed"}, 501)
+        import socket as _socket
+        key = (self.headers.get("Sec-WebSocket-Key") or "").strip()
+        if not key:
+            return self._json({"error": "bad handshake"}, 400)
+        accept = base64.b64encode(hashlib.sha1(
+            (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+        self.wfile.write(
+            ("HTTP/1.1 101 Switching Protocols\r\n"
+             "Upgrade: websocket\r\n"
+             "Connection: Upgrade\r\n"
+             f"Sec-WebSocket-Accept: {accept}\r\n\r\n").encode())
+        self.wfile.flush()
+        self.close_connection = True
+        sock = self.connection
+        sock.settimeout(1.0)
+
+        def send_text(txt):
+            sock.sendall(_WSFrame(_WSOpcode.TEXT, txt.encode("utf-8")).serialize(mask=False))
+
+        buf = b""
+        try:  # رویدادهای عقب‌مانده
+            qs = urllib.parse.parse_qs(urlparse(self.path).query)
+            after = int((qs.get("after") or ["0"])[0] or 0)
+        except Exception:
+            after = 0
+        try:
+            for i, d in events_since(after, wait=0)[0]:
+                after = max(after, i)
+                send_text(json.dumps({"id": i, "data": json.loads(d)}, ensure_ascii=False))
+        except Exception:
+            return
+        last_ping = time.time()
+        while True:
+            # ۱) رویدادهای تازه را بفرست
+            try:
+                batch, _latest = events_since(after, wait=0)
+            except Exception:
+                batch = []
+            for i, d in batch:
+                after = max(after, i)
+                try:
+                    send_text(json.dumps({"id": i, "data": json.loads(d)}, ensure_ascii=False))
+                except Exception:
+                    return
+            # ۲) فریم‌های ورودی (close / ping / pong / sync)
+            try:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    return
+                buf += chunk
+                while len(buf) >= 2:
+                    fin = bool(buf[0] & 0x80)
+                    op = buf[0] & 0x0F
+                    masked = bool(buf[1] & 0x80)
+                    ln = buf[1] & 0x7F
+                    off = 2
+                    if ln == 126:
+                        if len(buf) < 4:
+                            break
+                        ln = int.from_bytes(buf[2:4], "big"); off = 4
+                    elif ln == 127:
+                        if len(buf) < 10:
+                            break
+                        ln = int.from_bytes(buf[2:10], "big"); off = 10
+                    mask = b""
+                    if masked:
+                        if len(buf) < off + 4:
+                            break
+                        mask = buf[off:off + 4]; off += 4
+                    if len(buf) < off + ln:
+                        break
+                    payload = bytearray(buf[off:off + ln])
+                    buf = buf[off + ln:]
+                    if masked:
+                        payload = bytearray(b ^ mask[i % 4] for i, b in enumerate(payload))
+                    data = bytes(payload)
+                    if op == 0x8:                       # close
+                        try:
+                            sock.sendall(_WSFrame(_WSOpcode.CLOSE, data[:2]).serialize(mask=False))
+                        except Exception:
+                            pass
+                        return
+                    if op == 0x9:                       # ping → pong
+                        try:
+                            sock.sendall(_WSFrame(_WSOpcode.PONG, data).serialize(mask=False))
+                        except Exception:
+                            return
+                    elif op == 0xA:                     # pong
+                        pass
+                    elif op in (0x1, 0x2) and data:     # text/binary
+                        try:
+                            msg = json.loads(data.decode("utf-8", "ignore"))
+                        except Exception:
+                            msg = {}
+                        if isinstance(msg, dict) and str(msg.get("type")) == "sync":
+                            try:
+                                after = int(msg.get("after") or after)
+                            except Exception:
+                                pass
+                    if fin is False:
+                        pass
+            except (socket.timeout, TimeoutError):
+                pass
+            except OSError:
+                return
+            # ۳) ping هر ۲۵ ثانیه تا پروکسی اتصال را نبندد
+            if time.time() - last_ping > 25:
+                last_ping = time.time()
+                try:
+                    sock.sendall(_WSFrame(_WSOpcode.PING, b"diana").serialize(mask=False))
+                except Exception:
+                    return
+            time.sleep(0.12)
+
     # ---------- ابزارها ----------
     def _json(self, obj, status=200):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -228,6 +357,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "diana": True, "version": VERSION,
                                "ws_port": WS_PORT, "http_port": PORT,
                                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+        # 🔌 اگر مرورگر روی همین پورت ارتقا به WebSocket خواست: /stream
+        if raw_path in ("/stream", "/ws") and self.headers.get("Upgrade", "").lower() == "websocket":
+            return self._ws_bridge()
         if not self._require_auth():
             return
         path = raw_path

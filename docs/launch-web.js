@@ -485,7 +485,7 @@ ${automationMarkdown(L)}
     const origFetch = window.fetch.bind(window);
     window.fetch = async (input, init = {}) => {
       const url = typeof input === 'string' ? input : (input?.url || '');
-      const isLocal = url.includes('/api/launch');
+      const isLocal = url.includes('/api/launch') || url.includes('/api/ping') || url.includes('/api/events/poll');
       if (!isLocal) return origFetch(input, init);
       const path = url.replace(/^https?:\/\/[^/]+/, '').split('?')[0];
       const method = (init.method || 'GET').toUpperCase();
