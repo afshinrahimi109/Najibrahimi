@@ -484,7 +484,14 @@ function heuristicProgram(ins) {
 const ES_SET = new Set();
 class FakeEventSource { constructor() { this.onmessage = null; this.onerror = null; ES_SET.add(this); } close() { ES_SET.delete(this); } }
 window.EventSource = FakeEventSource;
-function emit(e) { const d = JSON.stringify(e); ES_SET.forEach(es => { try { es.onmessage && es.onmessage({ data: d }); } catch (_) {} }); }
+function emit(e) {
+  const d = JSON.stringify(e);
+  ES_SET.forEach(es => { try { es.onmessage && es.onmessage({ data: d }); } catch (_) {} });
+  // پل مستقیم به بدنهٔ رابط کاربری (نسخهٔ بدون سرور، EventSource فِیک را دور می‌زند)
+  setTimeout(() => {
+    try { if (typeof window.__dianaEventHandler === 'function') window.__dianaEventHandler(JSON.parse(d)); } catch (_) {}
+  }, 0);
+}
 window.DianaEmit = emit;   // پل رویدادهای زنده برای launch-web.js
 
 /* ============ ارکستراتور 🧠 ============ */

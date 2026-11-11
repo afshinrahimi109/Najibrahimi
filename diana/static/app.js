@@ -416,6 +416,7 @@ function linkChip() {
     sse: ['🟢', 'اتصال زنده (SSE)', 'ok'],
     poll: ['🟡', 'اتصال زنده (Polling)', 'warn'],
     offline: ['🔴', 'اتصال قطع — تلاش مجدد…', 'bad'],
+    local: ['🟢', 'نسخهٔ بدون سرور (مرورگر)', 'ok'],
   };
   const [icon, label, cls] = map[Link.mode] || map.idle;
   el.textContent = `${icon} ${label}`;
@@ -526,6 +527,7 @@ function stopPolling() { clearTimeout(Link.pollTimer); Link.pollTimer = null; }
 
 /* ---- زنجیرهٔ اتصال: WebSocket → SSE → Polling ---- */
 function connectLive() {
+  if (Link.mode === 'local') return;          // نسخهٔ بدون سرور: کانال شبکه لازم نیست
   if (Link._connecting) return;              // جلوگیری از حلقهٔ بازگشتی
   // ۱) WebSocket (بدون محدودیت‌های SSE در پروکسی‌ها)
   if (Link.wsPort) { if (!connectWS()) connectSSECompat(); return; }  // ۲) وگرنه SSE
@@ -585,6 +587,8 @@ async function pingServer() {
     const lat = Date.now() - t0;
     if ($('#linkLatency')) $('#linkLatency').textContent = `⚡ ${faNum(lat)}ms`;
     if (j.version && $('#linkVersion')) $('#linkVersion').textContent = `v${j.version}`;
+    // نسخهٔ کاملاً آفلاین (docs/): مغز و رویدادها همه در همین مرورگر اجرا می‌شوند
+    if (String(j.version || '').startsWith('web')) { Link.mode = 'local'; linkChip(); return true; }
     if (j.ws_port && !Link.wsPort) Link.wsPort = parseInt(j.ws_port, 10) || null;
     if (Link.mode === 'offline' && !Link.pollTimer && !Link.es && !Link._connecting) connectLive();
     else if (Link.wsPort && (Link.mode === 'poll' || Link.mode === 'sse')) upgradeToWS();
@@ -601,9 +605,9 @@ function startHeartbeat() {
   // اول یک ping بزن تا پورت WebSocket معلوم شود، بعد زنجیرهٔ اتصال را شروع کن
   setTimeout(async () => {
     await pingServer();
-    if (Link.mode === 'idle' || Link.mode === 'offline') connectLive();
+    if ((Link.mode === 'idle' || Link.mode === 'offline') && Link.mode !== 'local') connectLive();
   }, 120);
-  setTimeout(() => { if (Link.mode === 'idle') { Link.mode = 'offline'; linkChip(); startPolling(); } }, 6000);
+  setTimeout(() => { if (Link.mode === 'idle' && Link.mode !== 'local') { Link.mode = 'offline'; linkChip(); startPolling(); } }, 6000);
 }
 
 window.__dianaLink = Link;
