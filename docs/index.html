@@ -299,6 +299,30 @@
         <input type="password" id="keyOpenrouter" placeholder="sk-or-...">
         <p class="keys-note">کلیدها فقط روی سرور/هاست خودت ذخیره می‌شن و جایی ارسال نمی‌شن. خالی گذاشتن = پاک‌کردن کلید.</p>
       </div>
+      <div class="conn-box">
+        <div class="conn-head">
+          <h4>🔗 وضعیت اتصال دیانا</h4>
+          <button class="mini-btn" id="connRetestBtn">🔄 تست دوباره</button>
+        </div>
+        <div class="conn-grid" id="connGrid">
+          <div class="conn-row" data-check="server"><span class="c-ic">⏳</span><span class="c-name">سرور دیانا</span><span class="c-val">در حال بررسی…</span></div>
+          <div class="conn-row" data-check="status"><span class="c-ic">⏳</span><span class="c-name">وضعیت و مغز</span><span class="c-val">در حال بررسی…</span></div>
+          <div class="conn-row" data-check="stream"><span class="c-ic">⏳</span><span class="c-name">جریان زندهٔ رویدادها</span><span class="c-val">در حال بررسی…</span></div>
+          <div class="conn-row" data-check="vault"><span class="c-ic">⏳</span><span class="c-name">گاوصندوق و حافظه</span><span class="c-val">در حال بررسی…</span></div>
+          <div class="conn-row" data-check="cloud"><span class="c-ic">⏳</span><span class="c-name">مغز ابری رایگان</span><span class="c-val">در حال بررسی…</span></div>
+        </div>
+        <div class="link-box">
+          <label>🌍 لینک فعلی دیانا (همین صفحه)</label>
+          <div class="link-row">
+            <input id="currentLink" readonly dir="ltr" value="—">
+            <button class="mini-btn" id="copyLinkBtn">📋 کپی</button>
+            <a class="mini-btn" id="openLinkBtn" target="_blank" rel="noopener">↗ باز کردن</a>
+          </div>
+          <p class="conn-note">اگر لینک پیش‌نمایش عوض شد، از پنل Arena همان لینک تازه را باز کن.
+          برای یک **لینک ثابت همیشگی** (ngrok / Cloudflare / Render) فایل <a href="https://github.com/afshinrahimi109/Najibrahimi/blob/main/diana/STATIC-IP.md" target="_blank" rel="noopener">STATIC-IP.md</a> را ببین یا روی سرور خودت <code>python3 online.py --setup</code> را اجرا کن.</p>
+        </div>
+        <p class="conn-note" id="connNote">اتصال زنده دو مسیر دارد: SSE و (اگر پروکسی/مرورگر اجازه نداد) Polling خودکار. اگر چیزی قرمز شد، دکمهٔ بالا یا نشانگر بالای صفحه را بزن.</p>
+      </div>
       <button class="primary-btn" id="saveSettingsBtn">💾 ذخیره تنظیمات</button>
       <div class="settings-msg" id="settingsMsg"></div>
       <div class="about-box">

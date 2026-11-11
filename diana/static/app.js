@@ -126,7 +126,7 @@ function goPage(name) {
   if (name === 'agents') loadAgentsPage();
   if (name === 'missions') loadMissionsPage();
   if (name === 'vault') loadVaultPage();
-  if (name === 'settings') loadSettingsPage();
+  if (name === 'settings') { loadSettingsPage(); runConnectionTest(); }
   if (name === 'home') refreshHomeStats();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -1076,6 +1076,13 @@ async function loadSettingsPage() {
 }
 $('#setVoice').addEventListener('click', e => { settings.voice = !settings.voice; setToggle(e.target, settings.voice); });
 $('#setCloud').addEventListener('click', e => { settings.cloud_brain = !settings.cloud_brain; setToggle(e.target, settings.cloud_brain); });
+document.addEventListener('click', e => { if (e.target.closest('#connRetestBtn')) { toast('🔗 در حال تست اتصال…'); runConnectionTest(); } });
+document.addEventListener('click', async e => {
+  if (!e.target.closest('#copyLinkBtn')) return;
+  const url = $('#currentLink')?.value || '';
+  try { await navigator.clipboard.writeText(url); toast('📋 لینک کپی شد: ' + url); }
+  catch (_) { $('#currentLink')?.select(); toast('📋 با Ctrl+C کپی کن'); }
+});
 $('#saveSettingsBtn').addEventListener('click', async () => {
   const body = {
     user_name: $('#setName').value.trim(), voice: settings.voice, cloud_brain: settings.cloud_brain,
@@ -1095,6 +1102,80 @@ function updateBrainPill(mode, internet) {
   $('#brainModeText').textContent = `🧠 ${label}`;
   linkChip();
   $('#statusPill').title = `اینترنت سرور: ${internet ? 'متصل ✅' : 'قطع 📴 (مرورگر تو مغز ابری رو تأمین می‌کنه)'} | حالت مغز سرور: ${mode}`;
+}
+
+
+// ══════════════════════════════════════════════════════════════
+//  🔗 عیب‌یاب اتصال (صفحهٔ تنظیمات)
+// ══════════════════════════════════════════════════════════════
+function connRow(key, icon, name, val, state) {
+  const row = document.querySelector(`.conn-row[data-check="${key}"]`);
+  if (!row) return;
+  row.className = 'conn-row ' + state;
+  row.querySelector('.c-ic').textContent = icon;
+  row.querySelector('.c-name').textContent = name;
+  row.querySelector('.c-val').textContent = val;
+}
+
+function fillCurrentLink() {
+  const url = location.origin + location.pathname;
+  const inp = $('#currentLink');
+  if (inp) inp.value = url;
+  const open = $('#openLinkBtn');
+  if (open) open.href = url;
+}
+
+async function runConnectionTest() {
+  const started = Date.now();
+  fillCurrentLink();
+  // ۱) سرور
+  try {
+    const t0 = Date.now();
+    const r = await fetch('/api/ping', { cache: 'no-store' });
+    const j = await r.json();
+    const ms = Date.now() - t0;
+    connRow('server', '🟢', 'سرور دیانا', `متصل • ${faNum(ms)}ms • v${j.version || '—'}`, 'ok');
+    if ($('#linkVersion')) $('#linkVersion').textContent = 'v' + (j.version || '—');
+    if ($('#linkLatency')) $('#linkLatency').textContent = `⚡ ${faNum(ms)}ms`;
+  } catch (e) {
+    connRow('server', '🔴', 'سرور دیانا', 'قطع — سرور اجرا نشده یا آدرس عوض شده', 'bad');
+  }
+  // ۲) وضعیت و مغز
+  try {
+    const st = await api.get('/api/status');
+    if (st && st.online) {
+      const local = String(st.llm_mode || '').startsWith('local');
+      connRow('status', '🟢', 'وضعیت و مغز',
+        `${faNum(st.agents_total)} ایجنت • ${faNum(st.departments || 0)} دپارتمان • مغز: ${st.llm_mode}`, 'ok');
+      connRow('cloud', local ? '🟡' : '🟢', 'مغز ابری رایگان',
+        local ? 'سرور آفلاین است؛ مغز ابری از مرورگر تو تأمین می‌شود' : `فعال: ${st.llm_mode}`, local ? 'warn' : 'ok');
+    } else {
+      connRow('status', '🔴', 'وضعیت و مغز', 'پاسخ نامعتبر از سرور', 'bad');
+    }
+  } catch (e) { connRow('status', '🔴', 'وضعیت و مغز', 'خطا در خواندن /api/status', 'bad'); }
+  // ۳) جریان زنده
+  try {
+    if (Link.mode === 'sse') connRow('stream', '🟢', 'جریان زندهٔ رویدادها', 'SSE متصل (push)', 'ok');
+    else if (Link.mode === 'poll') connRow('stream', '🟡', 'جریان زندهٔ رویدادها', 'Polling فعال (SSE بسته بود)', 'warn');
+    else {
+      const r = await fetch(`/api/events/poll?after=${Link.lastId}&wait=1`, { cache: 'no-store' });
+      const j = await r.json();
+      connRow('stream', '🟡', 'جریان زندهٔ رویدادها',
+        j && typeof j.last === 'number' ? `سرور پاسخ داد (${faNum((j.events || []).length)} رویداد) — در حال اتصال` : 'پاسخ نامعتبر', 'warn');
+      connectLive();
+    }
+  } catch (e) { connRow('stream', '🔴', 'جریان زندهٔ رویدادها', 'نه SSE و نه Polling پاسخ نداد', 'bad'); }
+  // ۴) گاوصندوق و حافظه
+  try {
+    const [files, mem] = await Promise.all([api.get('/api/files'), api.get('/api/memory')]);
+    connRow('vault', '🟢', 'گاوصندوق و حافظه',
+      `${faNum((files.files || []).length)} فایل • ${faNum((mem.facts || []).length)} خاطره • ${faNum((mem.launches || []).length)} کسب‌وکار`, 'ok');
+  } catch (e) { connRow('vault', '🔴', 'گاوصندوق و حافظه', 'خطا در خواندن فایل‌ها/حافظه', 'bad'); }
+  const secs = ((Date.now() - started) / 1000).toFixed(1);
+  if ($('#connNote')) $('#connNote').textContent =
+    `آخرین تست: ${new Date().toLocaleTimeString('fa-IR')} (${faNum(secs)} ثانیه) — ` +
+    `حالت اتصال زنده: ${Link.mode === 'sse' ? 'SSE 🟢' : Link.mode === 'poll' ? 'Polling 🟡' : 'بدون اتصال 🔴'}. ` +
+    'اگر «سرور» قرمز است، سرور دیانا را اجرا کن (python3 server.py) و آدرس پیش‌نمایش را باز کن.';
 }
 
 // ---------- آمار خانه و راه‌اندازی ----------
