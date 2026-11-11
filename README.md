@@ -70,3 +70,15 @@ cd vpn && python3 tests/test_relay.py
 ## 🤖 بات تلگرام ساخت پیش‌نویس ریل
 
 نسخهٔ اولیهٔ بات خصوصی تلگرام برای ساخت و ذخیرهٔ سناریوهای ریل فارسی در پوشهٔ [`telegram-bot/`](telegram-bot/README.md) آماده است. کد Docker/Railway، SQLite، فرمان‌های `/reel` و `/status` و راهنمای امن‌کردن کلیدها داخل آن قرار دارد.
+
+---
+
+## 🎬 ویدیوی تبلیغاتی کی‌کرفت (تیزر ۶۵ ثانیه‌ای)
+
+تیزر عمودی **۱۰۸۰×۱۹۲۰** با نریشن و متن فارسی، مناسب ریلز، استوری، تیک‌تاک و شورتس.
+همهٔ لینک‌ها مستقیم به بخش دانلود گیت‌هاب می‌روند:
+
+- ⬇️ **[دانلود ویدیو (MP4، ۱۵ مگابایت)](https://github.com/afshinrahimi109/Najibrahimi/blob/arena/ee1bc2a2-najibrahimi/video/k-craft-korea-teaser-web.mp4)** — در صفحه‌ای که باز می‌شود دکمهٔ **Download** بالا سمت راست فایل است.
+- ⬇️ **[دانلود مستقیم بدون صفحهٔ واسط (raw)](https://github.com/afshinrahimi109/Najibrahimi/raw/arena/ee1bc2a2-najibrahimi/video/k-craft-korea-teaser-web.mp4)** — دانلود بلافاصله شروع می‌شود.
+- 🖼️ **[دانلود کاور / تامبنیل](https://github.com/afshinrahimi109/Najibrahimi/raw/arena/ee1bc2a2-najibrahimi/video/poster.jpg)**
+- 📁 **[پوشهٔ `video/`](https://github.com/afshinrahimi109/Najibrahimi/tree/arena/ee1bc2a2-najibrahimi/video)** — ویدیو، کاور، تصاویر صحنه‌ها، نریشن و اسکریپت بازتولید (`build_video.py`).
