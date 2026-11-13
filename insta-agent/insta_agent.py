@@ -1039,15 +1039,22 @@ class Tunnel:
     def stop(self):
         with self.lock:
             proc, self.proc, self.url, self.ready = self.proc, None, "", False
-        if proc is not None and proc.poll() is None:
+        if proc is None:
+            return
+        if proc.poll() is None:
             try:
                 proc.terminate()
                 proc.wait(timeout=5)
             except Exception:
                 try:
                     proc.kill()
+                    proc.wait(timeout=5)
                 except Exception:
                     pass
+        try:
+            proc.stdout.close()
+        except Exception:
+            pass
 
     def idle_check(self):
         if self.proc is not None and now() - self.used > 900:
@@ -1572,7 +1579,10 @@ class Publisher:
             raise UserError("نوع پست نامعتبر است.")
         caption = str(data.get("caption") or "").replace("\r\n", "\n").strip()[:6000]
         media = []
-        for item in (data.get("media") or [])[:20]:
+        items = data.get("media") if isinstance(data.get("media"), list) else []
+        if len(items) > 20:
+            raise UserError("هر پست حداکثر ۲۰ عکس/ویدیو می‌پذیرد.")
+        for item in items:
             if not isinstance(item, dict):
                 continue
             if item.get("file"):
