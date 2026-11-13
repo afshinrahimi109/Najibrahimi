@@ -1007,7 +1007,10 @@ class Tunnel:
 
     def command(self, port):
         if self.cfg.tunnel_cmd:
-            return shlex.split(self.cfg.tunnel_cmd.replace("{port}", str(port)))
+            cmd = self.cfg.tunnel_cmd.replace("{port}", str(port))
+            if os.name == "nt":                        # keep the backslashes of Windows paths
+                return [part.strip('"') for part in shlex.split(cmd, posix=False)]
+            return shlex.split(cmd)
         exe = shutil.which("cloudflared")
         return [exe, "tunnel", "--no-autoupdate", "--url", "http://127.0.0.1:%d" % port] if exe else None
 
@@ -3416,7 +3419,7 @@ class Web:
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    allow_reuse_address = os.name != "nt"              # on Windows "reuse" would let two agents share one port
     request_queue_size = 64
 
     def handle_error(self, request, client_address):
@@ -3874,13 +3877,18 @@ class App:
         self.port = self.media_port = 0
 
     def acquire_lock(self):
+        """Two agents on one data folder would publish everything twice, so only one may run."""
+        fh = open(os.path.join(self.cfg.data_dir, "agent.lock"), "a")
         try:
-            import fcntl
+            try:
+                import fcntl
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except ImportError:                        # Windows
+                import msvcrt
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
         except ImportError:
-            return
-        fh = open(os.path.join(self.cfg.data_dir, "agent.lock"), "w")
-        try:
-            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            pass
         except OSError:
             fh.close()
             raise UserError("ایجنت همین حالا روی این دستگاه در حال اجراست (شاید در یک پنجرهٔ دیگر). اول آن را ببند.")
@@ -3955,6 +3963,11 @@ def open_browser(url):
 
 
 def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):            # a terminal that cannot show Persian must not stop the agent
+        try:
+            stream.reconfigure(errors="replace")
+        except Exception:
+            pass
     try:
         app = App(argv)
         if app.cfg.show_key:

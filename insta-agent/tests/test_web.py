@@ -251,6 +251,7 @@ class LoginTests(unittest.TestCase):
         self.assertNotEqual(web3.key, self.key)
         self.assertNotEqual("ia_session=" + web3.session(), cookie)
 
+    @unittest.skipUnless(os.name == "posix", "file modes are a POSIX thing")
     def test_files_holding_secrets_are_private(self):
         d = self.rig.app.cfg.data_dir
         self.assertEqual(os.stat(d).st_mode & 0o077, 0)

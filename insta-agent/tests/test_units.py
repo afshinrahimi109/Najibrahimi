@@ -1,4 +1,6 @@
 """Small pieces that need no running agent."""
+import contextlib
+import io
 import os
 import tempfile
 import unittest
@@ -123,8 +125,10 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(demo.sim and demo.embed_ok and not live.sim and not live.embed_ok)
 
     def test_no_auth_is_refused_on_a_public_address(self):
-        with self.assertRaises(SystemExit):
+        said = io.StringIO()
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(said):
             ia.Config(["--host", "0.0.0.0", "--no-auth"], {"HOME": "/tmp/x", "AGENT_QUIET": "1"})
+        self.assertIn("--no-auth", said.getvalue())
         self.assertTrue(ia.Config(["--no-auth"], {"HOME": "/tmp/x"}).no_auth)
         self.assertTrue(ia.Config(["--host", "0.0.0.0", "--no-auth", "--demo"], {"HOME": "/tmp/x"}).no_auth)
 

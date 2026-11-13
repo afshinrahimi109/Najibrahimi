@@ -62,7 +62,8 @@ class ConnectTests(Base):
                          ("demo.cafe", "کافه دمو", 1840, 312, 10, "ig"))
         self.assertEqual(self.agent.db.get("secret.token"), ia.SIM_TOKEN)
         self.assertIn("پیج @demo.cafe وصل شد", self.notes()[0])
-        self.assertEqual(os.stat(os.path.join(self.rig.app.cfg.data_dir, "agent.db")).st_mode & 0o077, 0)
+        if os.name == "posix":                                            # nobody else on the device can read it
+            self.assertEqual(os.stat(os.path.join(self.rig.app.cfg.data_dir, "agent.db")).st_mode & 0o077, 0)
         series = self.rig.ok("GET", "/api/insights")["followers"]["series"]
         self.assertEqual([s["followers"] for s in series], [1840])        # today's follower count is on record
 
@@ -604,7 +605,8 @@ class RealProcessTests(unittest.TestCase):
 
     def test_demo_from_the_command_line(self):
         tmp = tempfile.mkdtemp(prefix="ia-proc-")
-        env = {"HOME": tmp, "PATH": os.environ.get("PATH", ""), "PYTHONIOENCODING": "utf-8", "AGENT_TICK_SEC": "0.2"}
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("AGENT_", "IG_", "FB_", "TELEGRAM_")) and k != "PORT"}
+        env.update(HOME=tmp, PYTHONIOENCODING="utf-8", AGENT_TICK_SEC="0.2")
         proc = subprocess.Popen([sys.executable, os.path.join(ROOT, "insta_agent.py"), "--demo", "--port", "0", "--no-browser"],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, cwd=tmp)
         try:
@@ -628,8 +630,9 @@ class RealProcessTests(unittest.TestCase):
             self.assertTrue(st["demo"] and st["connected"])
             self.assertTrue(os.path.isdir(os.path.join(tmp, ".insta_agent_demo")))
             self.assertFalse(os.path.exists(os.path.join(tmp, ".insta_agent")))   # the demo never touches real data
-            proc.send_signal(signal.SIGTERM)
-            self.assertEqual(proc.wait(timeout=20), 0)
+            if os.name == "posix":
+                proc.send_signal(signal.SIGTERM)
+                self.assertEqual(proc.wait(timeout=20), 0)                # a clean stop, not a crash
         finally:
             if proc.poll() is None:
                 proc.kill()
