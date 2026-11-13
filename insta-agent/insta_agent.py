@@ -3911,7 +3911,877 @@ def main(argv=None):
     return 0
 
 
-UI_HTML = "<!doctype html><meta charset='utf-8'><title>insta agent</title><p>__UI_PLACEHOLDER__</p>"
+# ───────────────────────────── web panel (the page itself) ─────────────────────────────
+# One self-contained Persian, right-to-left, phone-first page. No outside files, fonts or scripts.
+
+UI_HTML = r'''<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0f1a">
+<title>ایجنت اینستاگرام</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<style nonce="__NONCE__">
+:root{--bg:#f3f5fa;--card:#fff;--ink:#111827;--mut:#6b7280;--line:#e2e6ee;--soft:#eef1f6;--pri:#ec4899;--ok:#10b981;--warn:#d97706;--bad:#ef4444;--info:#3b82f6;--grad:linear-gradient(135deg,#f59e0b,#ec4899 55%,#8b5cf6)}
+@media (prefers-color-scheme:dark){:root{--bg:#0b0f1a;--card:#141a29;--ink:#f1f5f9;--mut:#94a3b8;--line:#263044;--soft:#1b2335}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.75 Vazirmatn,Vazir,IRANSans,Tahoma,system-ui,sans-serif}
+body{padding-bottom:calc(78px + env(safe-area-inset-bottom))}
+button,input,textarea,select{font:inherit;color:inherit}
+button{cursor:pointer;border:0;background:none;padding:0}
+a{color:var(--info)}
+p{margin:0}
+.ic{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:none;vertical-align:middle}
+.hide{display:none!important}
+.ltr{direction:ltr;unicode-bidi:isolate}
+input.ltr,textarea.ltr{text-align:left}
+.muted{color:var(--mut)}.sm{font-size:.86rem}.center{text-align:center}
+.row{display:flex;align-items:center;gap:10px}.grow{flex:1;min-width:0}.wrap{flex-wrap:wrap}
+.col{display:flex;flex-direction:column;gap:10px}
+.up{color:var(--ok)}.down{color:var(--bad)}
+#top{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:10px 14px;display:flex;align-items:center;gap:10px}
+#top>img{width:36px;height:36px;border-radius:11px}
+#top h1{margin:0;font-size:1.05rem;line-height:1.3;direction:ltr;text-align:right}
+#top .sub{font-size:.8rem;color:var(--mut);display:flex;align-items:center;gap:6px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--ok);display:inline-block;flex:none}
+.dot.off{background:var(--mut)}.dot.bad{background:var(--bad)}.dot.warn{background:var(--warn)}
+main{padding:14px;max-width:640px;margin:0 auto;display:flex;flex-direction:column;gap:12px}
+#nav{position:fixed;bottom:0;left:0;right:0;z-index:6;background:var(--card);border-top:1px solid var(--line);display:flex;padding:6px 4px calc(6px + env(safe-area-inset-bottom))}
+#nav button{flex:1;display:flex;flex-direction:column;align-items:center;gap:1px;font-size:.74rem;color:var(--mut);padding:4px 0;position:relative}
+#nav button.on{color:var(--pri)}
+.badge{background:var(--pri);color:#fff;border-radius:99px;font-size:.7rem;min-width:19px;height:19px;padding:0 5px;display:inline-flex;align-items:center;justify-content:center;line-height:1;font-weight:700}
+#nav .badge,.iconbtn .badge{position:absolute;top:-2px;inset-inline-start:calc(50% + 2px)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:14px}
+button.card,.tap{width:100%;text-align:start}
+.card.ok{border-color:var(--ok)}.card.bad{border-color:var(--bad)}.card.off{opacity:.6}
+h2{font-size:1.05rem;margin:0}
+h3{font-size:.9rem;margin:6px 4px -4px;color:var(--mut)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:9px 16px;border-radius:14px;background:var(--soft);border:1px solid var(--line);font-weight:600;min-height:44px;text-decoration:none;color:var(--ink)}
+.btn.pri{background:var(--grad);color:#fff;border:0}
+.btn.danger{color:var(--bad)}
+.btn.sm{padding:5px 12px;min-height:36px;font-size:.88rem}
+.btn.block{width:100%}
+button:disabled{opacity:.5}
+.iconbtn{width:40px;height:40px;border-radius:12px;display:inline-flex;align-items:center;justify-content:center;position:relative;flex:none}
+.in{width:100%;padding:9px 12px;border-radius:12px;border:1px solid var(--line);background:var(--soft);outline:0;min-height:44px}
+.in:focus{border-color:var(--pri)}
+textarea.in{resize:vertical;display:block}
+label.f{font-size:.85rem;color:var(--mut);display:block;margin:6px 2px -4px}
+.pill{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:99px;padding:1px 10px;font-size:.8rem;color:var(--mut);white-space:nowrap}
+.pill .ic{width:14px;height:14px}
+.pill.ok{color:var(--ok);border-color:var(--ok)}.pill.warn{color:var(--warn);border-color:var(--warn)}.pill.bad{color:var(--bad);border-color:var(--bad)}.pill.info{color:var(--info);border-color:var(--info)}.pill.pri{background:var(--pri);color:#fff;border-color:var(--pri)}
+.seg{display:flex;background:var(--soft);border:1px solid var(--line);border-radius:14px;padding:4px;gap:4px}
+.seg button{flex:1;padding:7px 4px;border-radius:10px;font-weight:600;color:var(--mut);display:flex;gap:6px;align-items:center;justify-content:center}
+.seg button.on{background:var(--card);color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.18)}
+.chips{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.chip{border:1px solid var(--line);border-radius:99px;padding:5px 12px;font-size:.86rem;background:var(--card)}
+.chip.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.sw{width:52px;height:30px;border-radius:99px;background:var(--line);position:relative;flex:none;transition:background .15s}
+.sw::after{content:"";position:absolute;top:3px;inset-inline-start:3px;width:24px;height:24px;border-radius:50%;background:#fff;transition:transform .15s;box-shadow:0 1px 3px rgba(0,0,0,.3)}
+.sw.on{background:var(--ok)}.sw.on::after{transform:translateX(-22px)}
+.line{padding:8px 0;border-bottom:1px solid var(--line)}.line:last-child{border-bottom:0;padding-bottom:0}
+.avatar{width:54px;height:54px;border-radius:50%;object-fit:cover;background:var(--grad);flex:none;display:inline-flex;align-items:center;justify-content:center;color:#fff;font-weight:700}
+.avatar.s{width:42px;height:42px}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);text-align:center;margin-top:12px}
+.stats b{display:block;font-size:1.15rem}.stats span{font-size:.8rem;color:var(--mut)}
+.thumb{width:58px;height:58px;border-radius:12px;background:var(--soft);flex:none;display:flex;align-items:center;justify-content:center;color:var(--mut);overflow:hidden}
+.thumb.s{width:42px;height:42px;border-radius:10px}
+.thumb img,.thumb video,.mitem img,.mitem video{width:100%;height:100%;object-fit:cover;display:block}
+.clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.pre{white-space:pre-wrap;overflow-wrap:anywhere}
+.empty{text-align:center;color:var(--mut);padding:30px 10px;display:flex;flex-direction:column;align-items:center;gap:10px}
+.empty>.ic{width:40px;height:40px;opacity:.6}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}
+.tile{aspect-ratio:1;border-radius:10px;overflow:hidden;position:relative;background:var(--soft);display:block}
+.tile img{width:100%;height:100%;object-fit:cover;display:block}
+.tile .meta{position:absolute;inset:auto 0 0 0;padding:16px 6px 3px;background:linear-gradient(transparent,rgba(0,0,0,.7));color:#fff;font-size:.74rem;display:flex;gap:6px;justify-content:center;align-items:center}
+.tile .meta .ic{width:13px;height:13px}
+.tile .kind{position:absolute;top:6px;inset-inline-start:6px;color:#fff;filter:drop-shadow(0 1px 2px rgba(0,0,0,.6))}
+.kpis{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:10px 12px}
+.kpi b{font-size:1.2rem}
+.chat{display:flex;flex-direction:column;gap:6px}
+.bubble{max-width:86%;padding:7px 12px;border-radius:16px;background:var(--soft);align-self:flex-start;white-space:pre-wrap;overflow-wrap:anywhere}
+.bubble.me{align-self:flex-end;background:var(--pri);color:#fff}
+.bubble small{display:block;opacity:.75;font-size:.72rem;direction:rtl}
+.sheet{position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.5);display:flex;align-items:flex-end;justify-content:center}
+.panel{background:var(--bg);width:100%;max-width:640px;max-height:92vh;max-height:92dvh;border-radius:22px 22px 0 0;display:flex;flex-direction:column}
+.panel .head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 16px;border-bottom:1px solid var(--line)}
+.panel .body{padding:14px;overflow:auto;display:flex;flex-direction:column;gap:12px;flex:1}
+.panel .foot{padding:10px 14px calc(10px + env(safe-area-inset-bottom));border-top:1px solid var(--line);display:flex;gap:8px;align-items:center}
+.panel .foot .btn{flex:1}
+#toasts{position:fixed;top:12px;left:0;right:0;z-index:40;display:flex;flex-direction:column;align-items:center;gap:8px;pointer-events:none}
+.toast{background:var(--card);border:1px solid var(--ok);border-radius:14px;padding:8px 14px;box-shadow:0 6px 20px rgba(0,0,0,.25);max-width:90%}
+.toast.bad{border-color:var(--bad)}
+#fab{position:fixed;bottom:calc(88px + env(safe-area-inset-bottom));inset-inline-end:16px;z-index:7;width:54px;height:54px;border-radius:18px;background:var(--grad);color:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 8px 22px rgba(236,72,153,.4)}
+.kinds{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.kinds button{border:1px solid var(--line);background:var(--card);border-radius:14px;padding:9px 4px;display:flex;flex-direction:column;align-items:center;gap:2px;font-size:.85rem;color:var(--mut)}
+.kinds button.on{border-color:var(--pri);color:var(--ink);box-shadow:inset 0 0 0 1px var(--pri)}
+.strip{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px}
+.mitem{width:92px;height:116px;border-radius:12px;overflow:hidden;position:relative;flex:none;background:var(--soft);display:flex;align-items:center;justify-content:center;color:var(--mut);font-size:.78rem;text-align:center}
+.mitem .fit{width:100%;height:100%;display:flex;align-items:center;justify-content:center}
+.mitem .rm{position:absolute;top:4px;inset-inline-end:4px;width:26px;height:26px;border-radius:50%;background:rgba(0,0,0,.6);color:#fff;display:flex;align-items:center;justify-content:center}
+.mitem .rm .ic{width:14px;height:14px}
+.mitem .tag{position:absolute;bottom:4px;inset-inline-start:4px;background:rgba(0,0,0,.6);color:#fff;border-radius:6px;padding:0 6px;font-size:.7rem}
+.mitem.add{border:2px dashed var(--line);flex-direction:column;gap:4px;background:none}
+.big{width:100%;border-radius:16px;max-height:46vh;object-fit:cover;display:block;background:var(--soft)}
+.hero{text-align:center;padding:14px 6px;display:flex;flex-direction:column;align-items:center;gap:6px}
+.hero img{width:72px;height:72px;border-radius:20px}
+ol.steps{padding-inline-start:22px;margin:0;display:flex;flex-direction:column;gap:8px}
+code{background:var(--soft);border:1px solid var(--line);border-radius:6px;padding:0 6px;direction:ltr;unicode-bidi:isolate;font-size:.86em;display:inline-block}
+details.box{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:12px 14px}
+details.box summary{font-weight:700;cursor:pointer;list-style:none;display:flex;gap:8px;align-items:center}
+details.box summary::-webkit-details-marker{display:none}
+details.box[open] summary{margin-bottom:10px}
+details.box>.col{gap:8px}
+.logline{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--line)}
+.logline:last-child{border-bottom:0}
+.logline .dot{margin-top:10px}
+.bar{height:8px;border-radius:99px;background:var(--soft);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--grad);border-radius:99px}
+.spark{width:100%;height:70px;direction:ltr}
+.spark polyline{fill:none;stroke:var(--pri);stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round}
+</style>
+</head>
+<body>
+<header id="top" class="hide"></header>
+<main id="view"><div class="empty">در حال اتصال به ایجنت…</div></main>
+<nav id="nav" class="hide"></nav>
+<button id="fab" class="hide" aria-label="پست جدید"></button>
+<div id="sheets"></div>
+<div id="toasts"></div>
+<script nonce="__NONCE__">
+'use strict';
+const D = document, $ = (s, r) => (r || D).querySelector(s);
+const S = {st: null, authed: true, tab: 'home', sub: {content: 'queue', inbox: 'comments'}, filter: 'open', days: 7, seq: 0, refresh: false};
+const VIEWS = {};
+const ICONS = {
+  home: 'M3 10l9-7 9 7v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z M9 22V12h6v10', grid: 'M3 3h7v7H3z M14 3h7v7h-7z M14 14h7v7h-7z M3 14h7v7H3z',
+  chat: 'M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z',
+  bars: 'M18 20V10 M12 20V4 M6 20v-6', bot: 'M12 8V4 M5 8h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z M9 13v2 M15 13v2',
+  plus: 'M12 5v14 M5 12h14', x: 'M18 6L6 18 M6 6l12 12', send: 'M22 2L11 13 M22 2l-7 20-4-9-9-4 20-7z',
+  bell: 'M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9 M13.73 21a2 2 0 0 1-3.46 0', clock: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M12 6v6l4 2',
+  check: 'M20 6L9 17l-5-5', image: 'M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z M8.5 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z M21 15l-5-5L5 21',
+  layers: 'M12 2L2 7l10 5 10-5-10-5z M2 17l10 5 10-5 M2 12l10 5 10-5', film: 'M4 2h16a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z M7 2v20 M17 2v20 M2 12h20 M2 7h5 M2 17h5 M17 17h5 M17 7h5',
+  story: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M12 8v8 M8 12h8', refresh: 'M23 4v6h-6 M1 20v-6h6 M3.51 9a9 9 0 0 1 14.85-3.36L23 10 M1 14l4.64 4.36A9 9 0 0 0 20.49 15',
+  more: 'M12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2z M19 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2z M5 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2z',
+  trash: 'M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2',
+  eyeoff: 'M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94 M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19 M1 1l22 22',
+  eye: 'M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z', edit: 'M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z',
+  zap: 'M13 2L3 14h9l-1 8 10-12h-9l1-8z', settings: 'M4 21v-7 M4 10V3 M12 21v-9 M12 8V3 M20 21v-5 M20 12V3 M1 14h6 M9 8h6 M17 16h6',
+  heart: 'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z',
+  chev: 'M15 18l-6-6 6-6', upload: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M17 8l-5-5-5 5 M12 3v12',
+  lock: 'M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z M7 11V7a5 5 0 0 1 10 0v4',
+  hash: 'M4 9h16 M4 15h16 M10 3L8 21 M16 3l-2 18', external: 'M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14L21 3',
+  alert: 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z M12 9v4 M12 17h.01',
+  spark: 'M12 3l1.8 5.6L19.5 10l-5.7 1.6L12 17l-1.8-5.4L4.5 10l5.7-1.4z M19 16v4 M17 18h4', link: 'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71 M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71',
+  help: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3 M12 17h.01', calendar: 'M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M16 2v4 M8 2v4 M3 10h18'
+};
+const KIND = {image: ['پست', 'image'], carousel: ['چندتایی', 'layers'], reel: ['ریل', 'film'], story: ['استوری', 'story']};
+const STATUS = {draft: ['پیش‌نویس', ''], scheduled: ['زمان‌بندی‌شده', 'info'], publishing: ['در حال انتشار', 'warn'], published: ['منتشرشده', 'ok'], failed: ['ناموفق', 'bad'], missed: ['جامانده', 'warn'], canceled: ['لغوشده', '']};
+
+/* ───── tiny DOM helpers: every piece of text goes in as a text node, never as HTML ───── */
+function svg(tag) { return D.createElementNS('http://www.w3.org/2000/svg', tag); }
+function icon(n, cls) {
+  const s = svg('svg'), p = svg('path');
+  s.setAttribute('viewBox', '0 0 24 24'); s.setAttribute('class', 'ic' + (cls ? ' ' + cls : '')); s.setAttribute('aria-hidden', 'true');
+  p.setAttribute('d', ICONS[n] || ''); s.appendChild(p);
+  return s;
+}
+function add(el, ...kids) {
+  for (const k of kids.flat(9)) { if (k == null || k === false || k === '') continue; el.appendChild(k.nodeType ? k : D.createTextNode(String(k))); }
+  return el;
+}
+function h(tag, a, ...kids) {
+  const el = D.createElement(tag);
+  for (const k in (a || {})) {
+    const v = a[k];
+    if (v == null || v === false) continue;
+    if (k.slice(0, 2) === 'on') el.addEventListener(k.slice(2), v);
+    else if (k === 'class') el.className = v;
+    else if (k === 'value') el.value = v;
+    else if (['checked', 'disabled', 'open', 'muted', 'multiple'].includes(k)) el[k] = !!v;
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  return add(el, kids);
+}
+function fill(el, ...kids) { el.textContent = ''; return add(el, ...kids); }
+const fa = n => (n == null || n === '' ? '—' : Number(n).toLocaleString('fa-IR'));
+const two = n => String(n).padStart(2, '0');
+function ago(ts) {
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 60) return 'همین حالا';
+  if (s < 3600) return fa(Math.floor(s / 60)) + ' دقیقه پیش';
+  if (s < 86400) return fa(Math.floor(s / 3600)) + ' ساعت پیش';
+  if (s < 86400 * 30) return fa(Math.floor(s / 86400)) + ' روز پیش';
+  return new Date(ts * 1000).toLocaleDateString('fa-IR');
+}
+function day(d) { return d.toLocaleDateString('fa-IR', {weekday: 'long', day: 'numeric', month: 'long'}); }
+function when(ts) { const d = new Date(ts * 1000); return day(d) + '، ساعت ' + d.toLocaleTimeString('fa-IR', {hour: '2-digit', minute: '2-digit'}); }
+function igts(s) { return Date.parse(String(s || '').replace(/([+-]\d\d)(\d\d)$/, '$1:$2')) / 1000; }
+
+/* ───── talking to the agent ───── */
+function Err(message, status, silent) { this.message = message; this.status = status; this.silent = !!silent; }
+async function api(method, path, body, raw) {
+  const opt = {method, headers: {'X-IA': '1'}, credentials: 'same-origin'};
+  if (raw) { opt.body = body; opt.headers['Content-Type'] = 'application/octet-stream'; }
+  else if (body !== undefined) { opt.body = JSON.stringify(body); opt.headers['Content-Type'] = 'application/json'; }
+  let res;
+  try { res = await fetch(path, opt); }
+  catch (e) { throw new Err('ارتباط با ایجنت قطع است. برنامه (ترموکس) هنوز باز است؟', 0); }
+  let data = {};
+  try { data = await res.json(); } catch (e) { /* not JSON */ }
+  if (res.status === 401 && data.code === 'auth') { S.authed = false; render(true); throw new Err(data.error, 401, true); }
+  if (!res.ok) throw new Err(data.error || ('خطای ' + res.status), res.status);
+  return data;
+}
+const GET = p => api('GET', p), POST = (p, b) => api('POST', p, b || {}), DEL = p => api('DELETE', p);
+function toast(msg, kind) {
+  const t = h('div', {class: 'toast ' + (kind || ''), role: 'status'}, msg);
+  $('#toasts').appendChild(t);
+  setTimeout(() => t.remove(), kind === 'bad' ? 6500 : 3000);
+}
+/* run an action from a button: the button is disabled meanwhile and errors become toasts */
+async function run(btn, fn) {
+  if (btn) btn.disabled = true;
+  try { return await fn(); }
+  catch (e) { if (!e || !e.silent) toast((e && e.message) || 'خطا', 'bad'); }
+  finally { if (btn) btn.disabled = false; }
+}
+async function refresh() { S.st = await GET('/api/status'); if (S.st.connected) { paintTop(); paintNav(); } }
+
+/* ───── bottom sheets ───── */
+function sheet(title, o) {
+  o = o || {};
+  const body = h('div', {class: 'body'}), foot = h('div', {class: 'foot hide'}), ttl = h('h2', null, title);
+  const s = {body, foot, title: ttl, onclose: o.onclose,
+    close() { if (!el.isConnected) return; el.remove(); if (s.onclose) s.onclose(); },
+    setFoot(...k) { foot.classList.remove('hide'); fill(foot, ...k); }};
+  const el = h('div', {class: 'sheet'}, h('div', {class: 'panel', role: 'dialog', 'aria-modal': 'true'},
+    h('div', {class: 'head'}, ttl, h('button', {class: 'iconbtn', 'aria-label': 'بستن', onclick: () => s.close()}, icon('x'))), body, foot));
+  el.addEventListener('click', e => { if (e.target === el) s.close(); });
+  $('#sheets').appendChild(el);
+  return s;
+}
+function ask(msg, ok, danger) {
+  return new Promise(res => {
+    const s = sheet('مطمئنی؟', {onclose: () => res(false)});
+    add(s.body, h('p', null, msg));
+    s.setFoot(h('button', {class: 'btn', onclick: () => s.close()}, 'نه'), h('button', {class: 'btn ' + (danger ? 'danger' : 'pri'), onclick: () => { res(true); s.close(); }}, ok || 'بله'));
+  });
+}
+function field(label, input, hint) { return [h('label', {class: 'f'}, label), input, hint ? h('div', {class: 'muted sm'}, hint) : null]; }
+function segment(items, cur, fn) {
+  return h('div', {class: 'seg'}, items.map(i => h('button', {class: cur === i[0] ? 'on' : '', 'data-seg': i[0], onclick: () => fn(i[0])}, i[1], i[2] ? h('span', {class: 'badge'}, fa(i[2])) : null)));
+}
+function empty(ic, text, extra) { return h('div', {class: 'empty'}, icon(ic), h('div', null, text), extra); }
+function toggle(on, fn, label) {
+  const b = h('button', {class: 'sw' + (on ? ' on' : ''), role: 'switch', 'aria-checked': String(!!on), 'aria-label': label || ''});
+  b.addEventListener('click', () => run(b, async () => { const v = !b.classList.contains('on'); await fn(v); b.classList.toggle('on', v); b.setAttribute('aria-checked', String(v)); }));
+  return b;
+}
+function thumb(src, type, cls) {
+  const box = h('span', {class: cls || 'thumb'}), ph = () => fill(box, icon(type === 'video' ? 'film' : 'image'));
+  if (!src) { ph(); return box; }
+  const el = type === 'video' && !/\.(svg|jpe?g|png)$/i.test(src) ? h('video', {src: src + '#t=0.1', muted: true, playsinline: '', preload: 'metadata'}) : h('img', {src, alt: '', loading: 'lazy'});
+  el.addEventListener('error', ph);
+  return add(box, el);
+}
+async function saveSettings(patch, msg) { await POST('/api/settings', patch); await refresh(); if (msg !== false) toast(msg || 'ذخیره شد'); }
+
+/* ───── frame: header, tabs, polling ───── */
+const TABS = [['home', 'خانه', 'home'], ['content', 'محتوا', 'grid'], ['inbox', 'گفتگوها', 'chat'], ['stats', 'آمار', 'bars'], ['agent', 'ایجنت', 'bot']];
+function paintTop() {
+  const st = S.st, a = st.account;
+  const state = a.invalid ? ['bad', 'اتصال پیج قطع است'] : !st.autopilot ? ['off', 'ایجنت متوقف است'] : st.busy ? ['warn', 'اینستاگرام موقتاً محدود کرده؛ کمی صبر'] : ['', 'ایجنت روشن است'];
+  fill($('#top'), h('img', {src: '/icon.svg', alt: ''}),
+    h('div', {class: 'grow'}, h('h1', null, '@' + a.username), h('div', {class: 'sub'}, h('i', {class: 'dot ' + state[0]}), (st.demo ? 'حالت نمایشی — ' : '') + state[1])),
+    h('button', {class: 'iconbtn', 'aria-label': 'اعلان‌ها', onclick: notesSheet}, icon('bell'), st.counts.unseen ? h('span', {class: 'badge'}, fa(st.counts.unseen)) : null));
+}
+function paintNav() {
+  const c = S.st.counts, n = c.open_comments + c.open_dms;
+  fill($('#nav'), TABS.map(t => h('button', {class: S.tab === t[0] ? 'on' : '', 'data-tab': t[0], onclick: () => go(t[0])}, icon(t[2]), t[1], t[0] === 'inbox' && n ? h('span', {class: 'badge'}, fa(n)) : null)));
+  $('#fab').classList.toggle('hide', S.tab !== 'content' || !!S.st.account.invalid);
+}
+function go(tab, sub) { S.tab = tab; if (sub) S.sub[tab] = sub; window.scrollTo(0, 0); render(true); }
+async function render(fresh) {
+  const view = $('#view'), st = S.st;
+  const chrome = on => { $('#top').classList.toggle('hide', !on); $('#nav').classList.toggle('hide', !on); if (!on) $('#fab').classList.add('hide'); };
+  S.seq++;
+  if (!S.authed) { chrome(false); return fill(view, loginView()); }
+  if (!st) { chrome(false); return fill(view, h('div', {class: 'empty'}, 'در حال اتصال به ایجنت…')); }
+  if (!st.connected) { chrome(false); return fill(view, connectView()); }
+  chrome(true); paintTop(); paintNav();
+  const my = S.seq;
+  if (fresh) fill(view, h('div', {class: 'empty'}, 'در حال بارگذاری…'));
+  try { const kids = await VIEWS[S.tab](); if (my === S.seq) fill(view, kids); }
+  catch (e) { if (my === S.seq && !(e && e.silent)) fill(view, h('div', {class: 'card bad'}, (e && e.message) || 'خطا'), h('button', {class: 'btn', onclick: () => render(true)}, icon('refresh'), 'تلاش دوباره')); }
+}
+async function poll() {
+  if (D.hidden || !S.authed) return;
+  const prev = S.st;
+  try { S.st = await GET('/api/status'); } catch (e) { return; }
+  if (!prev || prev.connected !== S.st.connected) return render(true);
+  if (!S.st.connected) return;
+  paintTop(); paintNav();
+  const sig = s => JSON.stringify([s.counts, s.autopilot, s.auto, s.account.invalid, s.account.followers, s.next_post && s.next_post.id]);
+  const typing = /INPUT|TEXTAREA|SELECT/.test((D.activeElement || {}).tagName || '');
+  if (sig(prev) !== sig(S.st) && !typing && !$('#sheets').childElementCount) render(false);
+}
+
+/* ───── login & connect ───── */
+function loginView() {
+  const inp = h('input', {class: 'in ltr center', placeholder: 'ABCDE-FGHJK', autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false', 'aria-label': 'کد ورود'});
+  const btn = h('button', {class: 'btn pri block', type: 'submit'}, icon('lock'), 'ورود');
+  const submit = e => { e.preventDefault(); run(btn, async () => { await POST('/api/login', {key: inp.value}); S.authed = true; S.st = await GET('/api/status'); render(true); }); };
+  return [h('div', {class: 'hero'}, h('img', {src: '/icon.svg', alt: ''}), h('h2', null, 'ایجنت اینستاگرام'), h('p', {class: 'muted'}, 'کدی را که هنگام اجرای برنامه در ترمینال نشان داده شد وارد کن.')),
+    h('form', {class: 'card col', onsubmit: submit}, h('label', {class: 'f'}, 'کد ورود (Key)'), inp, btn,
+      h('p', {class: 'muted sm'}, 'کد را گم کرده‌ای؟ در ترمینال بزن: ', h('code', null, 'python insta_agent.py --show-key')))];
+}
+function guide() {
+  const li = (...k) => h('li', null, k);
+  return h('ol', {class: 'steps'},
+    li('پیج باید «حرفه‌ای» (Business یا Creator) باشد: در اینستاگرام ← تنظیمات ← نوع حساب ← «تغییر به حساب حرفه‌ای» (رایگان است).'),
+    li('در سایت ', h('a', {href: 'https://developers.facebook.com/apps/', target: '_blank', rel: 'noopener'}, 'developers.facebook.com'), ' وارد شو، «Create App» را بزن و نوع «Business» را انتخاب کن.'),
+    li('در برنامه‌ای که ساختی محصول «Instagram» را اضافه کن و به بخش «API setup with Instagram login» برو.'),
+    li('در قسمت «Generate access tokens» پیج خودت را اضافه کن، همهٔ دسترسی‌ها را تأیید کن و «Generate token» را بزن.'),
+    li('توکن (رشتهٔ بلندی که با IGAA شروع می‌شود) را کپی کن و همین‌جا بچسبان.'));
+}
+function tokenBox(done) {
+  const ta = h('textarea', {class: 'in ltr', rows: 3, placeholder: 'IGAA…', 'aria-label': 'توکن', spellcheck: 'false', autocomplete: 'off'});
+  const btn = h('button', {class: 'btn pri block', onclick: () => run(btn, async () => { S.st = await POST('/api/connect', {token: ta.value}); toast('پیج وصل شد ✓'); done(); })}, icon('link'), 'اتصال به پیج');
+  return [field('توکن دسترسی (Access Token)', ta), btn];
+}
+function connectView() {
+  const a = (S.st.account || {}), proxy = h('input', {class: 'in ltr', placeholder: 'http://127.0.0.1:10809', 'aria-label': 'پروکسی'});
+  GET('/api/settings').then(s => { proxy.value = s.network.proxy; }).catch(() => {});
+  return [h('div', {class: 'hero'}, h('img', {src: '/icon.svg', alt: ''}), h('h2', null, 'پیج را یک بار وصل کن'),
+      h('p', {class: 'muted'}, 'ایجنت فقط از راه رسمی اینستاگرام (توکن) وصل می‌شود و هیچ‌وقت رمز پیج را نمی‌خواهد.')),
+    a.last_username ? h('div', {class: 'card sm'}, 'آخرین پیج وصل‌شده: ', h('b', {class: 'ltr'}, '@' + a.last_username)) : null,
+    h('div', {class: 'card col'}, tokenBox(() => { S.tab = 'home'; render(true); })),
+    h('details', {class: 'box', open: true}, h('summary', null, icon('help'), 'توکن را از کجا بیاورم؟ (حدود ۵ دقیقه، فقط یک بار)'), guide(),
+      h('p', {class: 'muted sm'}, 'توکن ۶۰ روز اعتبار دارد و ایجنت خودش تمدیدش می‌کند. توکن فقط روی همین دستگاه نگه داشته می‌شود.')),
+    h('details', {class: 'box'}, h('summary', null, icon('settings'), 'اینستاگرام بدون فیلترشکن باز نمی‌شود؟'),
+      h('div', {class: 'col'}, h('p', {class: 'muted sm'}, 'نشانی پروکسی HTTP فیلترشکن را بنویس (در v2rayNG معمولاً http://127.0.0.1:10809).'),
+        h('div', {class: 'row'}, proxy, h('button', {class: 'btn sm', onclick: e => run(e.currentTarget, async () => { await POST('/api/settings', {network: {proxy: proxy.value}}); toast('ذخیره شد'); })}, 'ذخیره'))))];
+}
+function tokenSheet() {
+  const s = sheet('توکن تازه');
+  add(s.body, h('p', {class: 'muted sm'}, 'اگر توکن باطل شده یا می‌خواهی پیج دیگری وصل کنی، توکن تازه را اینجا بچسبان.'), tokenBox(() => { s.close(); render(true); }),
+    h('details', {class: 'box'}, h('summary', null, icon('help'), 'راهنمای ساختن توکن'), guide()));
+}
+
+/* ───── home ───── */
+function stat(n, label) { return h('div', null, h('b', null, fa(n)), h('span', null, label)); }
+function navRow(ic, text, fn) { return h('button', {class: 'card row', onclick: fn}, icon(ic), h('b', {class: 'grow'}, text), icon('chev')); }
+function logLine(l) {
+  return h('div', {class: 'logline'}, h('i', {class: 'dot ' + ({alert: 'bad', warn: 'warn', ok: ''}[l.level] != null ? {alert: 'bad', warn: 'warn', ok: ''}[l.level] : 'off')}),
+    h('div', {class: 'grow'}, h('div', {class: 'pre'}, l.text), h('small', {class: 'muted'}, ago(l.ts))));
+}
+VIEWS.home = async () => {
+  const st = S.st, a = st.account, c = st.counts, au = st.auto, out = [];
+  if (a.invalid) out.push(h('div', {class: 'card bad col'}, h('b', null, 'اتصال پیج قطع شده است'), h('div', {class: 'sm'}, a.invalid), h('button', {class: 'btn pri', onclick: tokenSheet}, 'دادن توکن تازه')));
+  out.push(h('div', {class: 'card'}, h('div', {class: 'row'}, a.picture ? h('img', {class: 'avatar', src: a.picture, alt: ''}) : h('span', {class: 'avatar'}),
+      h('div', {class: 'grow'}, h('b', null, a.name || a.username), h('div', {class: 'muted sm ltr'}, '@' + a.username)), st.demo ? h('span', {class: 'pill warn'}, 'نمایشی') : null),
+    h('div', {class: 'stats'}, stat(a.followers, 'دنبال‌کننده'), stat(a.follows, 'دنبال‌شونده'), stat(a.media_count, 'پست'))));
+  out.push(h('div', {class: 'card row' + (st.autopilot ? ' ok' : '')}, h('div', {class: 'grow'}, h('b', null, st.autopilot ? 'ایجنت روشن است' : 'ایجنت متوقف است'),
+      h('div', {class: 'muted sm'}, st.autopilot ? 'انتشار زمان‌بندی‌شده و کارهای خودکار فعال‌اند.' : 'تا دوباره روشنش نکنی هیچ کار خودکاری انجام نمی‌شود.')),
+    toggle(st.autopilot, async v => { await saveSettings({autopilot: v}, v ? 'ایجنت روشن شد' : 'ایجنت متوقف شد'); render(false); }, 'روشن یا متوقف کردن ایجنت')));
+  const todo = [];
+  if (c.open_comments) todo.push(navRow('chat', fa(c.open_comments) + ' کامنت منتظر پاسخ', () => go('inbox', 'comments')));
+  if (c.open_dms) todo.push(navRow('send', fa(c.open_dms) + ' دایرکت منتظر پاسخ', () => go('inbox', 'dm')));
+  if (c.failed) todo.push(navRow('alert', fa(c.failed) + ' پست منتشرنشده', () => go('content', 'queue')));
+  out.push(h('h3', null, 'کارهای منتظر تو'), todo.length ? todo : h('div', {class: 'card muted'}, icon('check'), ' همه‌چیز رسیدگی شده است.'));
+  out.push(h('h3', null, 'انتشار'), st.next_post ? postCard(st.next_post) : null,
+    h('div', {class: 'card col'}, h('div', {class: 'chips'}, h('span', {class: 'pill info'}, icon('clock'), fa(c.scheduled) + ' در صف'), h('span', {class: 'pill'}, icon('edit'), fa(c.drafts) + ' پیش‌نویس'),
+        h('span', {class: 'pill ok'}, icon('check'), fa(c.published_today) + ' انتشار امروز'), st.quota ? h('span', {class: 'pill'}, 'سقف اینستاگرام: ' + fa(st.quota.used) + ' از ' + fa(st.quota.total)) : null),
+      st.media.ready ? null : h('div', {class: 'sm down'}, 'برای انتشار از گالری هنوز «لینک عمومی» تنظیم نشده است (ایجنت ← تنظیمات).'),
+      h('button', {class: 'btn pri', onclick: () => composer()}, icon('plus'), 'پست جدید')));
+  const pill = (on, t) => h('span', {class: 'pill ' + (on ? 'ok' : '')}, t + ': ' + (on ? 'روشن' : 'خاموش'));
+  out.push(h('h3', null, 'ایجنت امروز'), h('div', {class: 'card col'}, h('div', {class: 'chips'}, h('span', {class: 'pill'}, icon('zap'), fa(c.auto_today) + ' کار خودکار'),
+      pill(au.comment_reply, 'پاسخ کامنت'), pill(au.spam_hide, 'ضد اسپم'), pill(au.dm_reply, 'پاسخ دایرکت')),
+    st.quiet ? h('div', {class: 'muted sm'}, 'الان ساعت سکوت است؛ پاسخ‌های خودکار بعد از آن فرستاده می‌شوند.') : null,
+    h('button', {class: 'btn sm', onclick: () => go('agent')}, icon('settings'), 'تنظیم کارهای خودکار')));
+  const log = await GET('/api/log?limit=4');
+  if (log.items.length) out.push(h('h3', null, 'آخرین رویدادها'), h('div', {class: 'card'}, log.items.map(logLine)));
+  return out;
+};
+async function notesSheet() {
+  const s = sheet('اعلان‌ها');
+  try {
+    const d = await GET('/api/log?limit=80');
+    fill(s.body, d.items.length ? h('div', {class: 'card'}, d.items.map(logLine)) : empty('bell', 'هنوز رویدادی ثبت نشده است.'));
+    await POST('/api/log/seen'); await refresh();
+  } catch (e) { fill(s.body, h('div', {class: 'card bad'}, e.message)); }
+}
+
+/* ───── content: queue, drafts, page ───── */
+function postCard(p) {
+  const m = p.media[0], st = STATUS[p.status];
+  const sub = p.status === 'scheduled' ? when(p.scheduled_at) : p.status === 'publishing' ? (p.progress || 'در حال انتشار…') : p.status === 'published' ? ago(p.published_at)
+    : (p.status === 'failed' || p.status === 'missed') ? p.error : 'آخرین تغییر: ' + ago(p.updated_at);
+  return h('button', {class: 'card row', 'data-post': p.id, onclick: () => postSheet(p.id)}, thumb(m && !m.missing ? m.preview : '', m ? m.type : 'image'),
+    h('div', {class: 'grow'}, h('div', {class: 'chips'}, h('span', {class: 'pill ' + st[1]}, st[0]), h('span', {class: 'pill'}, icon(KIND[p.kind][1]), KIND[p.kind][0])),
+      h('div', {class: 'clamp'}, p.caption || '— بدون کپشن —'), h('div', {class: 'muted sm clamp'}, sub)));
+}
+function tile(m) {
+  const src = m.thumbnail_url || m.media_url, k = m.media_type === 'VIDEO' ? 'film' : m.media_type === 'CAROUSEL_ALBUM' ? 'layers' : '';
+  const t = h('button', {class: 'tile', 'aria-label': 'پست', onclick: () => mediaSheet(m.id)});
+  if (src) { const img = h('img', {src, alt: '', loading: 'lazy'}); img.addEventListener('error', () => img.remove()); t.appendChild(img); }
+  return add(t, k ? h('span', {class: 'kind'}, icon(k)) : null, h('span', {class: 'meta'}, icon('heart'), fa(m.like_count), icon('chat'), fa(m.comments_count)));
+}
+VIEWS.content = async () => {
+  const c = S.st.counts, sub = S.sub.content;
+  const seg = segment([['queue', 'صف انتشار', c.scheduled + c.publishing + c.failed], ['drafts', 'پیش‌نویس‌ها'], ['page', 'صفحهٔ من']], sub, v => { S.sub.content = v; render(true); });
+  if (sub === 'page') {
+    const d = await GET('/api/media');
+    return [seg, d.items.length ? h('div', {class: 'grid'}, d.items.map(tile)) : empty('grid', 'هنوز پستی در پیج نیست.')];
+  }
+  const [d, done] = await Promise.all([GET('/api/posts?group=' + sub), sub === 'queue' ? GET('/api/posts?group=published') : {items: []}]);
+  const fresh = h('button', {class: 'btn pri', onclick: () => composer()}, icon('plus'), 'پست جدید');
+  return [seg, sub === 'drafts' ? h('button', {class: 'btn', onclick: planSheet}, icon('spark'), 'چیدن برنامهٔ محتوایی') : null,
+    d.items.length ? d.items.map(postCard) : empty('calendar', sub === 'queue' ? 'چیزی در صف انتشار نیست.' : 'پیش‌نویسی نداری.', fresh),
+    done.items.length ? [h('h3', null, 'منتشرشده از همین پنل'), done.items.slice(0, 6).map(postCard)] : null];
+};
+async function mediaSheet(id) {
+  const s = sheet('پست پیج');
+  fill(s.body, h('div', {class: 'empty'}, 'در حال بارگذاری…'));
+  try {
+    const d = await GET('/api/media/' + id), m = d.media, src = m.thumbnail_url || m.media_url;
+    fill(s.body, src ? h('img', {class: 'big', src, alt: ''}) : null, h('div', {class: 'pre'}, m.caption || ''), h('div', {class: 'muted sm'}, when(igts(m.timestamp))),
+      d.error ? h('div', {class: 'card bad sm'}, d.error) : h('div', {class: 'kpis'}, d.metrics.map(x => h('div', {class: 'kpi'}, h('b', null, fa(x.value)), h('div', {class: 'muted sm'}, x.label)))));
+    s.setFoot(m.permalink ? h('a', {class: 'btn', href: m.permalink, target: '_blank', rel: 'noopener'}, icon('external'), 'اینستاگرام') : null,
+      h('button', {class: 'btn', onclick: () => threadsSheet(id)}, icon('chat'), 'کامنت‌ها' + (d.open_comments ? ' (' + fa(d.open_comments) + ' منتظر)' : '')));
+  } catch (e) { fill(s.body, h('div', {class: 'card bad'}, e.message)); }
+}
+async function threadsSheet(mediaId) {
+  const s = sheet('کامنت‌های این پست', {onclose: () => render(false)});
+  try {
+    const d = await GET('/api/comments?filter=all&media=' + mediaId);
+    fill(s.body, d.items.length ? d.items.map(t => threadCard(t, true)) : empty('chat', 'کامنتی برای این پست ثبت نشده است.'));
+  } catch (e) { fill(s.body, h('div', {class: 'card bad'}, e.message)); }
+}
+function postSheet(id) {
+  let timer = 0, last = '';
+  const s = sheet('پست', {onclose: () => clearTimeout(timer)});
+  const load = async () => {
+    let p;
+    try { p = await GET('/api/posts/' + id); } catch (e) { s.close(); return; }
+    if (last && last !== p.status) render(false);
+    last = p.status;
+    const st = STATUS[p.status], again = async () => { await refresh(); render(false); await load(); };
+    fill(s.body, p.media.length ? h('div', {class: 'strip'}, p.media.map(m => thumb(m.missing ? '' : m.preview, m.type, 'mitem'))) : null,
+      h('div', {class: 'chips'}, h('span', {class: 'pill ' + st[1]}, st[0]), h('span', {class: 'pill'}, icon(KIND[p.kind][1]), KIND[p.kind][0])),
+      p.status === 'scheduled' ? h('div', {class: 'row'}, icon('clock'), when(p.scheduled_at)) : null,
+      p.status === 'publishing' ? h('div', {class: 'card'}, p.progress || 'در حال انتشار…', p.error ? h('div', {class: 'muted sm'}, 'آخرین مشکل: ' + p.error) : null) : null,
+      (p.status === 'failed' || p.status === 'missed') && p.error ? h('div', {class: 'card bad'}, p.error) : null,
+      p.status === 'published' ? h('div', {class: 'card ok'}, 'منتشر شد ✓ — ' + ago(p.published_at)) : null,
+      h('div', {class: 'pre'}, p.caption || '— بدون کپشن —'));
+    const act = (label, fn, cls, ic) => h('button', {class: 'btn ' + (cls || ''), onclick: e => run(e.currentTarget, fn)}, ic ? icon(ic) : null, label);
+    const kids = [];
+    if (p.status === 'publishing') timer = setTimeout(load, 1500);
+    else if (p.status === 'published') {
+      if (p.permalink) kids.push(h('a', {class: 'btn', href: p.permalink, target: '_blank', rel: 'noopener'}, icon('external'), 'دیدن در اینستاگرام'));
+      kids.push(act('کپی به پیش‌نویس', async () => { await POST('/api/posts/' + id + '/duplicate'); toast('در پیش‌نویس‌ها کپی شد'); s.close(); go('content', 'drafts'); }, '', 'layers'));
+    } else {
+      kids.push(act('حذف', async () => { if (await ask('این پست حذف شود؟', 'حذف', true)) { await DEL('/api/posts/' + id); s.close(); await refresh(); render(false); } }, 'danger', 'trash'));
+      kids.push(act('ویرایش', async () => { s.close(); composer(p); }, '', 'edit'));
+      if (p.status === 'scheduled') kids.push(act('لغو زمان', async () => { await POST('/api/posts/' + id + '/cancel'); toast('به پیش‌نویس‌ها برگشت'); await again(); }));
+      kids.push(act(p.status === 'failed' ? 'تلاش دوباره' : 'انتشار الان', async () => { await POST('/api/posts/' + id + '/publish'); await again(); }, 'pri', 'send'));
+    }
+    if (kids.length) s.setFoot(kids); else s.foot.classList.add('hide');
+  };
+  load();
+}
+async function planSheet() {
+  const s = sheet('برنامهٔ محتوایی'), n = h('select', {class: 'in', 'aria-label': 'تعداد'}, [3, 5, 7].map(x => h('option', {value: x}, fa(x) + ' ایده')));
+  n.value = '5';
+  const btn = h('button', {class: 'btn pri', onclick: () => run(btn, async () => {
+    const r = await POST('/api/ai/plan', {count: Number(n.value)});
+    toast(fa(r.items.length) + ' پیش‌نویس با کپشن ساخته شد'); s.close(); await refresh(); go('content', 'drafts');
+  })}, icon('spark'), 'بچین');
+  add(s.body, h('p', {class: 'muted'}, 'دستیار چند ایدهٔ پست می‌سازد و هر کدام را با کپشن و هشتگ در پیش‌نویس‌ها می‌گذارد. بعد عکس یا ویدیو را اضافه و زمان‌بندی کن.'), h('div', {class: 'row'}, n, btn));
+}
+
+/* ───── composer ───── */
+function loadImage(file) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); res(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('مرورگر نتوانست این عکس را باز کند.')); };
+    img.src = url;
+  });
+}
+/* Instagram only takes JPEG, at most 8 MB, between 4:5 and 1.91:1 → convert (and crop the middle) on the phone itself */
+async function prepImage(file, kind) {
+  const img = await loadImage(file);
+  let sw = img.naturalWidth, sh = img.naturalHeight, sx = 0, sy = 0, cropped = false;
+  if (kind !== 'story') {
+    const r = sw / sh;
+    if (r < 0.8) { const nh = Math.round(sw / 0.8); sy = Math.round((sh - nh) / 2); sh = nh; cropped = true; }
+    else if (r > 1.91) { const nw = Math.round(sh * 1.91); sx = Math.round((sw - nw) / 2); sw = nw; cropped = true; }
+  }
+  const scale = Math.min(1, 1440 / sw), cv = h('canvas', {width: Math.round(sw * scale), height: Math.round(sh * scale)}), ctx = cv.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height); ctx.drawImage(img, sx, sy, sw, sh, 0, 0, cv.width, cv.height);
+  let q = 0.9, blob = null;
+  do { blob = await new Promise(r => cv.toBlob(r, 'image/jpeg', q)); q -= 0.12; } while (blob && blob.size > 7.5e6 && q > 0.4);
+  if (!blob) throw new Error('تبدیل عکس انجام نشد.');
+  return {blob, cropped};
+}
+function composer(post) {
+  const p = post ? {id: post.id, kind: post.kind, caption: post.caption, opts: Object.assign({}, post.opts), mode: post.status === 'scheduled' ? 'later' : 'now', at: post.status === 'scheduled' ? post.scheduled_at : 0,
+      media: post.media.filter(m => !m.missing).map(m => m.file ? {file: m.file, type: m.type, preview: m.preview} : {url: m.url, type: m.type, preview: m.url})}
+    : {kind: 'image', caption: '', media: [], opts: {share_to_feed: true}, mode: 'now', at: 0};
+  const s = sheet(post ? 'ویرایش پست' : 'پست جدید');
+  const file = h('input', {type: 'file', class: 'hide'}), cap = h('textarea', {class: 'in', rows: 5, placeholder: 'کپشن…', 'aria-label': 'کپشن', value: p.caption});
+  const counter = h('div', {class: 'muted sm row'}), strip = h('div', {class: 'strip'}), kinds = h('div', {class: 'kinds'}), hint = h('div', {class: 'muted sm'}), timing = h('div', {class: 'card col'});
+  const optBox = h('div', {class: 'col'}), capBox = h('div', {class: 'col'});
+  const max = () => (p.kind === 'carousel' ? 20 : 1);
+  const count = () => {
+    const tags = (cap.value.match(/#[^\s#]+/g) || []).length;
+    fill(counter, h('span', {class: 'grow'}, fa(cap.value.length) + ' از ۲٬۲۰۰ نویسه'), h('span', null, fa(tags) + ' هشتگ (حداکثر ۳۰)'));
+    counter.classList.toggle('down', cap.value.length > 2200 || tags > 30);
+  };
+  cap.addEventListener('input', count);
+  const addUrl = () => {
+    const u = sheet('افزودن با لینک'), inp = h('input', {class: 'in ltr', placeholder: 'https://…/photo.jpg', 'aria-label': 'لینک'}), typ = h('select', {class: 'in'}, h('option', {value: 'image'}, 'عکس (JPEG)'), h('option', {value: 'video'}, 'ویدیو (MP4)'));
+    if (p.kind === 'reel') typ.value = 'video';
+    add(u.body, h('p', {class: 'muted sm'}, 'لینک باید مستقیم و عمومی باشد (اینستاگرام خودش فایل را از این نشانی برمی‌دارد).'), field('لینک فایل', inp), field('نوع فایل', typ));
+    u.setFoot(h('button', {class: 'btn pri', onclick: () => { const v = inp.value.trim(); if (!/^https:\/\/\S+$/.test(v)) return toast('لینک باید با https:// شروع شود', 'bad'); p.media.push({url: v, type: typ.value, preview: v}); u.close(); paint(); }}, 'افزودن'));
+  };
+  const paintOpts = () => {
+    const txt = (key, label, ph, rows) => { const el = h(rows ? 'textarea' : 'input', {class: 'in', placeholder: ph, rows, value: p.opts[key] || ''}); el.addEventListener('input', () => { p.opts[key] = el.value; }); return field(label, el); };
+    const sw = (key, label, def) => h('div', {class: 'row'}, h('span', {class: 'grow'}, label), toggle(p.opts[key] == null ? def : p.opts[key], async v => { p.opts[key] = v; }, label));
+    fill(optBox, p.kind === 'image' ? txt('alt_text', 'متن جایگزین عکس (برای نابینایان)', 'توضیح کوتاه عکس') : null,
+      p.kind !== 'story' ? txt('first_comment', 'اولین کامنت (مثلاً هشتگ‌ها)', 'بعد از انتشار، خود پیج این را زیر پست می‌نویسد', 2) : null,
+      p.kind === 'reel' ? sw('share_to_feed', 'نمایش ریل در صفحهٔ اصلی پیج', true) : null,
+      p.kind !== 'story' ? sw('comments_off', 'بستن کامنت‌های این پست', false) : h('div', {class: 'muted sm'}, 'استوری گزینهٔ دیگری ندارد.'));
+  };
+  const paintTiming = () => {
+    fill(timing, h('b', null, 'چه زمانی منتشر شود؟'), segment([['now', 'همین حالا'], ['later', 'زمان‌بندی']], p.mode, v => {
+      p.mode = v; if (v === 'later' && !p.at) p.at = Math.ceil((Date.now() / 1000 + 3600) / 900) * 900; paintTiming(); paintFoot(); }));
+    if (p.mode !== 'later') return;
+    const d = new Date(p.at * 1000), t0 = new Date(), dsel = h('select', {class: 'in', 'aria-label': 'روز'}), time = h('input', {class: 'in ltr', type: 'time', 'aria-label': 'ساعت', value: two(d.getHours()) + ':' + two(d.getMinutes())});
+    let pick = 0;
+    for (let i = 0; i < 75; i++) {
+      const x = new Date(t0.getFullYear(), t0.getMonth(), t0.getDate() + i);
+      if (x.toDateString() === d.toDateString()) pick = i;
+      dsel.appendChild(h('option', {value: i}, (i === 0 ? 'امروز — ' : i === 1 ? 'فردا — ' : '') + day(x)));
+    }
+    dsel.value = String(pick);
+    const label = h('div', {class: 'muted sm'}, when(p.at)), chips = h('div', {class: 'chips'});
+    const sync = () => { const t = (time.value || '12:00').split(':'), x = new Date(t0.getFullYear(), t0.getMonth(), t0.getDate() + Number(dsel.value), Number(t[0]), Number(t[1])); p.at = x.getTime() / 1000; fill(label, when(p.at)); };
+    dsel.addEventListener('change', sync); time.addEventListener('change', sync);
+    GET('/api/slots').then(r => fill(chips, r.items.map(ts => h('button', {class: 'chip', onclick: () => { p.at = ts; paintTiming(); }}, when(ts))))).catch(() => {});
+    add(timing, h('div', {class: 'row'}, h('div', {class: 'grow'}, dsel), time), label, h('div', {class: 'muted sm'}, 'پیشنهاد ایجنت (ساعت‌هایی که پست‌هایت بهتر دیده شده):'), chips);
+  };
+  const paint = () => {
+    fill(kinds, Object.keys(KIND).map(k => h('button', {class: p.kind === k ? 'on' : '', 'data-kind': k, onclick: () => { p.kind = k; p.media = p.media.slice(0, max()); paint(); }}, icon(KIND[k][1]), KIND[k][0])));
+    file.accept = p.kind === 'reel' ? 'video/*' : p.kind === 'image' ? 'image/*' : 'image/*,video/*';
+    file.multiple = p.kind === 'carousel';
+    const more = p.media.length < max();
+    fill(strip, p.media.map((m, i) => h('div', {class: 'mitem'}, thumb(m.preview, m.type, 'fit'), h('span', {class: 'tag'}, m.type === 'video' ? 'ویدیو' : 'عکس'),
+        h('button', {class: 'rm', 'aria-label': 'برداشتن', onclick: () => { p.media.splice(i, 1); paint(); }}, icon('x')))),
+      more ? h('button', {class: 'mitem add', 'data-add': 'file', onclick: () => file.click()}, icon('upload'), 'از گالری') : null,
+      more ? h('button', {class: 'mitem add', 'data-add': 'url', onclick: addUrl}, icon('link'), 'با لینک') : null);
+    fill(hint, {image: 'یک عکس. خودکار به JPEG تبدیل و اگر لازم باشد به نسبت مجاز (۴:۵ تا ۱٫۹۱:۱) بریده می‌شود.', carousel: '۲ تا ۲۰ عکس یا ویدیو؛ مخاطب ورق می‌زند.',
+      reel: 'یک ویدیوی MP4 (عمودی ۹:۱۶ بهتر دیده می‌شود).', story: 'یک عکس یا ویدیو (۹:۱۶). استوری کپشن ندارد و بعد از ۲۴ ساعت پاک می‌شود.'}[p.kind]);
+    capBox.classList.toggle('hide', p.kind === 'story');
+    paintOpts(); paintTiming(); paintFoot();
+  };
+  file.addEventListener('change', async () => {
+    const files = Array.from(file.files).slice(0, max() - p.media.length);
+    file.value = '';
+    for (const f of files) {
+      const ph = h('div', {class: 'mitem'}, 'در حال آماده‌سازی…');
+      strip.prepend(ph);
+      try {
+        let blob = f, cropped = false;
+        if (/^image\//.test(f.type) || /\.(jpe?g|png|webp|heic|heif)$/i.test(f.name)) { const r = await prepImage(f, p.kind); blob = r.blob; cropped = r.cropped; }
+        const up = await api('POST', '/api/upload?name=' + encodeURIComponent(f.name), blob, true);
+        p.media.push({file: up.id, type: up.type, preview: up.preview});
+        if (cropped) toast('عکس به نسبت مجاز اینستاگرام برش خورد.');
+      } catch (e) { toast((e && e.message) || 'این فایل خوانده نشد', 'bad'); }
+      paint();
+    }
+  });
+  const helper = (title, label, path, single) => {
+    const a = sheet(title), topic = h('input', {class: 'in', placeholder: 'مثلاً: معرفی لاتهٔ پاییزی', 'aria-label': 'موضوع'}), list = h('div', {class: 'col'});
+    const go_ = h('button', {class: 'btn pri', onclick: () => run(go_, async () => {
+      fill(list, h('div', {class: 'muted'}, 'در حال نوشتن…'));
+      let r;
+      try { r = await POST(path, {topic: topic.value, kind: p.kind}); } catch (e) { fill(list); throw e; }
+      const note = r.source === 'offline' ? h('div', {class: 'muted sm'}, 'سرویس هوش مصنوعی در دسترس نبود؛ این‌ها الگوهای آماده‌اند.') : null;
+      if (single) fill(list, note, r.items.map(t => h('button', {class: 'card pre', 'data-pick': '1', onclick: () => { cap.value = t; count(); a.close(); }}, t)));
+      else fill(list, note, h('div', {class: 'chips'}, r.items.map(t => h('button', {class: 'chip ltr', onclick: e => { cap.value = (cap.value.trim() + ' ' + t).trim(); count(); e.currentTarget.remove(); }}, t))),
+        h('button', {class: 'btn', onclick: () => { cap.value = (cap.value.trim() + '\n\n' + r.items.slice(0, 12).join(' ')).trim(); count(); a.close(); }}, 'افزودن همه به کپشن'));
+    })}, icon('spark'), 'بنویس');
+    add(a.body, field(label, h('div', {class: 'row'}, topic, go_)), list);
+  };
+  const paintFoot = () => s.setFoot(h('button', {class: 'btn', onclick: e => save(e.currentTarget, 'draft')}, 'پیش‌نویس'),
+    h('button', {class: 'btn pri', 'data-go': '1', onclick: e => save(e.currentTarget, p.mode === 'later' ? 'schedule' : 'now')}, icon(p.mode === 'later' ? 'clock' : 'send'), p.mode === 'later' ? 'زمان‌بندی' : 'انتشار'));
+  const save = (btn, action) => run(btn, async () => {
+    const body = {kind: p.kind, caption: p.kind === 'story' ? '' : cap.value, media: p.media.map(m => (m.file ? {file: m.file} : {url: m.url, type: m.type})), opts: p.opts, action, scheduled_at: p.at};
+    const r = await POST(p.id ? '/api/posts/' + p.id : '/api/posts', body);
+    s.close();
+    toast(action === 'draft' ? 'در پیش‌نویس‌ها ذخیره شد' : action === 'schedule' ? 'زمان‌بندی شد ✓' : 'انتشار شروع شد…');
+    await refresh(); S.tab = 'content'; S.sub.content = action === 'draft' ? 'drafts' : 'queue'; render(true);
+    if (action === 'now') postSheet(r.id);
+  });
+  add(capBox, field('کپشن', cap), counter, h('div', {class: 'row'}, h('button', {class: 'btn sm grow', onclick: () => helper('کپشن پیشنهادی', 'این پست دربارهٔ چیست؟', '/api/ai/captions', true)}, icon('spark'), 'کپشن پیشنهادی'),
+    h('button', {class: 'btn sm grow', onclick: () => helper('هشتگ پیشنهادی', 'موضوع پست', '/api/ai/hashtags', false)}, icon('hash'), 'هشتگ پیشنهادی')));
+  add(s.body, kinds, strip, hint, file, capBox, h('details', {class: 'box'}, h('summary', null, icon('settings'), 'گزینه‌های بیشتر'), optBox), timing);
+  count(); paint();
+}
+
+/* ───── comments & direct ───── */
+function threadCard(t, keep) {
+  const card = h('div', {class: 'card col thread'});
+  const gone = () => { card.remove(); if (!keep && !$('#view .thread')) render(false); };
+  const paint = t => {
+    const ta = h('textarea', {class: 'in', rows: 1, placeholder: 'پاسخ بده…', 'aria-label': 'پاسخ', value: t.suggest || ''});
+    const act = (btn, action, body, msg, id) => run(btn, async () => {
+      const r = await POST('/api/comments/' + (id || t.id) + '/' + action, body);
+      toast(msg); await refresh();
+      if (r.thread && (keep || S.filter !== 'open' || r.thread.open)) paint(r.thread); else gone();
+    });
+    const send = h('button', {class: 'btn pri', 'aria-label': 'فرستادن پاسخ', onclick: () => act(send, 'reply', {text: ta.value}, 'پاسخ فرستاده شد ✓')}, icon('send'));
+    const bubble = c => h('div', {class: 'bubble' + (c.mine ? ' me' : '')}, h('small', null, h('b', {class: 'ltr'}, '@' + c.username), ' · ' + ago(c.ts) + (c.hidden ? ' · مخفی‌شده' : '') + (c.dm_sent ? ' · پیام خصوصی رفت' : '')), c.text);
+    fill(card, h('div', {class: 'row'}, thumb(t.media.thumb, 'image', 'thumb s'), h('div', {class: 'grow muted sm clamp'}, t.media.caption || 'پست'),
+        t.open ? h('span', {class: 'pill pri'}, 'منتظر پاسخ') : null, h('button', {class: 'iconbtn', 'aria-label': 'بیشتر', onclick: () => menu(t, act, paint)}, icon('more'))),
+      h('div', {class: 'chat'}, bubble(t.top), t.replies.map(bubble)),
+      t.suggest ? h('div', {class: 'muted sm'}, icon('spark'), ' پیشنهاد دستیار در کادر پایین است؛ اگر خوب بود بفرست.') : null,
+      h('div', {class: 'row replybar'}, ta, send),
+      t.open ? h('button', {class: 'btn sm', onclick: e => run(e.currentTarget, async () => { await POST('/api/comments/' + t.id + '/dismiss'); await refresh(); if (keep || S.filter !== 'open') { t.open = false; paint(t); } else gone(); })}, icon('check'), 'نیازی به پاسخ نیست') : null);
+  };
+  paint(t);
+  return card;
+}
+function menu(t, act, paint) {
+  const s = sheet('کامنت @' + t.top.username), target = [t.top].concat(t.replies).filter(c => !c.mine).pop() || t.top;
+  const item = (ic, label, fn, cls) => h('button', {class: 'btn block ' + (cls || ''), onclick: e => fn(e.currentTarget)}, icon(ic), label);
+  add(s.body,
+    item('spark', 'پیشنهاد پاسخ از دستیار', b => run(b, async () => { const r = await POST('/api/comments/' + t.id + '/suggest'); t.suggest = r.text; s.close(); paint(t); })),
+    item('send', 'پیام خصوصی (دایرکت) به این کاربر', () => {
+      s.close();
+      const d = sheet('پیام خصوصی به @' + target.username), ta = h('textarea', {class: 'in', rows: 3, placeholder: 'متن پیام…', 'aria-label': 'پیام خصوصی'});
+      add(d.body, h('p', {class: 'muted sm'}, 'اینستاگرام برای هر کامنت فقط یک پیام خصوصی و تا ۷ روز بعد از آن را اجازه می‌دهد.'), ta);
+      d.setFoot(h('button', {class: 'btn pri', onclick: e => act(e.currentTarget, 'private', {text: ta.value}, 'پیام خصوصی فرستاده شد ✓', target.id).then(() => d.close())}, icon('send'), 'فرستادن'));
+    }),
+    t.top.hidden ? item('eye', 'نمایش دوبارهٔ کامنت', b => { s.close(); act(b, 'unhide', {}, 'کامنت دوباره دیده می‌شود'); })
+      : item('eyeoff', 'مخفی‌کردن کامنت', b => { s.close(); act(b, 'hide', {}, 'کامنت مخفی شد'); }),
+    item('trash', 'حذف کامنت', async b => { if (await ask('این کامنت برای همیشه از اینستاگرام حذف شود؟', 'حذف', true)) { s.close(); act(b, 'delete', {}, 'کامنت حذف شد'); } }, 'danger'),
+    t.media.permalink ? h('a', {class: 'btn block', href: t.media.permalink, target: '_blank', rel: 'noopener'}, icon('external'), 'دیدن پست در اینستاگرام') : null);
+}
+function syncBtn(path) {
+  return h('button', {class: 'iconbtn', 'aria-label': 'تازه‌سازی', onclick: e => run(e.currentTarget, async () => { await POST(path); await refresh(); render(false); toast('تازه شد'); })}, icon('refresh'));
+}
+function convRow(c) {
+  return h('button', {class: 'card row', 'data-conv': c.id, onclick: () => chatSheet(c.id)}, h('span', {class: 'avatar s'}, (c.username || '?').charAt(0).toUpperCase()),
+    h('div', {class: 'grow'}, h('div', {class: 'row'}, h('b', {class: 'ltr grow'}, '@' + c.username), h('small', {class: 'muted'}, ago(c.last_ts))), h('div', {class: 'muted sm clamp'}, (c.last_from_me ? 'شما: ' : '') + c.last_text)),
+    c.open ? h('span', {class: 'pill pri'}, 'تازه') : null);
+}
+async function chatSheet(id) {
+  let timer = 0, seen = '';
+  const url = '/api/dm/' + encodeURIComponent(id), s = sheet('گفتگو', {onclose: () => { clearInterval(timer); render(false); }});
+  const box = h('div', {class: 'chat'}), note = h('div', {class: 'muted sm'}), ta = h('textarea', {class: 'in', rows: 1, placeholder: 'پیام…', 'aria-label': 'پیام'});
+  const send = h('button', {class: 'btn pri', 'aria-label': 'فرستادن پیام', onclick: () => run(send, async () => { const d = await POST(url + '/send', {text: ta.value}); ta.value = ''; paint(d); refresh(); })}, icon('send'));
+  const paint = d => {
+    const c = d.conv, sig = d.messages.map(m => m.id).join();
+    fill(s.title, h('span', {class: 'ltr'}, '@' + c.username));
+    if (sig !== seen) { seen = sig; fill(box, d.messages.map(m => h('div', {class: 'bubble' + (m.mine ? ' me' : '')}, m.text, h('small', null, ago(m.ts))))); s.body.scrollTop = s.body.scrollHeight; }
+    fill(note, c.can_reply ? (c.open ? h('button', {class: 'btn sm', onclick: e => run(e.currentTarget, async () => { await POST(url + '/dismiss'); await refresh(); s.close(); })}, icon('check'), 'نیازی به پاسخ نیست') : null)
+      : 'از آخرین پیام این کاربر بیش از ۲۴ ساعت گذشته است؛ اینستاگرام اجازهٔ پاسخ از اینجا را نمی‌دهد. از خود اپ اینستاگرام جواب بده.');
+    ta.disabled = !c.can_reply;
+  };
+  add(s.body, box, note);
+  s.setFoot(h('button', {class: 'iconbtn', 'aria-label': 'پیشنهاد دستیار', onclick: e => run(e.currentTarget, async () => { ta.value = (await POST(url + '/suggest')).text; })}, icon('spark')), ta, send);
+  const load = async () => { try { paint(await GET(url)); } catch (e) { /* keep what is shown */ } };
+  await load();
+  timer = setInterval(load, 5000);
+}
+VIEWS.inbox = async () => {
+  const c = S.st.counts, sub = S.sub.inbox;
+  const seg = segment([['comments', 'کامنت‌ها', c.open_comments], ['dm', 'دایرکت', c.open_dms]], sub, v => { S.sub.inbox = v; render(true); });
+  if (sub === 'dm') {
+    const d = await GET('/api/dm');
+    return [h('div', {class: 'row'}, h('div', {class: 'grow'}, seg), syncBtn('/api/dm/sync')), d.blocked ? h('div', {class: 'card bad sm'}, d.blocked) : null,
+      d.items.length ? d.items.map(convRow) : empty('send', 'هنوز گفتگویی نیست.'),
+      h('p', {class: 'muted sm'}, 'اینستاگرام فقط تا ۲۴ ساعت بعد از آخرین پیام هر نفر اجازهٔ پاسخ از این راه را می‌دهد. برای دایرکت با عموم مردم، برنامه‌ات در متا باید «Advanced Access» داشته باشد.')];
+  }
+  const d = await GET('/api/comments?filter=' + S.filter);
+  const chips = h('div', {class: 'chips grow'}, [['open', 'پاسخ‌نداده'], ['all', 'همه'], ['hidden', 'مخفی‌شده']].map(f => h('button', {class: 'chip' + (S.filter === f[0] ? ' on' : ''), onclick: () => { S.filter = f[0]; render(true); }}, f[1])));
+  return [seg, h('div', {class: 'row'}, chips, syncBtn('/api/comments/sync')),
+    S.filter === 'open' && d.items.length > 1 ? h('button', {class: 'btn sm', onclick: async e => { const b = e.currentTarget; if (await ask('همهٔ کامنت‌های منتظر «رسیدگی‌شده» علامت بخورند؟ (در اینستاگرام چیزی تغییر نمی‌کند.)', 'بله')) run(b, async () => { await POST('/api/comments/dismiss_all'); await refresh(); render(false); }); }}, icon('check'), 'همه را رسیدگی‌شده علامت بزن') : null,
+    d.items.length ? d.items.map(t => threadCard(t)) : empty('chat', S.filter === 'open' ? 'کامنتی منتظر پاسخ نیست ✓' : 'چیزی برای نمایش نیست.')];
+};
+
+/* ───── numbers ───── */
+function spark(v) {
+  const lo = Math.min(...v), hi = Math.max(...v), w = 300, ht = 70, s = svg('svg'), p = svg('polyline');
+  s.setAttribute('viewBox', '0 0 ' + w + ' ' + ht); s.setAttribute('class', 'spark'); s.setAttribute('preserveAspectRatio', 'none');
+  p.setAttribute('points', v.map((y, i) => (i * w / (v.length - 1)).toFixed(1) + ',' + (ht - 6 - (hi === lo ? 0.5 : (y - lo) / (hi - lo)) * (ht - 12)).toFixed(1)).join(' '));
+  s.appendChild(p);
+  return s;
+}
+function bar(frac) { const i = h('i'); i.style.width = Math.max(2, Math.round(frac * 100)) + '%'; return h('div', {class: 'bar'}, i); }
+const AUD = {gender: 'جنسیت', age: 'سن', city: 'شهر', country: 'کشور'}, GENDER = {F: 'زن', M: 'مرد', U: 'نامشخص'};
+VIEWS.stats = async () => {
+  const d = await GET('/api/insights?days=' + S.days + (S.refresh ? '&refresh=1' : ''));
+  S.refresh = false;
+  const f = d.followers, sign = n => (n >= 0 ? 'up' : 'down');
+  const kpi = m => h('div', {class: 'kpi'}, h('div', {class: 'row'}, h('b', null, fa(m.value)), m.change == null ? null : h('small', {class: sign(m.change)}, (m.change >= 0 ? '▲ ' : '▼ ') + fa(Math.abs(m.change)) + '٪')), h('div', {class: 'muted sm'}, m.label));
+  const aud = h('div', {class: 'col'});
+  const audBtn = h('button', {class: 'btn sm', onclick: () => run(audBtn, async () => {
+    const r = await GET('/api/insights/audience');
+    audBtn.remove();
+    if (r.error) return fill(aud, h('div', {class: 'muted sm'}, r.error));
+    fill(aud, Object.keys(AUD).filter(k => (r.groups[k] || []).length).map(k => {
+      const rows = r.groups[k].slice(0, 5), total = r.groups[k].reduce((a, x) => a + x.value, 0) || 1;
+      return h('div', {class: 'col'}, h('b', {class: 'sm'}, AUD[k]), rows.map(x => h('div', null, h('div', {class: 'row sm'}, h('span', {class: 'grow'}, k === 'gender' ? (GENDER[x.name] || x.name) : x.name), h('span', {class: 'muted'}, fa(Math.round(x.value * 100 / total)) + '٪')), bar(x.value / total))));
+    }));
+  })}, 'نمایش سن، جنسیت و شهر');
+  return [h('div', {class: 'row'}, h('div', {class: 'grow'}, segment([[7, '۷ روز اخیر'], [28, '۲۸ روز اخیر']], S.days, v => { S.days = v; render(true); })),
+      h('button', {class: 'iconbtn', 'aria-label': 'تازه‌سازی آمار', onclick: () => { S.refresh = true; render(true); }}, icon('refresh'))),
+    d.error ? h('div', {class: 'card bad sm'}, d.error) : null,
+    d.metrics.length ? [h('div', {class: 'kpis'}, d.metrics.map(kpi)), h('p', {class: 'muted sm'}, 'درصدها نسبت به ' + fa(d.days) + ' روز قبل از آن است. آمار اینستاگرام گاهی تا ۴۸ ساعت دیرتر کامل می‌شود.')] : null,
+    h('div', {class: 'card col'}, h('div', {class: 'row'}, h('b', {class: 'grow'}, 'دنبال‌کننده‌ها'), f.delta == null ? null : h('small', {class: sign(f.delta)}, (f.delta >= 0 ? '+' : '−') + fa(Math.abs(f.delta))), h('b', null, fa(f.now))),
+      f.series.length > 1 ? spark(f.series.map(x => x.followers)) : h('div', {class: 'muted sm'}, 'ایجنت هر روز تعداد دنبال‌کننده‌ها را یادداشت می‌کند؛ نمودار رشد از فردا شکل می‌گیرد.')),
+    h('div', {class: 'card col'}, h('b', null, 'بهترین ساعت‌های انتشار'), h('div', {class: 'chips'}, d.best_hours.map(x => h('span', {class: 'pill info'}, fa(x) + ':۰۰'))),
+      h('div', {class: 'muted sm'}, 'بر اساس لایک و کامنت پست‌های قبلی خودت (اگر پست کم باشد، ساعت‌های پیش‌فرض).')),
+    d.top.length ? h('div', {class: 'card col'}, h('b', null, 'بهترین پست‌های این بازه'), d.top.map(m => h('button', {class: 'row tap', onclick: () => mediaSheet(m.id)}, thumb(m.thumb, 'image', 'thumb s'),
+      h('div', {class: 'grow clamp sm'}, m.caption || '—'), h('small', {class: 'muted row'}, icon('heart'), fa(m.likes), icon('chat'), fa(m.comments))))) : null,
+    h('div', {class: 'card col'}, h('b', null, 'مخاطبان'), aud, audBtn)];
+};
+
+/* ───── agent tab: switches, rules, settings ───── */
+function ruleSheet(r) {
+  const s = sheet(r.id ? 'ویرایش قانون' : 'قانون تازه'), dm = r.scope === 'dm';
+  const name = h('input', {class: 'in', value: r.name, placeholder: 'مثلاً: قیمت', 'aria-label': 'نام قانون'}), keys = h('textarea', {class: 'in', rows: 2, placeholder: 'قیمت، چنده، هزینه', 'aria-label': 'کلمه‌ها', value: r.keywords.join('، ')});
+  const mode = h('select', {class: 'in', 'aria-label': 'شرط'}, [['any', 'اگر یکی از این کلمه‌ها را داشت'], ['all', 'اگر همهٔ این کلمه‌ها را داشت'], ['exact', 'اگر دقیقاً همین بود'], ['every', dm ? 'برای هر پیامی (بدون کلمه)' : 'برای هر کامنتی (بدون کلمه)']].map(m => h('option', {value: m[0]}, m[1])));
+  mode.value = r.mode;
+  const replies = h('textarea', {class: 'in', rows: 4, 'aria-label': 'پاسخ‌ها', placeholder: 'سلام {username} 🌹 …', value: r.replies.join('\n')});
+  const priv = h('textarea', {class: 'in', rows: 2, 'aria-label': 'پیام خصوصی', placeholder: 'اختیاری', value: r.private || ''});
+  let hide = !!r.hide, enabled = r.enabled !== false;
+  add(s.body, field('نام قانون', name), field('شرط', mode), field('کلمه‌های کلیدی', keys, 'با ویرگول از هم جدا کن. «ي/ی»، نیم‌فاصله و بزرگی حروف فرقی نمی‌کند.'),
+    field(dm ? 'متن پاسخ' : 'پاسخ زیر کامنت', replies, 'هر خط یک پاسخ جداست و ایجنت هر بار یکی را تصادفی می‌فرستد. {username} جای نام کاربر می‌نشیند.'),
+    dm ? null : field('پیام خصوصی به نویسندهٔ کامنت', priv, 'اختیاری. برای هر کامنت فقط یک بار ممکن است.'),
+    dm ? null : h('div', {class: 'row'}, h('span', {class: 'grow'}, 'کامنت را مخفی هم بکن'), toggle(hide, async v => { hide = v; }, 'مخفی‌کردن')),
+    h('div', {class: 'row'}, h('span', {class: 'grow'}, 'این قانون فعال باشد'), toggle(enabled, async v => { enabled = v; }, 'فعال')));
+  const save = h('button', {class: 'btn pri', onclick: () => run(save, async () => {
+    const body = {scope: r.scope, name: name.value, mode: mode.value, keywords: keys.value, replies: replies.value.split('\n'), private: priv.value, hide, enabled};
+    await POST(r.id ? '/api/rules/' + r.id : '/api/rules', body);
+    toast('قانون ذخیره شد'); s.close(); render(false);
+  })}, 'ذخیره');
+  s.setFoot(r.id ? h('button', {class: 'btn danger', onclick: async e => { const b = e.currentTarget; if (await ask('این قانون حذف شود؟', 'حذف', true)) run(b, async () => { await DEL('/api/rules/' + r.id); s.close(); render(false); }); }}, icon('trash'), 'حذف') : null, save);
+}
+VIEWS.agent = async () => {
+  const [set, rules] = await Promise.all([GET('/api/settings'), GET('/api/rules')]), st = S.st, au = set.auto, lim = set.limits;
+  const sw = (key, title, desc) => h('div', {class: 'row line'}, h('div', {class: 'grow'}, h('b', null, title), h('div', {class: 'muted sm'}, desc)), toggle(au[key], v => saveSettings({auto: {[key]: v}}, false), title));
+  const ruleCard = r => h('button', {class: 'card row' + (r.enabled ? '' : ' off'), 'data-rule': r.id, onclick: () => ruleSheet(r)}, h('div', {class: 'grow'}, h('b', null, r.name),
+      h('div', {class: 'muted sm clamp'}, r.mode === 'every' ? 'برای همه' : 'اگر شامل: ' + r.keywords.join('، ')),
+      h('div', {class: 'sm up clamp'}, '← ' + [r.replies.length ? 'پاسخ' : '', r.private ? 'پیام خصوصی' : '', r.hide ? 'مخفی‌کردن' : ''].filter(Boolean).join(' + '))),
+    h('span', {class: 'pill'}, r.enabled ? fa(r.hits) + ' بار' : 'خاموش'));
+  const group = (scope, title) => h('div', {class: 'col'}, h('div', {class: 'row'}, h('h3', {class: 'grow'}, title),
+      h('button', {class: 'btn sm', 'data-newrule': scope, onclick: () => ruleSheet({scope, name: '', keywords: [], mode: 'any', replies: [], private: '', hide: false, enabled: true})}, icon('plus'), 'قانون تازه')),
+    rules.items.filter(r => r.scope === scope).map(ruleCard));
+  const num = (key, label) => { const el = h('input', {class: 'in ltr', type: 'number', inputmode: 'numeric', value: lim[key], 'aria-label': label}); return [field(label, el), el]; };
+  const perHour = num('per_hour', 'حداکثر کار خودکار در هر ساعت'), cool = num('cooldown_min', 'فاصلهٔ دو پاسخ خودکار به یک نفر (دقیقه)'), daily = num('daily_posts', 'حداکثر انتشار در ۲۴ ساعت');
+  const qf = h('input', {class: 'in ltr', type: 'time', value: lim.quiet_from, 'aria-label': 'شروع سکوت'}), qt = h('input', {class: 'in ltr', type: 'time', value: lim.quiet_to, 'aria-label': 'پایان سکوت'});
+  const exp = st.account.token_expires ? ' — اعتبار توکن تا ' + new Date(st.account.token_expires * 1000).toLocaleDateString('fa-IR') : '';
+  return [
+    h('div', {class: 'card'}, h('b', null, 'کارهای خودکار'),
+      sw('comment_reply', 'پاسخ خودکار به کامنت‌ها', 'طبق قانون‌های پایین؛ فقط برای کامنت‌هایی که از این لحظه به بعد می‌آیند.'),
+      sw('spam_hide', 'مخفی‌کردن خودکار اسپم', 'کامنت‌های تبلیغاتی و لینک‌دار مخفی می‌شوند (حذف نمی‌شوند؛ می‌توانی برگردانی).'),
+      sw('dm_reply', 'پاسخ خودکار به دایرکت', 'طبق قانون‌های دایرکت و فقط در پنجرهٔ ۲۴ ساعته.'),
+      sw('ai_suggest', 'پیشنهاد پاسخ با هوش مصنوعی', 'برای کامنت‌هایی که قانونی ندارند پاسخ پیشنهادی می‌نویسد؛ فرستادنش با تأیید توست.'),
+      sw('ai_send', 'فرستادن خودکار پاسخ هوش مصنوعی', 'پیشنهاد هوش مصنوعی بدون تأیید تو فرستاده می‌شود. با احتیاط روشن کن.'),
+      sw('daily_report', 'گزارش روزانه', 'هر شب ساعت ۲۱ خلاصهٔ کار پیج در اعلان‌ها (و تلگرام، اگر وصل باشد).')),
+    group('comment', 'قانون‌های کامنت'), group('dm', 'قانون‌های دایرکت'),
+    h('details', {class: 'box'}, h('summary', null, icon('lock'), 'ترمزهای ایمنی'), h('div', {class: 'col'},
+      h('p', {class: 'muted sm'}, 'برای اینکه پیج شبیه ربات اسپم نشود، ایجنت این سقف‌ها را رعایت می‌کند.'), perHour[0], cool[0], daily[0],
+      h('label', {class: 'f'}, 'ساعت سکوت (در این بازه پاسخ خودکار فرستاده نمی‌شود)'), h('div', {class: 'row'}, 'از', qf, 'تا', qt),
+      h('button', {class: 'btn', onclick: e => run(e.currentTarget, () => saveSettings({limits: {per_hour: Number(perHour[1].value), cooldown_min: Number(cool[1].value), daily_posts: Number(daily[1].value), quiet_from: qf.value, quiet_to: qt.value}}))}, 'ذخیرهٔ ترمزها'))),
+    h('div', {class: 'row'}, h('button', {class: 'btn grow', onclick: assistantSheet}, icon('spark'), 'دستیار'), h('button', {class: 'btn grow', id: 'open-settings', onclick: settingsSheet}, icon('settings'), 'تنظیمات'),
+      h('button', {class: 'btn grow', onclick: helpSheet}, icon('help'), 'راهنما')),
+    h('div', {class: 'card col'}, h('b', null, 'اتصال پیج'), h('div', {class: 'muted sm'}, h('span', {class: 'ltr'}, '@' + st.account.username), exp),
+      h('div', {class: 'row wrap'}, h('button', {class: 'btn sm', onclick: tokenSheet}, 'توکن تازه'),
+        st.account.login === 'ig' ? h('button', {class: 'btn sm', onclick: e => run(e.currentTarget, async () => { await POST('/api/token/refresh'); toast('توکن تمدید شد ✓'); await refresh(); render(false); })}, 'تمدید توکن') : null,
+        h('button', {class: 'btn sm danger', onclick: async () => { if (await ask('اتصال پیج برداشته شود؟ تا اتصال دوباره هیچ پستی منتشر نمی‌شود.', 'قطع اتصال', true)) run(null, async () => { S.st = await POST('/api/disconnect'); render(true); }); }}, 'قطع اتصال'))),
+    h('p', {class: 'muted sm center'}, 'ایجنت اینستاگرام — نسخهٔ __VERSION__')];
+};
+async function settingsSheet() {
+  const s = sheet('تنظیمات');
+  let set;
+  try { set = await GET('/api/settings'); } catch (e) { return fill(s.body, h('div', {class: 'card bad'}, e.message)); }
+  const m = S.st.media, inp = (v, a) => h('input', Object.assign({class: 'in', value: v == null ? '' : v}, a || {}));
+  const sel = (v, opts) => { const el = h('select', {class: 'in'}, opts.map(o => h('option', {value: o[0]}, o[1]))); el.value = v; return el; };
+  const box = (key, ic, title, kids, collect, extra) => h('details', {class: 'box', 'data-sec': key}, h('summary', null, icon(ic), title), h('div', {class: 'col'}, kids,
+    h('div', {class: 'row'}, h('button', {class: 'btn pri grow', onclick: e => run(e.currentTarget, async () => { await saveSettings(collect()); })}, 'ذخیره'), extra)));
+  const about = h('textarea', {class: 'in', rows: 3, value: set.brand.about, placeholder: 'مثلاً: کافهٔ کوچک محلی در شیراز با قهوهٔ تازه و کیک خانگی', 'aria-label': 'دربارهٔ پیج'}), tone = inp(set.brand.tone), tags = inp(set.brand.hashtags, {placeholder: '#کافه #قهوه'});
+  const aiMode = sel(set.ai.mode, [['free', 'رایگان (سرویس عمومی Pollinations)'], ['custom', 'سرویس خودم (سازگار با OpenAI)'], ['off', 'خاموش (فقط الگوهای آماده)']]);
+  const aiUrl = inp(set.ai.url, {class: 'in ltr', placeholder: 'https://api.openai.com/v1'}), aiModel = inp(set.ai.model, {class: 'in ltr', placeholder: 'gpt-4o-mini'}), aiKey = inp('', {class: 'in ltr', type: 'password', autocomplete: 'off', placeholder: set.ai.key_set ? '•••••• (ذخیره شده)' : 'کلید API'});
+  const method = sel(set.media.method, [['auto', 'خودکار (هر کدام آماده بود)'], ['tunnel', 'فقط تونل cloudflared'], ['temp', 'فقط میزبان موقت'], ['public', 'فقط نشانی عمومی خودم']]), pub = inp(set.media.public_url, {class: 'in ltr', placeholder: 'https://my-agent.example.com'});
+  let tempOk = set.media.temp_ok;
+  const tgToken = inp('', {class: 'in ltr', type: 'password', autocomplete: 'off', placeholder: set.telegram.token_set ? '•••••• (ذخیره شده)' : '123456:ABC…'}), tgChat = inp(set.telegram.chat_id, {class: 'in ltr', placeholder: '123456789'});
+  const proxy = inp(set.network.proxy, {class: 'in ltr', placeholder: 'http://127.0.0.1:10809'});
+  const state = (on, text) => h('div', {class: 'row sm'}, h('i', {class: 'dot ' + (on ? '' : 'off')}), h('span', {class: 'grow'}, text));
+  add(s.body,
+    box('brand', 'home', 'معرفی پیج (برای کپشن‌ها و پاسخ‌ها)', [field('پیج دربارهٔ چیست؟', about), field('لحن نوشتن', tone), field('هشتگ‌های همیشگی پیج', tags)], () => ({brand: {about: about.value, tone: tone.value, hashtags: tags.value}})),
+    box('ai', 'spark', 'هوش مصنوعی', [field('سرویس', aiMode, 'در حالت رایگان، متن کامنت/موضوع برای نوشتن پاسخ به یک سرویس عمومی فرستاده می‌شود.'), field('نشانی سرویس خودم', aiUrl), field('نام مدل', aiModel), field('کلید', aiKey)],
+      () => ({ai: {mode: aiMode.value, url: aiUrl.value, model: aiModel.value, key: aiKey.value}})),
+    box('media', 'upload', 'انتشار از گالری (لینک عمومی)', [h('p', {class: 'muted sm'}, 'اینستاگرام فایل را خودش از یک نشانی اینترنتی برمی‌دارد. برای عکس و ویدیویی که از گالری انتخاب می‌کنی، ایجنت باید چند دقیقه یک لینک عمومی برایش بسازد:'),
+        state(m.tunnel, m.tunnel ? 'تونل cloudflared: آماده است (فایل از خود گوشی و فقط در لحظهٔ انتشار در دسترس قرار می‌گیرد؛ پنل هیچ‌وقت بیرون نمی‌آید).' : 'تونل cloudflared: نصب نیست. در ترموکس یک بار بزن: pkg install cloudflared و ایجنت را دوباره اجرا کن.'),
+        h('div', {class: 'row sm'}, h('i', {class: 'dot ' + (tempOk ? '' : 'off')}), h('span', {class: 'grow'}, 'میزبان موقت: فایل یک ساعت روی سرویس عمومی litterbox.catbox.moe گذاشته می‌شود (بدون نصب چیزی).'), toggle(tempOk, async v => { tempOk = v; }, 'میزبان موقت')),
+        state(m.public, 'نشانی عمومی خودم: اگر ایجنت روی سرور یا پشت دامنهٔ خودت است.'), field('روش', method), field('نشانی عمومی (اختیاری)', pub)],
+      () => ({media: {method: method.value, public_url: pub.value, temp_ok: tempOk}})),
+    box('telegram', 'send', 'اعلان در تلگرام', [h('p', {class: 'muted sm'}, 'با @BotFather یک ربات بساز، توکنش را اینجا بگذار و شناسهٔ عددی خودت را (مثلاً از @userinfobot) بنویس. هشدارها و گزارش روزانه برایت فرستاده می‌شود.'), field('توکن ربات', tgToken), field('شناسهٔ چت', tgChat)],
+      () => ({telegram: {token: tgToken.value, chat_id: tgChat.value}}), h('button', {class: 'btn', onclick: e => run(e.currentTarget, async () => { await POST('/api/telegram/test'); toast('پیام آزمایشی فرستاده شد ✓'); })}, 'آزمایش')),
+    box('network', 'link', 'پروکسی (فیلترشکن)', [h('p', {class: 'muted sm'}, 'اگر اینستاگرام فقط با فیلترشکن باز می‌شود، نشانی پروکسی HTTP آن را بنویس. خالی یعنی اتصال مستقیم.'), field('پروکسی HTTP', proxy)], () => ({network: {proxy: proxy.value}})));
+}
+function assistantSheet() {
+  const s = sheet('دستیار'), box = h('div', {class: 'chat'}), ta = h('textarea', {class: 'in', rows: 1, placeholder: 'بپرس…', 'aria-label': 'پیام به دستیار'}), hist = [];
+  const say = (text, me) => { box.appendChild(h('div', {class: 'bubble' + (me ? ' me' : '')}, text)); s.body.scrollTop = s.body.scrollHeight; };
+  const send = h('button', {class: 'btn pri', 'aria-label': 'فرستادن', onclick: () => ask_(ta.value)}, icon('send'));
+  const ask_ = text => run(send, async () => {
+    text = (text || '').trim(); if (!text) return;
+    ta.value = ''; say(text, true); hist.push({role: 'user', content: text});
+    const wait = h('div', {class: 'bubble muted'}, 'در حال فکر کردن…'); box.appendChild(wait);
+    try { const r = await POST('/api/chat', {messages: hist}); hist.push({role: 'assistant', content: r.text}); wait.remove(); say(r.text); }
+    catch (e) { wait.remove(); hist.pop(); throw e; }
+  });
+  add(s.body, h('p', {class: 'muted sm'}, 'دربارهٔ پیج، ایدهٔ پست، کپشن یا پاسخ به مشتری بپرس. دستیار وضعیت فعلی پیج را می‌داند.'),
+    h('div', {class: 'chips'}, ['وضعیت پیج چطور است؟', 'برای این هفته چه پست‌هایی بگذارم؟', 'یک کپشن برای معرفی محصول جدید بنویس'].map(q => h('button', {class: 'chip', onclick: () => ask_(q)}, q))), box);
+  s.setFoot(ta, send);
+}
+function helpSheet() {
+  const s = sheet('راهنما'), sec = (title, ...lines) => h('div', {class: 'card col'}, h('b', null, title), lines.map(l => h('div', {class: 'sm'}, l)));
+  add(s.body,
+    sec('ایجنت چه کارهایی می‌کند؟', 'پست، پست چندتایی، ریل و استوری را همین حالا یا در زمان دلخواه منتشر می‌کند.', 'کامنت‌ها و دایرکت‌ها را در یک صندوق نشان می‌دهد و می‌توانی از همین‌جا جواب بدهی، مخفی یا حذف کنی.',
+      'طبق قانون‌هایی که می‌نویسی خودش جواب می‌دهد و کامنت‌های تبلیغاتی را مخفی می‌کند.', 'آمار پیج و بهترین ساعت انتشار را نشان می‌دهد و در نوشتن کپشن و هشتگ کمک می‌کند.'),
+    sec('چه چیزهایی شدنی نیست؟', 'اینستاگرام از راه رسمی اجازهٔ فالو/آنفالو، لایک‌کردن، دیدن فهرست دنبال‌کننده‌ها، ویرایش کپشن یا بیو و گذاشتن استیکر و لینک روی استوری را نمی‌دهد؛ ایجنت هم سراغ راه‌های غیررسمی (که پیج را در خطر بسته‌شدن می‌گذارد) نمی‌رود.',
+      'دایرکت با عموم مردم فقط وقتی کار می‌کند که برنامه‌ات در متا «Advanced Access» گرفته باشد؛ تا آن موقع فقط با حساب‌هایی که در برنامه نقش دارند.'),
+    sec('ایجنت باید روشن بماند', 'زمان‌بندی و پاسخ خودکار فقط تا وقتی کار می‌کند که برنامه در ترموکس باز باشد. در ترموکس بزن: termux-wake-lock و بهینه‌سازی باتری را برای ترموکس خاموش کن.',
+      'اگر ایجنت در زمان یک پست خاموش باشد و بیش از ۶ ساعت بگذرد، آن پست «جامانده» می‌شود و خودکار منتشر نمی‌شود.'),
+    sec('امنیت', 'رمز پیج هیچ‌وقت خواسته نمی‌شود. توکن فقط روی همین دستگاه می‌ماند و هر وقت بخواهی می‌توانی از تنظیمات اینستاگرام دسترسی برنامه را برداری.', 'پنل فقط روی همین دستگاه باز است و با کد ورود قفل می‌شود.'));
+}
+
+/* ───── start ───── */
+fill($('#fab'), icon('plus'));
+$('#fab').addEventListener('click', () => composer());
+(async () => {
+  try { S.st = await GET('/api/status'); } catch (e) { if (e.status !== 401) S.st = null; }
+  render(true);
+  setInterval(poll, 4000);
+  D.addEventListener('visibilitychange', () => { if (!D.hidden) poll(); });
+})();
+</script>
+</body>
+</html>
+'''
 
 
 if __name__ == "__main__":
