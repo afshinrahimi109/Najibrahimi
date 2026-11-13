@@ -98,6 +98,7 @@ try {
 } catch (e) {
   t.fail();
   console.log('EXCEPTION', e.message);
+  if (process.env.GITHUB_ACTIONS) console.log('::error title=Panel script stopped::' + String(e.message).replace(/\r?\n/g, ' '));
   await page.screenshot({path: out + '/99-exception.png'});
 }
 await t.finish('CONNECT FLOW', /status of 401|status of 502|status of 400/);

@@ -17,10 +17,22 @@ export async function start(opts = {}) {
   page.on('console', m => { if (['error', 'warning'].includes(m.type())) problems.push(m.type() + ': ' + m.text()); });
   page.on('pageerror', e => problems.push('pageerror: ' + e.message));
   page.on('requestfailed', r => problems.push('requestfailed: ' + r.url() + ' ' + (r.failure() || {}).errorText));
+  // The panel redraws its lists when something changes on the page; a click that lands in that instant is repeated.
+  const rawClick = page.click.bind(page);
+  page.click = async (selector, options) => {
+    for (let i = 0; ; i++) {
+      try { return await rawClick(selector, options); }
+      catch (e) { if (i >= 3 || !/detached|not clickable/i.test(String(e.message))) throw e; await sleep(250); }
+    }
+  };
   let failed = 0;
   const t = {
     browser, page, problems,
-    check(name, ok, extra) { console.log((ok ? 'PASS ' : 'FAIL ') + name + (ok ? '' : '  ' + (extra === undefined ? '' : JSON.stringify(extra)))); if (!ok) failed++; },
+    check(name, ok, extra) {
+      const more = ok || extra === undefined ? '' : '  ' + JSON.stringify(extra);
+      console.log((ok ? 'PASS ' : 'FAIL ') + name + more);
+      if (!ok) { failed++; if (process.env.GITHUB_ACTIONS) console.log('::error title=Panel check failed::' + (name + more).replace(/\r?\n/g, ' ')); }
+    },
     async shot(name) { await sleep(350); await page.screenshot({path: `${out}/${name}.png`}); },
     // click the shortest visible element containing the text, inside the top sheet if one is open
     async clickText(text, tag = 'button, a, summary') {
@@ -53,7 +65,7 @@ export async function start(opts = {}) {
     async finish(label, ignore) {
       const real = problems.filter(p => !(ignore && ignore.test(p)));
       console.log('PROBLEMS', JSON.stringify(real, null, 1));
-      if (real.length) failed++;
+      if (real.length) { failed++; if (process.env.GITHUB_ACTIONS) console.log('::error title=Browser console problems::' + real.join(' | ').replace(/\r?\n/g, ' ').slice(0, 1500)); }
       await browser.close();
       console.log(failed ? `${label}: ${failed} FAILED` : `${label}: ALL PASSED`);
       process.exit(failed ? 1 : 0);

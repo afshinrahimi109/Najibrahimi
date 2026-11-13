@@ -110,6 +110,15 @@ try {
   t.check('suggestion appears in the reply box', await t.waitText('پیشنهاد دستیار در کادر پایین', 60000));
   t.check('reply box holds the suggestion', await page.evaluate(() => [...document.querySelectorAll('.thread textarea')].some(x => x.value.length > 5)));
   await t.shot('22-suggestion');
+  // a half-written reply is still there after the list redraws itself (something else changed on the page meanwhile)
+  const pick = text => [...document.querySelectorAll('.thread')].find(c => c.innerText.includes(text));
+  await page.evaluate(`(${pick})('آدرس دقیق').querySelector('textarea').focus()`);
+  await page.keyboard.type('نیمه‌کاره');
+  await page.evaluate(() => document.activeElement.blur());
+  const other = (await t.api('/api/comments?filter=open')).items.find(x => x.top.text.includes('دفعهٔ قبل'));
+  await page.evaluate(id => fetch('/api/comments/' + id + '/dismiss', {method: 'POST', headers: {'X-IA': '1', 'Content-Type': 'application/json'}, body: '{}'}), other.id);
+  await page.waitForFunction(`!(${pick})('دفعهٔ قبل عالی بود')`, {timeout: 12000});
+  t.check('half-written reply survives a redraw', await page.evaluate(`(${pick})('آدرس دقیق').querySelector('textarea').value`) === 'نیمه‌کاره');
   // hidden filter shows the hidden comment and can bring it back
   await t.clickText('مخفی‌شده'); await sleep(900);
   t.check('hidden filter lists the spam comment', await page.evaluate(() => document.body.innerText.includes('follow-shop')));
@@ -209,6 +218,7 @@ try {
 } catch (e) {
   t.fail();
   console.log('EXCEPTION', e.message);
+  if (process.env.GITHUB_ACTIONS) console.log('::error title=Panel script stopped::' + String(e.message).replace(/\r?\n/g, ' '));
   await page.screenshot({path: out + '/99-exception.png'});
 }
 await t.finish('UI FLOWS');

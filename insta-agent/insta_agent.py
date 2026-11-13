@@ -4154,7 +4154,7 @@ details.box>.col{gap:8px}
 <script nonce="__NONCE__">
 'use strict';
 const D = document, $ = (s, r) => (r || D).querySelector(s);
-const S = {st: null, authed: true, tab: 'home', sub: {content: 'queue', inbox: 'comments'}, filter: 'open', days: 7, seq: 0, refresh: false};
+const S = {st: null, authed: true, tab: 'home', sub: {content: 'queue', inbox: 'comments'}, filter: 'open', days: 7, seq: 0, refresh: false, typed: {}};
 const VIEWS = {};
 const ICONS = {
   home: 'M3 10l9-7 9 7v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z M9 22V12h6v10', grid: 'M3 3h7v7H3z M14 3h7v7h-7z M14 14h7v7h-7z M3 14h7v7H3z',
@@ -4250,7 +4250,16 @@ async function run(btn, fn) {
   catch (e) { if (!e || !e.silent) toast((e && e.message) || 'خطا', 'bad'); }
   finally { if (btn) btn.disabled = false; }
 }
-async function refresh() { S.st = await GET('/api/status'); if (S.st.connected) { paintTop(); paintNav(); } }
+/* The newest answer wins: a slow background poll must not undo what a later request has already shown. */
+let stAsked = 0, stShown = 0;
+function putStatus(st) { stShown = ++stAsked; S.st = st; }
+async function loadStatus() {
+  const n = ++stAsked, st = await GET('/api/status');
+  if (n < stShown) return false;
+  stShown = n; S.st = st;
+  return true;
+}
+async function refresh() { if (await loadStatus() && S.st.connected) { paintTop(); paintNav(); } }
 
 /* ───── bottom sheets ───── */
 function sheet(title, o) {
@@ -4323,7 +4332,7 @@ async function render(fresh) {
 async function poll() {
   if (D.hidden || !S.authed) return;
   const prev = S.st;
-  try { S.st = await GET('/api/status'); } catch (e) { return; }
+  try { if (!await loadStatus()) return; } catch (e) { return; }
   if (!prev || prev.connected !== S.st.connected) return render(true);
   if (!S.st.connected) return;
   paintTop(); paintNav();
@@ -4336,7 +4345,7 @@ async function poll() {
 function loginView() {
   const inp = h('input', {class: 'in ltr center', placeholder: 'ABCDE-FGHJK', autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false', 'aria-label': 'کد ورود'});
   const btn = h('button', {class: 'btn pri block', type: 'submit'}, icon('lock'), 'ورود');
-  const submit = e => { e.preventDefault(); run(btn, async () => { await POST('/api/login', {key: inp.value}); $('#toasts').textContent = ''; S.authed = true; S.st = await GET('/api/status'); render(true); }); };
+  const submit = e => { e.preventDefault(); run(btn, async () => { await POST('/api/login', {key: inp.value}); $('#toasts').textContent = ''; S.authed = true; await loadStatus(); render(true); }); };
   return [h('div', {class: 'hero'}, h('img', {src: '/icon.svg', alt: ''}), h('h2', null, 'ایجنت اینستاگرام'), h('p', {class: 'muted'}, 'کدی را که هنگام اجرای برنامه در ترمینال نشان داده شد وارد کن.')),
     h('form', {class: 'card col', onsubmit: submit}, h('label', {class: 'f'}, 'کد ورود (Key)'), inp, btn,
       h('p', {class: 'muted sm'}, 'کد را گم کرده‌ای؟ در ترمینال بزن: ', h('code', null, 'python insta_agent.py --show-key')))];
@@ -4352,7 +4361,7 @@ function guide() {
 }
 function tokenBox(done) {
   const ta = h('textarea', {class: 'in ltr', rows: 3, placeholder: 'IGAA…', 'aria-label': 'توکن', spellcheck: 'false', autocomplete: 'off'});
-  const btn = h('button', {class: 'btn pri block', onclick: () => run(btn, async () => { S.st = await POST('/api/connect', {token: ta.value}); toast('پیج وصل شد ✓'); done(); })}, icon('link'), 'اتصال به پیج');
+  const btn = h('button', {class: 'btn pri block', onclick: () => run(btn, async () => { putStatus(await POST('/api/connect', {token: ta.value})); toast('پیج وصل شد ✓'); done(); })}, icon('link'), 'اتصال به پیج');
   return [field('توکن دسترسی (Access Token)', ta), btn];
 }
 function connectView() {
@@ -4645,9 +4654,12 @@ function threadCard(t, keep) {
   const card = h('div', {class: 'card col thread'});
   const gone = () => { card.remove(); if (!keep && !$('#view .thread')) render(false); };
   const paint = t => {
-    const ta = h('textarea', {class: 'in', rows: 1, placeholder: 'پاسخ بده…', 'aria-label': 'پاسخ', value: t.suggest || ''});
+    /* a half-written reply survives the list being redrawn when new comments arrive */
+    const ta = h('textarea', {class: 'in', rows: 1, placeholder: 'پاسخ بده…', 'aria-label': 'پاسخ', value: t.id in S.typed ? S.typed[t.id] : (t.suggest || '')});
+    ta.addEventListener('input', () => { S.typed[t.id] = ta.value; });
     const act = (btn, action, body, msg, id) => run(btn, async () => {
       const r = await POST('/api/comments/' + (id || t.id) + '/' + action, body);
+      if (action === 'reply' || action === 'delete') delete S.typed[t.id];
       toast(msg); await refresh();
       if (r.thread && (keep || S.filter !== 'open' || r.thread.open)) paint(r.thread); else gone();
     });
@@ -4667,7 +4679,7 @@ function menu(t, act, paint) {
   const s = sheet('کامنت @' + t.top.username), target = [t.top].concat(t.replies).filter(c => !c.mine).pop() || t.top;
   const item = (ic, label, fn, cls) => h('button', {class: 'btn block ' + (cls || ''), onclick: e => fn(e.currentTarget)}, icon(ic), label);
   add(s.body,
-    item('spark', 'پیشنهاد پاسخ از دستیار', b => run(b, async () => { const r = await POST('/api/comments/' + t.id + '/suggest'); t.suggest = r.text; s.close(); paint(t); })),
+    item('spark', 'پیشنهاد پاسخ از دستیار', b => run(b, async () => { const r = await POST('/api/comments/' + t.id + '/suggest'); t.suggest = r.text; delete S.typed[t.id]; s.close(); paint(t); })),
     item('send', 'پیام خصوصی (دایرکت) به این کاربر', () => {
       s.close();
       const d = sheet('پیام خصوصی به @' + target.username), ta = h('textarea', {class: 'in', rows: 3, placeholder: 'متن پیام…', 'aria-label': 'پیام خصوصی'});
@@ -4814,7 +4826,7 @@ VIEWS.agent = async () => {
     h('div', {class: 'card col'}, h('b', null, 'اتصال پیج'), h('div', {class: 'muted sm'}, h('span', {class: 'ltr'}, '@' + st.account.username), exp),
       h('div', {class: 'row wrap'}, h('button', {class: 'btn sm', onclick: tokenSheet}, 'توکن تازه'),
         st.account.login === 'ig' ? h('button', {class: 'btn sm', onclick: e => run(e.currentTarget, async () => { await POST('/api/token/refresh'); toast('توکن تمدید شد ✓'); await refresh(); render(false); })}, 'تمدید توکن') : null,
-        h('button', {class: 'btn sm danger', onclick: async () => { if (await ask('اتصال پیج برداشته شود؟ تا اتصال دوباره هیچ پستی منتشر نمی‌شود.', 'قطع اتصال', true)) run(null, async () => { S.st = await POST('/api/disconnect'); render(true); }); }}, 'قطع اتصال'))),
+        h('button', {class: 'btn sm danger', onclick: async () => { if (await ask('اتصال پیج برداشته شود؟ تا اتصال دوباره هیچ پستی منتشر نمی‌شود.', 'قطع اتصال', true)) run(null, async () => { putStatus(await POST('/api/disconnect')); render(true); }); }}, 'قطع اتصال'))),
     h('p', {class: 'muted sm center'}, 'ایجنت اینستاگرام — نسخهٔ __VERSION__')];
 };
 async function settingsSheet() {
@@ -4877,7 +4889,7 @@ function helpSheet() {
 fill($('#fab'), icon('plus'));
 $('#fab').addEventListener('click', () => composer());
 (async () => {
-  try { S.st = await GET('/api/status'); } catch (e) { if (e.status !== 401) S.st = null; }
+  try { await loadStatus(); } catch (e) { if (e.status !== 401) S.st = null; }
   render(true);
   setInterval(poll, 4000);
   D.addEventListener('visibilitychange', () => { if (!D.hidden) poll(); });
