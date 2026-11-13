@@ -405,7 +405,7 @@ class Settings:
         if not isinstance(data, dict):
             raise UserError("قالب تنظیمات نادرست است.")
         cur = self.all()
-        stamp = now()
+        stamp = float(int(now()))
 
         def walk(dst, src, ref, path):
             for k, v in src.items():
@@ -484,6 +484,8 @@ class GraphError(Exception):
 
     def classify(self):
         c, s = self.code, self.subcode
+        if s in (2534022, 2018278, 2018108):
+            return "window"
         if s == 2207027 or c == 9007:
             return "not_ready"
         if s == 2207008 or c == 24:
@@ -523,6 +525,9 @@ class GraphError(Exception):
         if k == "permission":
             return ("توکن اجازهٔ این کار را ندارد. هنگام ساختن توکن باید همهٔ دسترسی‌ها (انتشار، کامنت، پیام، آمار) "
                     "فعال باشد. برای دایرکت با عموم مردم، متا «Advanced Access» می‌خواهد.")
+        if k == "window":
+            return ("اینستاگرام اجازهٔ این پیام را نداد: از آخرین پیام این کاربر بیش از ۲۴ ساعت گذشته است "
+                    "(یا برای این کامنت قبلاً یک پیام خصوصی فرستاده شده).")
         if k == "throttle":
             return "اینستاگرام موقتاً سقف درخواست‌ها را بسته است؛ ایجنت کمی بعد خودش دوباره تلاش می‌کند."
         if k == "blocked":
@@ -1913,3 +1918,2001 @@ class Publisher:
                 self.agent.note("پست منتشر شد ولی تنظیم کامنت آن انجام نشد: " + e.fa, "warn", "publish")
         self.agent.media_at = 0
         self.agent.due.pop("quota", None)
+
+
+# ───────────────────────────── comments inbox ─────────────────────────────
+
+THREAD_ID = "CASE WHEN parent_id='' THEN id ELSE parent_id END"
+
+
+class Inbox:
+    def __init__(self, agent):
+        self.agent, self.db = agent, agent.db
+
+    def is_me(self, uid, username):
+        a = self.agent.ig.acct
+        if uid and str(uid) in (a.get("ig_id"), a.get("scoped_id"), a.get("page_id")):
+            return True
+        return bool(username) and str(username).lower() == (a.get("username") or "").lower()
+
+    # ── reading from Instagram ──
+    def sync(self, force=False):
+        done = 0
+        for i, m in enumerate(self.agent.media_list(refresh=True)[:25]):
+            row = self.db.one("SELECT seen_count, synced_at FROM media WHERE id=?", (str(m.get("id")),))
+            if row is None:
+                continue
+            count = m.get("comments_count")
+            age = now() - row["synced_at"]
+            if count is None:
+                need = i < 10 and age > 600            # this token cannot read the counter → look on a timer
+            else:
+                count = int(count)
+                need = row["synced_at"] == 0 or row["seen_count"] != count or (i < 3 and age > 600)
+                if need and count == 0 and row["seen_count"] <= 0 and not force:
+                    self.db.x("UPDATE media SET seen_count=0, synced_at=? WHERE id=?", (now(), str(m["id"])))
+                    continue
+            if not (need or force):
+                continue
+            self.sync_media(str(m["id"]), count)
+            done += 1
+            if done >= 8 and not force:
+                break
+
+    def sync_media(self, media_id, count=None):
+        data, more = self.agent.ig.comments(media_id)
+        seen, mine_new, complete = set(), [], set()
+
+        def upsert(c, parent=""):
+            cid = str(c.get("id") or "")
+            if not cid:
+                return
+            seen.add(cid)
+            frm = c.get("from") or {}
+            username = frm.get("username") or c.get("username") or ""
+            uid = str(frm.get("id") or "")
+            mine = 1 if self.is_me(uid, username) else 0
+            ts = parse_ts(c.get("timestamp")) or now()
+            hidden = 1 if c.get("hidden") else 0
+            if self.db.one("SELECT id FROM comments WHERE id=?", (cid,)) is None:
+                state = "done" if (mine or hidden or ts < now() - FRESH_SEC) else "open"
+                self.db.x("INSERT INTO comments (id, media_id, parent_id, user_id, username, text, ts, hidden, mine, state) "
+                          "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                          (cid, media_id, parent, uid, username, c.get("text") or "", ts, hidden, mine, state))
+                if mine:
+                    mine_new.append((parent or cid, ts))
+            else:
+                self.db.x("UPDATE comments SET text=?, hidden=?, deleted=0, username=? WHERE id=?",
+                          (c.get("text") or "", hidden, username, cid))
+
+        for c in data:
+            upsert(c)
+            replies = (c.get("replies") or {}).get("data") or []
+            if len(replies) < 25:
+                complete.add(str(c.get("id")))
+            for r in replies:
+                upsert(r, str(c.get("id")))
+        for parent, ts in mine_new:                    # answered from the Instagram app itself → nothing left to do
+            self.db.x("UPDATE comments SET state='done' WHERE (id=? OR parent_id=?) AND mine=0 AND ts<=?", (parent, parent, ts))
+        if not more:
+            grace = now() - 120
+            for row in self.db.q("SELECT id, parent_id, mine, hidden, ts FROM comments WHERE media_id=? AND deleted=0", (media_id,)):
+                if row["id"] in seen or row["hidden"] or (row["mine"] and row["ts"] > grace):
+                    continue
+                if row["parent_id"] and row["parent_id"] in seen and row["parent_id"] not in complete:
+                    continue                           # a reply beyond the first 25 we asked for
+                self.db.x("UPDATE comments SET deleted=1, state='done' WHERE id=?", (row["id"],))
+        self.db.x("UPDATE media SET seen_count=?, synced_at=? WHERE id=?", (-1 if count is None else count, now(), media_id))
+
+    # ── lists for the panel ──
+    def media_brief(self, media_id):
+        row = self.db.one("SELECT data FROM media WHERE id=?", (media_id,))
+        m = jload(row["data"], {}) if row else {}
+        return {"id": media_id, "caption": (m.get("caption") or "")[:140], "permalink": m.get("permalink") or "",
+                "thumb": m.get("thumbnail_url") or m.get("media_url") or "", "type": m.get("media_type") or ""}
+
+    @staticmethod
+    def cview(c):
+        return {"id": c["id"], "username": c["username"], "text": c["text"], "ts": c["ts"], "mine": bool(c["mine"]),
+                "hidden": bool(c["hidden"]), "open": c["state"] == "open" and not c["mine"] and not c["hidden"],
+                "dm_sent": bool(c["dm_sent"])}
+
+    def thread(self, tid):
+        top = self.db.one("SELECT * FROM comments WHERE id=? AND deleted=0", (str(tid),))
+        if not top:
+            return None
+        if top["parent_id"]:
+            return self.thread(top["parent_id"])
+        replies = self.db.q("SELECT * FROM comments WHERE parent_id=? AND deleted=0 ORDER BY ts, id", (top["id"],))
+        rows = [top] + replies
+        opens = [c for c in rows if c["state"] == "open" and not c["mine"] and not c["hidden"]]
+        return {"id": top["id"], "media": self.media_brief(top["media_id"]), "top": self.cview(top),
+                "replies": [self.cview(c) for c in replies], "open": bool(opens), "suggest": top["suggest"],
+                "last_ts": max(c["ts"] for c in (opens or rows))}
+
+    def threads(self, flt="open", media_id=None):
+        if media_id:
+            ids = self.db.q("SELECT id AS tid FROM comments WHERE media_id=? AND parent_id='' AND deleted=0 ORDER BY ts DESC LIMIT 60",
+                            (str(media_id),))
+        elif flt == "open":
+            ids = self.db.q("SELECT DISTINCT %s AS tid FROM comments WHERE state='open' AND mine=0 AND deleted=0 AND hidden=0 LIMIT 200" % THREAD_ID)
+        elif flt == "hidden":
+            ids = self.db.q("SELECT DISTINCT %s AS tid FROM comments WHERE hidden=1 AND deleted=0 LIMIT 200" % THREAD_ID)
+        else:
+            ids = self.db.q("SELECT id AS tid FROM comments WHERE parent_id='' AND deleted=0 ORDER BY ts DESC LIMIT 60")
+        out = [t for t in (self.thread(r["tid"]) for r in ids) if t]
+        out.sort(key=lambda t: -t["last_ts"])
+        return out[:80]
+
+    def open_count(self):
+        return self.db.val("SELECT COUNT(DISTINCT %s) FROM comments WHERE state='open' AND mine=0 AND deleted=0 AND hidden=0" % THREAD_ID)
+
+    # ── actions ──
+    def row(self, cid):
+        c = self.db.one("SELECT * FROM comments WHERE id=? AND deleted=0", (str(cid),))
+        if not c:
+            raise UserError("این کامنت دیگر وجود ندارد.", 404)
+        return c
+
+    @staticmethod
+    def ukey(c):
+        return "c:" + (c["user_id"] or c["username"])
+
+    def reply(self, cid, text, actor="user", rule_id=0):
+        text = str(text or "").strip()
+        if not text:
+            raise UserError("متن پاسخ خالی است.")
+        if len(text) > 2200:
+            raise UserError("پاسخ خیلی بلند است.")
+        c = self.row(cid)
+        top = c["parent_id"] or c["id"]                # Instagram only takes replies on the top comment of a thread
+        new_id = self.agent.ig.reply(top, text) or ("local-" + secrets.token_hex(6))
+        a = self.agent.ig.acct
+        self.db.x("INSERT OR REPLACE INTO comments (id, media_id, parent_id, user_id, username, text, ts, mine, state) "
+                  "VALUES (?,?,?,?,?,?,?,1,'done')",
+                  (new_id, c["media_id"], top, a.get("ig_id") or "", a.get("username") or "", text, now()))
+        self.db.x("UPDATE comments SET state='done', suggest='' WHERE (id=? OR parent_id=?) AND mine=0", (top, top))
+        self.db.x("UPDATE media SET seen_count=seen_count+1 WHERE id=? AND seen_count>=0", (c["media_id"],))
+        self.agent.acted("reply", c["id"], self.ukey(c), actor, rule_id, text)
+        return new_id
+
+    def private(self, cid, text, actor="user", rule_id=0):
+        text = str(text or "").strip()
+        if not text:
+            raise UserError("متن پیام خالی است.")
+        if len(text.encode("utf-8")) > 1000:
+            raise UserError("پیام بلند است (اینستاگرام حداکثر ۱۰۰۰ بایت می‌پذیرد؛ حدود ۵۰۰ حرف فارسی).")
+        c = self.row(cid)
+        if c["mine"]:
+            raise UserError("این کامنت را خود پیج نوشته است.")
+        if c["dm_sent"]:
+            raise UserError("برای این کامنت قبلاً یک پیام خصوصی فرستاده شده است (اینستاگرام فقط یک بار اجازه می‌دهد).")
+        if now() - c["ts"] > 7 * 86400:
+            raise UserError("از این کامنت بیش از ۷ روز گذشته و اینستاگرام دیگر اجازهٔ پیام خصوصی نمی‌دهد.")
+        self.agent.ig.send({"comment_id": c["id"]}, text)
+        self.db.x("UPDATE comments SET dm_sent=1 WHERE id=?", (c["id"],))
+        self.agent.acted("private", c["id"], self.ukey(c), actor, rule_id, text)
+        self.agent.due.pop("dms", None)
+
+    def hide(self, cid, hide=True, actor="user", rule_id=0):
+        c = self.row(cid)
+        self.agent.ig.hide(c["id"], hide)
+        if hide:
+            self.db.x("UPDATE comments SET hidden=1, state='done' WHERE id=?", (c["id"],))
+        else:
+            self.db.x("UPDATE comments SET hidden=0 WHERE id=?", (c["id"],))
+        self.agent.acted("hide" if hide else "unhide", c["id"], "", actor, rule_id, c["text"])
+
+    def delete(self, cid):
+        c = self.row(cid)
+        self.agent.ig.delete_comment(c["id"])
+        self.db.x("UPDATE comments SET deleted=1, state='done' WHERE id=? OR parent_id=?", (c["id"], c["id"]))
+        self.db.x("UPDATE media SET seen_count=-1 WHERE id=?", (c["media_id"],))
+        self.agent.acted("delete", c["id"], "", "user", 0, c["text"])
+
+    def dismiss(self, cid):
+        c = self.row(cid)
+        top = c["parent_id"] or c["id"]
+        self.db.x("UPDATE comments SET state='done' WHERE id=? OR parent_id=?", (top, top))
+
+    def dismiss_all(self):
+        self.db.x("UPDATE comments SET state='done' WHERE state='open'")
+
+    def suggest(self, cid):
+        c = self.row(cid)
+        top = c["parent_id"] or c["id"]
+        target = self.db.one("SELECT * FROM comments WHERE (id=? OR parent_id=?) AND mine=0 AND deleted=0 "
+                             "ORDER BY (state='open') DESC, ts DESC LIMIT 1", (top, top)) or c
+        out = self.agent.ai.reply(target["text"], self.media_brief(c["media_id"])["caption"])
+        self.db.x("UPDATE comments SET suggest=? WHERE id=?", (out["text"], top))
+        return out
+
+    # ── automation ──
+    def automate(self):
+        s = self.agent.settings.all()
+        auto, since = s["auto"], s["since"]
+        if not s["autopilot"] or not (auto["comment_reply"] or auto["spam_hide"] or auto["ai_suggest"]):
+            return
+        rows = self.db.q("SELECT * FROM comments WHERE state='open' AND mine=0 AND deleted=0 AND hidden=0 AND auto=0 "
+                         "AND ts>=? ORDER BY ts LIMIT 25", (now() - AUTO_MAX_AGE,))
+        ai_calls = 0
+        for c in rows:
+            mark = "UPDATE comments SET auto=1 WHERE id=?"     # always written BEFORE acting: never answer twice
+            if auto["spam_hide"] and c["ts"] >= since["spam_hide"] and looks_spam(c["text"]):
+                if not self.agent.may_act():
+                    return
+                self.db.x(mark, (c["id"],))
+                try:
+                    self.hide(c["id"], True, actor="auto")
+                    self.agent.note("کامنت تبلیغاتی @%s مخفی شد: «%s»" % (c["username"], c["text"][:70]), "info", "auto")
+                except GraphError as e:
+                    self.agent.problem(e, "comments")
+                continue
+            if auto["comment_reply"] and c["ts"] >= since["comment_reply"]:
+                rule = self.agent.rules.match("comment", c["text"])
+                if rule:
+                    if self.agent.quiet():
+                        continue
+                    if not self.agent.may_act():
+                        return
+                    self.db.x(mark, (c["id"],))
+                    if not self.agent.cooling(self.ukey(c)):
+                        self.apply(rule, c)
+                    continue
+            if auto["ai_suggest"] and c["ts"] >= since["ai_suggest"] and ai_calls < 3:
+                ai_calls += 1
+                self.db.x(mark, (c["id"],))
+                out = self.agent.ai.reply(c["text"], self.media_brief(c["media_id"])["caption"])
+                send = (auto["ai_send"] and out["source"] == "ai" and c["ts"] >= since["ai_send"] and not self.agent.quiet()
+                        and not self.agent.cooling(self.ukey(c)) and self.agent.may_act())
+                try:
+                    if send:
+                        self.reply(c["id"], out["text"], actor="ai")
+                        self.agent.note("دستیار به کامنت @%s پاسخ داد: «%s»" % (c["username"], out["text"][:70]), "info", "auto")
+                    else:
+                        self.db.x("UPDATE comments SET suggest=? WHERE id=?", (out["text"], c["parent_id"] or c["id"]))
+                except GraphError as e:
+                    self.agent.problem(e, "comments")
+
+    def apply(self, rule, c):
+        rules = self.agent.rules
+        try:
+            if rule["replies"]:
+                self.reply(c["id"], rules.render(random.choice(rule["replies"]), c["username"]), "rule", rule["id"])
+            if rule["hide"]:
+                self.hide(c["id"], True, "rule", rule["id"])
+        except GraphError as e:
+            self.agent.problem(e, "comments")
+            self.agent.note("پاسخ خودکار به @%s فرستاده نشد: %s" % (c["username"], e.fa), "warn", "auto-fail", 600)
+            return
+        if rule["private"]:
+            try:
+                self.private(c["id"], rules.render(rule["private"], ""), "rule", rule["id"])
+            except (GraphError, UserError) as e:
+                why = e.fa if isinstance(e, GraphError) else e.message
+                self.agent.note("پیام خصوصی خودکار فرستاده نشد: " + why, "warn", "auto-private", 3600)
+        self.db.x("UPDATE comments SET state='done' WHERE id=?", (c["id"],))
+        rules.hit(rule["id"])
+        self.agent.note("به کامنت @%s طبق قانون «%s» رسیدگی شد." % (c["username"], rule["name"]), "info", "auto")
+
+
+# ───────────────────────────── direct messages ─────────────────────────────
+
+class Direct:
+    OPEN = "last_from_me=0 AND last_id!='' AND last_id!=handled_id"
+
+    def __init__(self, agent):
+        self.agent, self.db = agent, agent.db
+
+    def is_me(self, p):
+        return self.agent.inbox.is_me((p or {}).get("id"), (p or {}).get("username") or "")
+
+    def sync(self, force=False):
+        for c in self.agent.ig.conversations():
+            cid = str(c.get("id") or "")
+            if not cid:
+                continue
+            updated = parse_ts(c.get("updated_time"))
+            row = self.db.one("SELECT * FROM convs WHERE id=?", (cid,))
+            if row and row["updated"] >= updated and not force and now() - updated > 120:
+                continue                               # (a chat changed in the last 2 minutes is read again: same-second messages)
+            other = None
+            for p in (c.get("participants") or {}).get("data") or []:
+                if not self.is_me(p):
+                    other = p
+            self.load(cid, updated, other, row)
+
+    def load(self, cid, updated, other, row):
+        items = []
+        for m in reversed(self.agent.ig.messages(cid)):       # Instagram lists newest first
+            mid = str(m.get("id") or "")
+            if not mid:
+                continue
+            frm = m.get("from") or {}
+            text = m.get("message") or ("📎 پیوست" if m.get("attachments") else "")
+            item = {"id": mid, "mine": self.is_me(frm), "text": text, "ts": parse_ts(m.get("created_time")) or now(), "from": frm}
+            items.append(item)
+            self.db.x("INSERT OR IGNORE INTO msgs (id, conv_id, from_me, text, ts) VALUES (?,?,?,?,?)",
+                      (mid, cid, 1 if item["mine"] else 0, text, item["ts"]))
+        if not items:
+            return
+        items.sort(key=lambda i: i["ts"])
+        last = items[-1]
+        self.db.x("DELETE FROM msgs WHERE conv_id=? AND id LIKE 'local-%' AND ts<=?", (cid, last["ts"] + 5))
+        if other is None:
+            other = next((i["from"] for i in items if not i["mine"]), None)
+        user_ts = max([i["ts"] for i in items if not i["mine"]] or [0])
+        uid = str((other or {}).get("id") or (row["user_id"] if row else ""))
+        name = (other or {}).get("username") or (row["username"] if row else "") or "کاربر"
+        if row is None:
+            handled = last["id"] if (last["mine"] or last["ts"] < now() - FRESH_SEC) else ""
+            self.db.x("INSERT INTO convs (id, user_id, username, updated, last_text, last_id, last_ts, last_from_me, last_user_ts, "
+                      "handled_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                      (cid, uid, name, updated, last["text"], last["id"], last["ts"], 1 if last["mine"] else 0, user_ts, handled))
+        else:
+            self.db.x("UPDATE convs SET user_id=?, username=?, updated=?, last_text=?, last_id=?, last_ts=?, last_from_me=?, "
+                      "last_user_ts=? WHERE id=?",
+                      (uid, name, updated, last["text"], last["id"], last["ts"], 1 if last["mine"] else 0,
+                       max(user_ts, row["last_user_ts"]), cid))
+
+    def view(self, c):
+        return {"id": c["id"], "username": c["username"], "last_text": c["last_text"], "last_ts": c["last_ts"],
+                "last_from_me": bool(c["last_from_me"]), "suggest": c["suggest"],
+                "open": (not c["last_from_me"]) and c["last_id"] != "" and c["last_id"] != c["handled_id"],
+                "can_reply": now() - c["last_user_ts"] < 86400, "window_until": c["last_user_ts"] + 86400}
+
+    def list(self):
+        return [self.view(c) for c in self.db.q("SELECT * FROM convs ORDER BY last_ts DESC LIMIT 100")]
+
+    def open_count(self):
+        return self.db.val("SELECT COUNT(*) FROM convs WHERE " + self.OPEN)
+
+    def row(self, cid):
+        c = self.db.one("SELECT * FROM convs WHERE id=?", (str(cid),))
+        if not c:
+            raise UserError("این گفتگو پیدا نشد.", 404)
+        return c
+
+    def get(self, cid):
+        c = self.row(cid)
+        msgs = self.db.q("SELECT id, from_me, text, ts FROM msgs WHERE conv_id=? ORDER BY ts DESC, rowid DESC LIMIT 60", (c["id"],))
+        return {"conv": self.view(c), "messages": [{"id": m["id"], "mine": bool(m["from_me"]), "text": m["text"], "ts": m["ts"]}
+                                                   for m in reversed(msgs)]}
+
+    def send(self, cid, text, actor="user", rule_id=0):
+        text = str(text or "").strip()
+        if not text:
+            raise UserError("متن پیام خالی است.")
+        if len(text.encode("utf-8")) > 1000:
+            raise UserError("پیام بلند است (اینستاگرام حداکثر ۱۰۰۰ بایت می‌پذیرد؛ حدود ۵۰۰ حرف فارسی).")
+        c = self.row(cid)
+        if not c["user_id"]:
+            raise UserError("شناسهٔ این کاربر مشخص نیست؛ از خود اینستاگرام پاسخ بده.")
+        if now() - c["last_user_ts"] > 86400:
+            raise UserError("از آخرین پیام این کاربر بیش از ۲۴ ساعت گذشته است و اینستاگرام اجازهٔ پاسخ از این راه را "
+                            "نمی‌دهد. از خود اپ اینستاگرام جواب بده.")
+        self.agent.ig.send({"id": c["user_id"]}, text)
+        mid = "local-" + secrets.token_hex(8)
+        self.db.x("INSERT INTO msgs (id, conv_id, from_me, text, ts) VALUES (?,?,1,?,?)", (mid, c["id"], text, now()))
+        self.db.x("UPDATE convs SET last_text=?, last_id=?, last_ts=?, last_from_me=1, suggest='' WHERE id=?",
+                  (text, mid, now(), c["id"]))
+        self.agent.acted("dm", c["id"], "d:" + c["id"], actor, rule_id, text)
+
+    def dismiss(self, cid):
+        self.db.x("UPDATE convs SET handled_id=last_id WHERE id=?", (self.row(cid)["id"],))
+
+    def suggest(self, cid):
+        c = self.row(cid)
+        last = self.db.one("SELECT text FROM msgs WHERE conv_id=? AND from_me=0 ORDER BY ts DESC LIMIT 1", (c["id"],))
+        out = self.agent.ai.reply(last["text"] if last else c["last_text"], kind="dm")
+        self.db.x("UPDATE convs SET suggest=? WHERE id=?", (out["text"], c["id"]))
+        return out
+
+    def automate(self):
+        s = self.agent.settings.all()
+        if not (s["autopilot"] and s["auto"]["dm_reply"]):
+            return
+        floor = max(s["since"]["dm_reply"], now() - AUTO_MAX_AGE)
+        rows = self.db.q("SELECT * FROM convs WHERE %s AND last_id!=auto_id AND last_user_ts>=? ORDER BY last_user_ts LIMIT 20"
+                         % self.OPEN, (floor,))
+        for c in rows:
+            rule = self.agent.rules.match("dm", c["last_text"])
+            if not rule:
+                self.db.x("UPDATE convs SET auto_id=last_id WHERE id=?", (c["id"],))
+                continue
+            if self.agent.quiet():
+                continue
+            if not self.agent.may_act():
+                return
+            self.db.x("UPDATE convs SET auto_id=last_id WHERE id=?", (c["id"],))      # before sending: never twice
+            if self.agent.cooling("d:" + c["id"]):
+                continue
+            try:
+                self.send(c["id"], self.agent.rules.render(random.choice(rule["replies"]), c["username"]), "rule", rule["id"])
+                self.agent.rules.hit(rule["id"])
+                self.agent.note("به دایرکت @%s طبق قانون «%s» پاسخ داده شد." % (c["username"], rule["name"]), "info", "auto")
+            except GraphError as e:
+                self.agent.problem(e, "dms")
+                self.agent.note("پاسخ خودکار دایرکت به @%s فرستاده نشد: %s" % (c["username"], e.fa), "warn", "auto-fail", 600)
+            except UserError as e:
+                self.agent.note("پاسخ خودکار دایرکت فرستاده نشد: " + e.message, "warn", "auto-fail", 600)
+
+
+# ───────────────────────────── insights ─────────────────────────────
+
+METRIC_FA = [("reach", "ریچ (حساب‌های دیده)"), ("views", "بازدید"), ("accounts_engaged", "حساب‌های تعامل‌کرده"),
+             ("total_interactions", "کل تعامل‌ها"), ("likes", "لایک"), ("comments", "کامنت"), ("shares", "اشتراک‌گذاری"),
+             ("saves", "ذخیره"), ("saved", "ذخیره"), ("replies", "پاسخ به استوری"), ("profile_links_taps", "لمس لینک‌های پروفایل")]
+
+
+class Analytics:
+    def __init__(self, agent):
+        self.agent, self.db = agent, agent.db
+        self.detail_cache = {}
+
+    def media_rows(self):
+        return [jload(r["data"], {}) for r in self.db.q("SELECT data FROM media ORDER BY ts DESC LIMIT 200")]
+
+    def best_hours(self):
+        buckets = {}
+        for m in self.media_rows():
+            ts = parse_ts(m.get("timestamp"))
+            if not ts or ts < now() - 120 * 86400 or m.get("like_count") is None:
+                continue
+            hour = time.localtime(ts).tm_hour
+            buckets.setdefault(hour, []).append(int(m.get("like_count") or 0) + 2 * int(m.get("comments_count") or 0))
+        if sum(len(v) for v in buckets.values()) < 6:
+            return [12, 18, 21]
+        ranked = sorted(buckets, key=lambda h: -sum(buckets[h]) / float(len(buckets[h])))
+        return sorted(ranked[:3])
+
+    def top_posts(self, days):
+        rows = [m for m in self.media_rows() if parse_ts(m.get("timestamp")) >= now() - days * 86400]
+        rows.sort(key=lambda m: -(int(m.get("like_count") or 0) + 2 * int(m.get("comments_count") or 0)))
+        return [{"id": str(m.get("id")), "caption": (m.get("caption") or "")[:90], "type": m.get("media_type") or "",
+                 "thumb": m.get("thumbnail_url") or m.get("media_url") or "", "likes": m.get("like_count"),
+                 "comments": m.get("comments_count"), "ts": parse_ts(m.get("timestamp"))} for m in rows[:5]]
+
+    def overview(self, days=7, refresh=False):
+        days = 28 if str(days) == "28" else 7
+        key = "insights.%d" % days
+        data = self.db.get(key)
+        if refresh or not data or now() - data.get("fetched_at", 0) > 1800:
+            t = now()
+            try:
+                cur = self.agent.ig.account_insights(t - days * 86400, t)
+                prev = self.agent.ig.account_insights(t - 2 * days * 86400, t - days * 86400)
+                metrics = []
+                for name, label in METRIC_FA:
+                    if name in cur:
+                        p = prev.get(name)
+                        metrics.append({"key": name, "label": label, "value": cur[name],
+                                        "change": int(round((cur[name] - p) * 100.0 / p)) if p else None})
+                data = {"days": days, "metrics": metrics, "fetched_at": t, "error": ""}
+                self.db.set(key, data)
+            except GraphError as e:
+                self.agent.problem(e, "insights")
+                data = dict(data or {"days": days, "metrics": [], "fetched_at": 0})
+                data["error"] = e.fa
+        out = dict(data)
+        snaps = self.db.q("SELECT day, followers FROM snapshots ORDER BY day DESC LIMIT 60")[::-1]
+        inside = snaps[-(days + 1):]
+        out["followers"] = {"now": self.agent.ig.acct.get("followers"), "series": snaps,
+                            "delta": inside[-1]["followers"] - inside[0]["followers"] if len(inside) > 1 else None}
+        out["top"] = self.top_posts(days)
+        out["best_hours"] = self.best_hours()
+        return out
+
+    def media_detail(self, media_id):
+        media_id = str(media_id)
+        row = self.db.one("SELECT data FROM media WHERE id=?", (media_id,))
+        m = jload(row["data"], {}) if row else {}
+        if not m:
+            m = self.agent.ig.media_info(media_id)
+        hit = self.detail_cache.get(media_id)
+        if hit and now() - hit[0] < 600:
+            metrics, error = hit[1], ""
+        else:
+            product = (m.get("media_product_type") or "FEED").upper()
+            metrics, error, labels = [], "", dict(METRIC_FA)
+            try:
+                got = self.agent.ig.media_insights(media_id, product if product in MEDIA_METRICS else "FEED")
+                metrics = [{"key": k, "label": labels.get(k, k).replace(" (حساب‌های دیده)", ""), "value": v} for k, v in got.items()]
+                self.detail_cache[media_id] = (now(), metrics)
+                if len(self.detail_cache) > 200:
+                    self.detail_cache.clear()
+            except GraphError as e:
+                self.agent.problem(e, "insights")
+                error = e.fa
+        return {"media": m, "metrics": metrics, "error": error,
+                "open_comments": len([t for t in self.agent.inbox.threads(media_id=media_id) if t["open"]])}
+
+    def audience(self):
+        out, error = {}, ""
+        for name in ("gender", "age", "city", "country"):
+            try:
+                out[name] = self.agent.ig.demographics(name)[:8]
+            except GraphError as e:
+                if e.kind in ("auth", "network", "throttle"):
+                    self.agent.problem(e, "insights")
+                    raise
+                error = "اینستاگرام آمار مخاطبان را نداد (معمولاً پیج باید دست‌کم ۱۰۰ دنبال‌کننده داشته باشد)."
+        return {"groups": out, "error": error if not any(out.values()) else ""}
+
+
+# ───────────────────────────── the agent ─────────────────────────────
+
+INBOX_SEC = 60
+DM_SEC = 60
+
+
+class Agent:
+    """Owns all parts and runs the background loop that keeps the page going."""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        os.makedirs(cfg.data_dir, exist_ok=True)
+        try:
+            os.chmod(cfg.data_dir, 0o700)
+        except OSError:
+            pass
+        self.db = DB(os.path.join(cfg.data_dir, "agent.db"))
+        self.settings = Settings(self.db)
+        self.graph = Graph(cfg, self.settings)
+        self.graph.token = self.db.get("secret.token") or ""
+        self.ig = Instagram(cfg, self.db, self.graph)
+        if "version" in self.ig.acct:
+            self.graph.version = self.ig.acct["version"]
+        self.store = MediaStore(cfg, self.db, self.settings, self.graph)
+        self.ai = AI(cfg, self.settings, self.graph, self.ig)
+        self.rules = Rules(self.db)
+        self.publisher, self.inbox, self.direct, self.analytics = Publisher(self), Inbox(self), Direct(self), Analytics(self)
+        self.sim = None
+        self.wake, self.stop_flag = threading.Event(), threading.Event()
+        self.thread = None
+        self.tick_lock = threading.RLock()
+        self.due = {}
+        self.cool_until = self.media_at = 0.0
+        self.net_fails = 0
+        self.rules.seed(enabled=cfg.demo)
+
+    # ── life cycle ──
+    def start(self):
+        if self.thread is None:
+            self.stop_flag.clear()
+            self.thread = threading.Thread(target=self.loop, name="agent", daemon=True)
+            self.thread.start()
+
+    def stop(self):
+        self.stop_flag.set()
+        self.wake.set()
+        if self.thread is not None:
+            self.thread.join(timeout=15)
+            self.thread = None
+        self.store.tunnel.stop()
+
+    def loop(self):
+        while not self.stop_flag.is_set():
+            try:
+                self.tick()
+            except Exception:
+                log("agent:", traceback.format_exc())
+            self.wake.wait(self.cfg.tick)
+            self.wake.clear()
+
+    def tick(self, force=False):
+        with self.tick_lock:
+            if force:
+                self.due.clear()
+            if self.sim is not None and self.cfg.demo:
+                self.sim.live_tick()
+            if not self.ig.connected or self.ig.acct.get("invalid"):
+                return
+            self.job("publish", 0, self.publisher.tick)
+            if now() < self.cool_until:
+                return
+            if not self.graph.busy():
+                self.job("comments", INBOX_SEC, self.inbox.sync)
+                self.job("dms", DM_SEC, self.sync_dms)
+            self.job("auto", 0, self.automate)
+            self.job("profile", 1800, self.profile_job)
+            self.job("quota", 1800, self.quota_job)
+            self.job("token", 3600, self.token_job)
+            self.job("daily", 300, self.daily_job)
+            self.job("house", 3600, self.store.cleanup)
+
+    def job(self, name, every, fn):
+        if now() < self.due.get(name, 0):
+            return
+        self.due[name] = now() + every
+        try:
+            fn()
+            if name == "comments":
+                self.net_fails = 0
+        except GraphError as e:
+            self.problem(e, name)
+        except UserError as e:
+            log(name + ":", e.message)
+        except Exception:
+            log(name + ":", traceback.format_exc())
+
+    def problem(self, e, where=""):
+        """One place that decides what an Instagram error means for the agent as a whole."""
+        if e.kind == "auth":
+            if self.ig.acct.get("ig_id") and not self.ig.acct.get("invalid"):
+                self.ig.save_acct(invalid=e.fa)
+                self.note("اتصال پیج قطع شد. " + e.fa, "alert", "auth")
+        elif e.kind == "throttle":
+            self.cool_until = now() + 900
+            self.note(e.fa, "warn", "throttle", 3600)
+        elif e.kind == "network":
+            self.net_fails += 1
+            if self.net_fails >= 5:
+                self.note(e.fa, "warn", "network", 3600)
+        elif e.kind == "permission":
+            if where == "dms":
+                self.db.set("dm.blocked", e.fa)
+                self.due["dms"] = now() + 6 * 3600
+            label = {"dms": "دایرکت", "comments": "کامنت‌ها", "insights": "آمار", "publish": "انتشار"}.get(where, "اینستاگرام")
+            self.note("%s: %s" % (label, e.fa), "warn", "perm-" + where, 86400)
+        elif e.kind not in ("transient", "not_ready", "window"):
+            self.note(e.fa, "warn", "graph-" + where, 3600)
+
+    # ── jobs ──
+    def sync_dms(self):
+        self.direct.sync()
+        if self.db.get("dm.blocked"):
+            self.db.drop("dm.blocked")
+
+    def automate(self):
+        self.inbox.automate()
+        self.direct.automate()
+
+    def profile_job(self):
+        self.ig.refresh_profile()
+        self.snapshot()
+
+    def snapshot(self):
+        a = self.ig.acct
+        if a.get("followers") is None:
+            return
+        self.db.x("INSERT INTO snapshots (day, ts, followers, follows, media_count) VALUES (?,?,?,?,?) ON CONFLICT(day) DO UPDATE "
+                  "SET ts=excluded.ts, followers=excluded.followers, follows=excluded.follows, media_count=excluded.media_count",
+                  (time.strftime("%Y-%m-%d"), now(), a.get("followers") or 0, a.get("follows") or 0, a.get("media_count") or 0))
+
+    def quota_job(self):
+        try:
+            used, total = self.ig.quota()
+            self.db.set("quota", {"used": used, "total": total, "at": now()})
+        except GraphError as e:
+            if e.kind in ("auth", "throttle", "network"):
+                raise
+
+    def token_job(self):
+        a = self.ig.acct
+        if a.get("login") != "ig":
+            return
+        if now() >= (a.get("token_next") or 0):
+            try:
+                self.ig.refresh_token()
+                self.ig.save_acct(token_next=now() + 7 * 86400)
+                self.note("توکن پیج خودکار تمدید شد (۶۰ روز دیگر اعتبار دارد).", "info", "token")
+            except GraphError as e:
+                # A refused renewal alone does not prove the token is dead (it must be 24h old); normal calls decide that.
+                self.ig.save_acct(token_next=now() + 86400)
+                log("token renewal failed:", e.message)
+        left = (self.ig.acct.get("token_expires") or 0) - now()
+        if self.ig.acct.get("token_expires") and left < 7 * 86400:
+            self.note("اعتبار توکن پیج تا %s روز دیگر تمام می‌شود و تمدید خودکار انجام نشد. از بخش «ایجنت» توکن تازه بده."
+                      % fa(max(0, int(left / 86400))), "alert", "token-exp", 86400)
+
+    def daily_job(self):
+        if not self.settings.get("auto.daily_report"):
+            return
+        lt = time.localtime()
+        day = time.strftime("%Y-%m-%d", lt)
+        if lt.tm_hour < 21 or self.db.get("report.day") == day:
+            return
+        self.db.set("report.day", day)
+        text = self.report()
+        self.note(text, "info", "report")
+        self.push(text)
+
+    def report(self):
+        a, since = self.ig.acct, now() - 86400
+        snaps = self.db.q("SELECT followers FROM snapshots ORDER BY day DESC LIMIT 2")
+        delta = snaps[0]["followers"] - snaps[1]["followers"] if len(snaps) == 2 else 0
+        return ("گزارش امروز @%s\nدنبال‌کننده: %s (%s%s)\nپست منتشرشده: %s\nکارهای خودکار ایجنت: %s\nمنتظر پاسخ: %s کامنت و %s دایرکت"
+                % (a.get("username"), fa(a.get("followers") or 0), "+" if delta >= 0 else "−", fa(abs(delta)),
+                   fa(self.db.val("SELECT COUNT(*) FROM posts WHERE status='published' AND published_at>?", (since,))),
+                   fa(self.db.val("SELECT COUNT(*) FROM actions WHERE actor!='user' AND ts>?", (since,))),
+                   fa(self.inbox.open_count()), fa(self.direct.open_count())))
+
+    def facts(self):
+        a = self.ig.acct
+        return ("دنبال‌کننده: %s | دنبال‌شونده: %s | تعداد پست: %s\nکامنت منتظر پاسخ: %s | دایرکت منتظر پاسخ: %s\n"
+                "پست در صف انتشار: %s | پیش‌نویس: %s\nبهترین ساعت‌های انتشار: %s"
+                % (fa(a.get("followers") or 0), fa(a.get("follows") or 0), fa(a.get("media_count") or 0),
+                   fa(self.inbox.open_count()), fa(self.direct.open_count()),
+                   fa(self.db.val("SELECT COUNT(*) FROM posts WHERE status='scheduled'")),
+                   fa(self.db.val("SELECT COUNT(*) FROM posts WHERE status IN ('draft','canceled')")),
+                   "، ".join("%s:۰۰" % fa(h) for h in self.analytics.best_hours())))
+
+    # ── notes, limits, brakes ──
+    def note(self, text, level="info", kind="", dedupe=0):
+        if dedupe and kind and self.db.one("SELECT id FROM log WHERE kind=? AND ts>? LIMIT 1", (kind, now() - dedupe)):
+            return
+        self.db.x("INSERT INTO log (ts, level, kind, text) VALUES (?,?,?,?)", (now(), level, kind, text))
+        self.db.x("DELETE FROM log WHERE id<(SELECT MAX(id) FROM log)-400")
+        if level == "alert":
+            self.push(text)
+
+    def push(self, text):
+        try:
+            self.telegram("🤖 ایجنت اینستاگرام\n" + text)
+        except Exception as e:
+            log("telegram:", e)
+
+    def telegram(self, text):
+        t = self.settings.all()["telegram"]
+        if not (t["token"] and t["chat_id"]):
+            return False
+        url = "%s/bot%s/sendMessage" % (self.cfg.telegram_api, t["token"])
+        data = urllib.parse.urlencode({"chat_id": t["chat_id"], "text": text[:3900]}).encode("utf-8")
+        try:
+            status, _, body = self.graph.http("POST", url, data, {"Content-Type": "application/x-www-form-urlencoded"}, 15)
+        except GraphError:
+            raise UserError("به تلگرام وصل نشد (اینترنت یا پروکسی را بررسی کن).")
+        if status != 200 or not (jload(body.decode("utf-8", "replace"), {}) or {}).get("ok"):
+            raise UserError("تلگرام پیام را نپذیرفت؛ توکن ربات و شناسهٔ چت را بررسی کن.")
+        return True
+
+    def acted(self, kind, target, ukey, actor, rule_id, detail):
+        self.db.x("INSERT INTO actions (ts, kind, target, ukey, actor, rule_id, detail) VALUES (?,?,?,?,?,?,?)",
+                  (now(), kind, str(target), ukey, actor, int(rule_id or 0), str(detail)[:300]))
+        self.db.x("DELETE FROM actions WHERE ts<?", (now() - 30 * 86400,))
+
+    def may_act(self):
+        done = self.db.val("SELECT COUNT(*) FROM actions WHERE actor!='user' AND ts>?", (now() - 3600,))
+        if done >= self.settings.get("limits.per_hour"):
+            self.note("ایجنت به سقف کارهای خودکار در یک ساعت رسید و بقیه را کمی بعد انجام می‌دهد.", "warn", "cap", 3600)
+            return False
+        return True
+
+    def cooling(self, ukey):
+        minutes = self.settings.get("limits.cooldown_min")
+        if not minutes:
+            return False
+        return bool(self.db.one("SELECT id FROM actions WHERE ukey=? AND actor!='user' AND kind IN ('reply','dm','private') "
+                                "AND ts>? LIMIT 1", (ukey, now() - minutes * 60)))
+
+    def quiet(self):
+        lim = self.settings.all()["limits"]
+        a, b = lim["quiet_from"], lim["quiet_to"]
+        if not a or not b or a == b:
+            return False
+        t = time.strftime("%H:%M")
+        return (a <= t < b) if a < b else (t >= a or t < b)
+
+    # ── page ──
+    def media_list(self, refresh=False):
+        if self.ig.connected and (refresh or now() - self.media_at > 600):
+            items = self.ig.media(30)
+            with self.db.lock:
+                self.db.x("UPDATE media SET pos=999")
+                for i, m in enumerate(items):
+                    self.db.x("INSERT INTO media (id, data, ts, pos) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+                              "data=excluded.data, ts=excluded.ts, pos=excluded.pos",
+                              (str(m.get("id")), jdump(m), parse_ts(m.get("timestamp")), i))
+                self.db.x("DELETE FROM media WHERE pos=999 AND ts<?", (now() - 180 * 86400,))
+            self.media_at = now()
+        return [jload(r["data"], {}) for r in self.db.q("SELECT data FROM media WHERE pos<999 ORDER BY pos")]
+
+    def connect(self, token):
+        with self.tick_lock:
+            before = self.ig.acct
+            old = before.get("ig_id") or before.get("last_ig_id")
+            acct, stored = self.ig.connect(token)
+            if old and old != acct["ig_id"]:
+                self.wipe_page()
+            acct.update(connected_at=now(), token_at=now(), token_expires=0, token_next=now() + 25 * 3600, invalid="")
+            self.graph.token, self.graph.version = stored, acct["version"]
+            self.db.set("secret.token", stored)
+            self.db.set("account", acct)
+            self.db.drop("dm.blocked")
+            self.due.clear()
+            self.cool_until = self.media_at = 0.0
+            self.snapshot()
+            self.note("پیج @%s وصل شد ✓" % acct["username"], "ok", "connect")
+        self.wake.set()
+        return acct
+
+    def wipe_page(self):
+        """A different page was connected: nothing of the old page may leak into (or be published on) the new one."""
+        for table in ("comments", "convs", "msgs", "media", "snapshots", "actions"):
+            self.db.x("DELETE FROM " + table)
+        self.db.x("UPDATE posts SET status='draft', state='{}', manual=0, error='', progress='' "
+                  "WHERE status IN ('scheduled','publishing','failed','missed')")
+        for key in ("insights.7", "insights.28", "quota", "report.day"):
+            self.db.drop(key)
+
+    def disconnect(self):
+        with self.tick_lock:
+            a = self.ig.acct
+            self.graph.token = ""
+            self.db.drop("secret.token")
+            self.db.set("account", {"last_username": a.get("username") or "", "last_ig_id": a.get("ig_id") or ""})
+            self.note("اتصال پیج برداشته شد.", "info", "connect")
+
+    def status(self):
+        a, s, t = self.ig.acct, self.settings.all(), now()
+        day = time.mktime(tuple(time.localtime()[:3]) + (0, 0, 0, 0, 0, -1))
+        count = self.db.val
+        nxt = self.db.one("SELECT * FROM posts WHERE status='scheduled' ORDER BY scheduled_at LIMIT 1")
+        return {
+            "version": VERSION, "demo": self.cfg.demo, "connected": self.ig.connected, "now": t,
+            "account": {k: a.get(k) for k in ("username", "name", "picture", "followers", "follows", "media_count", "bio",
+                                              "login", "invalid", "token_expires", "connected_at", "last_username")},
+            "autopilot": s["autopilot"], "auto": s["auto"], "quiet": self.quiet(),
+            "counts": {
+                "open_comments": self.inbox.open_count(), "open_dms": self.direct.open_count(),
+                "scheduled": count("SELECT COUNT(*) FROM posts WHERE status='scheduled'"),
+                "publishing": count("SELECT COUNT(*) FROM posts WHERE status='publishing'"),
+                "failed": count("SELECT COUNT(*) FROM posts WHERE status IN ('failed','missed')"),
+                "drafts": count("SELECT COUNT(*) FROM posts WHERE status IN ('draft','canceled')"),
+                "published_today": count("SELECT COUNT(*) FROM posts WHERE status='published' AND published_at>=?", (day,)),
+                "auto_today": count("SELECT COUNT(*) FROM actions WHERE actor!='user' AND ts>=?", (day,)),
+                "unseen": count("SELECT COUNT(*) FROM log WHERE seen=0"),
+            },
+            "next_post": self.publisher.view(nxt) if nxt else None, "quota": self.db.get("quota"),
+            "daily_cap": s["limits"]["daily_posts"], "media": self.store.methods(), "ai": self.ai.mode(),
+            "dm_blocked": self.db.get("dm.blocked") or "", "busy": self.graph.busy() or t < self.cool_until,
+        }
+
+
+# ───────────────────────────── built-in simulator (demo mode and tests) ─────────────────────────────
+# A small in-memory stand-in for Meta's Graph API, served by this same program under /_sim/.
+# It lets the whole agent be tried (and tested) with a fake page and no internet.
+
+SIM_TOKEN = "IGAAsim0demo0token0000000000000000000000000000"
+SIM_FB_TOKEN = "EAAsim0demo0facebook0token00000000000000000000"
+SIM_PAGE_TOKEN = "EAAsim0demo0page0token0000000000000000000000000"
+PALETTE = [("#f97316", "#db2777"), ("#f59e0b", "#c2410c"), ("#0ea5e9", "#4338ca"), ("#10b981", "#047857"),
+           ("#8b5cf6", "#5b21b6"), ("#ef4444", "#991b1b"), ("#14b8a6", "#115e59"), ("#ec4899", "#9d174d")]
+
+
+class Sim:
+    LIVE = [("c", "maryam.k", "قیمت این لاته چنده؟"), ("c", "amir_h72", "خیلی قشنگه 😍"),
+            ("d", "sina.photo", "سلام، ساعت کاری‌تون چطوره؟"),
+            ("c", "best.followers.shop", "خرید فالوور ارزان و واقعی 👉 www.cheap-follow.xyz"),
+            ("c", "narges_r", "تا ساعت چند بازید؟"), ("c", "hamid.coffee", "عالی بود، دمتون گرم 👌"),
+            ("d", "kiana.m", "آدرس دقیق‌تون رو می‌فرستید؟"), ("c", "parisa.d", "هزینهٔ ارسال چقدره؟")]
+
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.token, self.fb_token, self.page_token = SIM_TOKEN, SIM_FB_TOKEN, SIM_PAGE_TOKEN
+        self.page_id = "100200300400500"
+        self.user = {"id": "9000000000000001", "user_id": "17841400000000001", "username": "demo.cafe", "name": "کافه دمو",
+                     "account_type": "BUSINESS", "followers_count": 1840, "follows_count": 312,
+                     "biography": "قهوهٔ تازه، هر روز ☕️ | سفارش: دایرکت", "website": "https://example.com"}
+        self.seq = 1000
+        self.media, self.stories, self.comments, self.convs, self.containers = [], [], {}, {}, {}
+        self.calls, self.faults, self.fetched, self.telegram = [], [], [], []
+        self.unknown_fields = set()
+        self.video_seconds = 3
+        self.lively = True
+        self.quota_used, self.quota_total = 0, 50
+        self.next_live, self.live_i = now() + 20, 0
+        self.seed()
+
+    def nid(self, prefix):
+        self.seq += 1
+        return "%s%012d" % (prefix, self.seq)
+
+    # ── content for the fake page ──
+    def seed(self):
+        t = now()
+        posts = [("لاتهٔ پاییزی با دارچین 🍂 امروز تا ساعت ۲۳ منتظرتونیم.\n#کافه #لاته #پاییز", "IMAGE", 0, 18, 214),
+                 ("صبح‌ها با بوی قهوهٔ تازه شروع می‌شه ☕️", "IMAGE", 1, 21, 162),
+                 ("پشت‌صحنهٔ دم‌کردن V60 🎬", "VIDEO", 2, 12, 530),
+                 ("منوی کیک‌های این هفته 🍰 ورق بزنید", "CAROUSEL_ALBUM", 3, 18, 389),
+                 ("دانهٔ تازه‌رسیدهٔ اتیوپی رسید!", "IMAGE", 5, 9, 121),
+                 ("لاته‌آرت امروز از باریستای خوبمون 🎬", "VIDEO", 7, 21, 742),
+                 ("صبحانهٔ دونفره، فقط جمعه‌ها", "IMAGE", 9, 12, 88),
+                 ("فضای دنج طبقهٔ بالا 🌿", "CAROUSEL_ALBUM", 12, 18, 276),
+                 ("موسیقی زنده پنجشنبه‌شب‌ها 🎶", "IMAGE", 15, 21, 305),
+                 ("چای ماسالا برای روزهای سرد", "IMAGE", 19, 15, 97)]
+        for i, (caption, mtype, days, hour, likes) in enumerate(posts):
+            day = time.localtime(t - days * 86400)
+            ts = time.mktime(tuple(day[:3]) + (hour, 7, 0, 0, 0, -1)) if days else t - 5 * 3600
+            self.media.append(self.make_media(caption, mtype, min(ts, t - 5 * 3600), likes, i))
+        h = 3600
+        first = self.add_comment("چه قشنگ شده 😍", "ali_rz", 0, ts=t - 3 * h)
+        self.add_comment("ممنون از لطف‌تون 🌹", self.user["username"], 0, parent=first, ts=t - 2.9 * h)
+        self.add_comment("قیمت لاته چنده؟", "sara.mohammadi", 0, ts=t - 2 * h)
+        self.add_comment("فالوور ارزان و واقعی فقط با ما 👉 www.follow-shop.xyz", "promo_fast_follow", 0, ts=t - 0.8 * h)
+        self.add_comment("تا ساعت چند بازید؟", "niloofar.art", 0, ts=t - 0.5 * h)
+        self.add_comment("آدرس دقیق‌تون کجاست؟", "mehdi.k", 1, ts=t - 5 * h)
+        self.add_comment("دفعهٔ قبل عالی بود 👌", "zahra_bn", 1, ts=t - 20 * h)
+        self.add_comment("این آهنگ چیه؟", "omid.t", 2, ts=t - 6 * 86400)
+        self.add_comment("کیک هویج هم دارید؟", "shirin_gh", 3, ts=t - 8 * 86400)
+        self.add_dm("سلام، ساعت کاری‌تون چطوره؟", "elham.gh", ts=t - 0.3 * h)
+        self.add_dm("سلام، برای همکاری تبلیغاتی پیام دادم.", "reza.dev", ts=t - 3 * h)
+        old = self.add_dm("سفارش عمده هم قبول می‌کنید؟", "bahar.s", ts=t - 5 * 86400)
+        self.convs[old]["messages"].append({"id": self.nid("m_"), "from_me": True, "text": "سلام، بله 🌹 جزئیات را بفرمایید.",
+                                            "ts": t - 5 * 86400 + 900})
+        self.convs[old]["updated"] = t - 5 * 86400 + 900
+
+    def make_media(self, caption, mtype, ts, likes, n, product=None, blob=None):
+        mid = self.nid("180")
+        return {"id": mid, "caption": caption, "media_type": mtype, "ts": ts, "like_count": likes, "n": n, "blob": blob,
+                "media_product_type": product or ("REELS" if mtype == "VIDEO" else "FEED"), "comment_enabled": True,
+                "code": "D" + hashlib.md5(mid.encode()).hexdigest()[:10]}
+
+    @staticmethod
+    def uid(username):
+        return str(6000000000 + zlib.crc32(username.encode("utf-8")) % 1000000000)
+
+    def add_comment(self, text, username="someone", media_index=0, parent="", ts=None, media_id=None):
+        with self.lock:
+            cid = self.nid("179")
+            mine = username == self.user["username"]
+            self.comments[cid] = {"id": cid, "media_id": media_id or self.media[media_index]["id"], "parent_id": parent or "",
+                                  "text": text, "ts": now() if ts is None else ts, "username": username,
+                                  "user_id": self.user["user_id"] if mine else self.uid(username), "hidden": False,
+                                  "dm_done": False}
+            return cid
+
+    def conv_for(self, username):
+        uid = self.uid(username)
+        for c in self.convs.values():
+            if c["user_id"] == uid:
+                return c
+        cid = "t_" + self.nid("")
+        self.convs[cid] = {"id": cid, "user_id": uid, "username": username, "updated": 0.0, "messages": []}
+        return self.convs[cid]
+
+    def add_dm(self, text, username="someone", ts=None):
+        with self.lock:
+            conv = self.conv_for(username)
+            ts = now() if ts is None else ts
+            conv["messages"].append({"id": self.nid("m_"), "from_me": False, "text": text, "ts": ts})
+            conv["updated"] = max(ts, conv["updated"] + 1)
+            return conv["id"]
+
+    def live_tick(self):
+        """Demo only: every now and then somebody comments or writes, so the agent can be watched working."""
+        if not self.lively or now() < self.next_live:
+            return
+        with self.lock:
+            kind, user, text = self.LIVE[self.live_i % len(self.LIVE)]
+            cycle = self.live_i // len(self.LIVE)
+            self.live_i += 1
+            self.next_live = now() + random.randint(35, 70)
+            user = user if cycle == 0 else "%s%d" % (user, cycle + 1)
+            if kind == "c":
+                self.add_comment(text, user, self.live_i % 3)
+            else:
+                self.add_dm(text, user)
+            if self.live_i % 3 == 0:
+                self.user["followers_count"] += 1
+
+    # ── test hooks ──
+    def fail(self, pattern, code=2, sub=0, message="simulated failure", status=400, times=1, method=None, drop=False):
+        """Next matching call(s) fail. drop=True: the action happens but the answer is lost."""
+        self.faults.append({"pattern": pattern, "method": method, "times": times, "drop": drop, "status": status,
+                            "error": {"message": message, "type": "OAuthException", "code": code, "error_subcode": sub}})
+
+    @staticmethod
+    def err(code, message, sub=0, status=400):
+        e = {"message": message, "type": "OAuthException", "code": code}
+        if sub:
+            e["error_subcode"] = sub
+        return status, {"error": e}
+
+    def fetch(self, url):
+        self.fetched.append(url)
+        try:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            req = urllib.request.Request(url, headers={"User-Agent": "facebookexternalhit/1.1"})
+            with opener.open(req, timeout=10) as res:
+                return res.status == 200, res.read(3 * 1024 * 1024 + 1)
+        except Exception:
+            return False, b""
+
+    # ── the API ──
+    def handle(self, method, host, path, params, body=None, bearer=""):
+        parts = [p for p in path.split("/") if p]
+        if parts and re.fullmatch(r"v\d+\.\d+", parts[0]):
+            parts.pop(0)
+        key = "/".join(parts)
+        fetched = None
+        if method == "POST" and key.endswith("/media") and (params.get("video_url") or params.get("image_url")):
+            fetched = self.fetch(params.get("video_url") or params.get("image_url"))     # outside the lock
+        with self.lock:
+            self.calls.append((method, key, dict(params)))
+            if len(self.calls) > 4000:
+                del self.calls[:2000]
+            for f in self.faults:
+                if f["times"] > 0 and f["method"] in (None, method) and re.search(f["pattern"], key):
+                    f["times"] -= 1
+                    if f["drop"]:
+                        self.route(method, host, parts, params, body, bearer, fetched)
+                        return 502, None
+                    return f["status"], {"error": f["error"]}
+            return self.route(method, host, parts, params, body, bearer, fetched)
+
+    def route(self, method, host, parts, params, body, bearer, fetched):
+        token = params.get("access_token") or bearer or ""
+        if token not in ((self.token,) if host == "ig" else (self.fb_token, self.page_token)):
+            return self.err(190, "Invalid OAuth access token - Cannot parse access token")
+        me, n = self.user["user_id"], len(parts)
+        head = parts[0] if parts else ""
+        bad = [f for f in re.split(r"[,{}]", params.get("fields") or "") if f in self.unknown_fields]
+        if bad:
+            return self.err(100, "Tried accessing nonexisting field (%s)" % bad[0])
+        if host == "fb" and parts == ["me", "accounts"]:
+            return 200, {"data": [{"id": self.page_id, "name": "Demo Cafe", "access_token": self.page_token,
+                                   "instagram_business_account": {"id": me, "username": self.user["username"]}}]}
+        if parts == ["refresh_access_token"]:
+            self.token = "IGAA" + secrets.token_hex(24)
+            return 200, {"access_token": self.token, "token_type": "bearer", "expires_in": 5183944}
+        if head in ("me", me, self.user["id"], self.page_id):
+            if n == 1 and method == "GET":
+                return self.profile(params.get("fields") or "id", host)
+            edge = parts[1] if n == 2 else ""
+            if edge == "media":
+                if method == "POST":
+                    return self.create_container(params, fetched)
+                limit = clamp(params.get("limit") or 25, 1, 100)
+                return 200, {"data": [self.media_out(m) for m in self.media[:limit]]}
+            if edge == "media_publish" and method == "POST":
+                return self.publish(params)
+            if edge == "content_publishing_limit":
+                return 200, {"data": [{"quota_usage": self.quota_used, "config": {"quota_total": self.quota_total,
+                                                                               "quota_duration": 86400}}]}
+            if edge == "stories":
+                return 200, {"data": [self.media_out(m) for m in self.stories if m["ts"] > now() - 86400]}
+            if edge == "tags":
+                return 200, {"data": []}
+            if edge == "insights":
+                return self.account_insights(params)
+            if edge == "conversations":
+                return 200, {"data": [self.conv_out(c) for c in sorted(self.convs.values(), key=lambda c: -c["updated"])]}
+            if edge == "messages" and method == "POST":
+                return self.send_message(body if isinstance(body, dict) else params)
+        if head in self.containers and n == 1 and method == "GET":
+            return 200, self.container_out(self.containers[head])
+        m = next((x for x in self.media + self.stories if x["id"] == head), None)
+        if m is not None:
+            if n == 1 and method == "GET":
+                return 200, self.media_out(m)
+            if n == 1 and method == "POST":
+                if "comment_enabled" in params:
+                    m["comment_enabled"] = params["comment_enabled"] == "true"
+                return 200, {"success": True}
+            if n == 2 and parts[1] == "comments":
+                if method == "POST":
+                    return self.page_comment(m["id"], "", params.get("message"))
+                return self.comments_out(m, params)
+            if n == 2 and parts[1] == "insights":
+                return self.media_insights(m, params)
+        c = self.comments.get(head)
+        if c is not None:
+            if n == 1 and method == "DELETE":
+                for cid in [k for k, v in self.comments.items() if k == head or v["parent_id"] == head]:
+                    del self.comments[cid]
+                return 200, {"success": True}
+            if n == 1 and method == "POST":
+                if "hide" in params:
+                    c["hidden"] = params["hide"] == "true"
+                return 200, {"success": True}
+            if n == 1:
+                return 200, self.comment_out(c)
+            if n == 2 and parts[1] == "replies" and method == "POST":
+                if c["parent_id"]:
+                    return self.err(100, "Replies can only be created on top-level comments")
+                return self.page_comment(c["media_id"], c["id"], params.get("message"))
+        conv = self.convs.get(head)
+        if conv is not None and n == 1 and method == "GET":
+            return 200, {"id": conv["id"], "messages": {"data": [self.msg_out(conv, x) for x in reversed(conv["messages"][-30:])]}}
+        return self.err(100, "Unsupported request - object with ID '%s' does not exist" % head, sub=33)
+
+    def profile(self, fields, host):
+        full = dict(self.user, media_count=len(self.media), profile_picture_url="/_sim/img/avatar.svg")
+        if host == "fb":
+            full["id"] = full.pop("user_id")
+            full.pop("account_type")
+        out = {}
+        for f in [x for x in fields.split(",") if x]:
+            if f not in full:
+                return self.err(100, "Tried accessing nonexisting field (%s)" % f)
+            out[f] = full[f]
+        return 200, out
+
+    def media_out(self, m):
+        thumb = "/_sim/pub/%s.jpg" % m["id"] if m["blob"] else "/_sim/img/%d.svg" % m["n"]
+        out = {"id": m["id"], "caption": m["caption"], "media_type": m["media_type"], "timestamp": iso(m["ts"]),
+               "media_product_type": m["media_product_type"], "permalink": "https://www.instagram.com/p/%s/" % m["code"],
+               "like_count": m["like_count"], "is_comment_enabled": m["comment_enabled"],
+               "comments_count": len([1 for c in self.comments.values() if c["media_id"] == m["id"]])}
+        if m["media_type"] == "VIDEO":
+            out["thumbnail_url"] = thumb
+        else:
+            out["media_url"] = thumb
+        return out
+
+    def create_container(self, p, fetched):
+        mtype = (p.get("media_type") or "IMAGE").upper()
+        caption = p.get("caption") or ""
+        if len(caption) > 2200:
+            return self.err(36004, "The caption was too long", sub=2207010)
+        c = {"id": self.nid("178"), "type": mtype, "caption": caption, "ready_at": now(), "published": False, "error": "",
+             "expired": False, "kids": [], "video": False, "blob": None, "item": p.get("is_carousel_item") == "true"}
+        if mtype == "CAROUSEL":
+            kids = [k for k in (p.get("children") or "").split(",") if k]
+            if not 2 <= len(kids) <= 20 or any(k not in self.containers or not self.containers[k]["item"] for k in kids):
+                return self.err(100, "Invalid parameter: children")
+            c["kids"] = kids
+        else:
+            if not (p.get("video_url") or p.get("image_url")):
+                return self.err(100, "The parameter image_url or video_url is required")
+            ok, data = fetched or (False, b"")
+            if not ok:
+                return self.err(9004, "Media download has failed. The media URI doesn't meet our requirements.", sub=2207052)
+            kind = sniff(data[:64])
+            if p.get("video_url"):
+                c["video"], c["ready_at"] = True, now() + self.video_seconds
+                if not kind or kind[0] != "video":
+                    c["error"] = "Unsupported video format"
+            elif not kind or kind[1] != "jpg":
+                return self.err(36001, "The image format is not supported. Supported formats are: JPEG.", sub=2207005)
+            else:
+                c["blob"] = data if len(data) <= 3 * 1024 * 1024 else None
+        self.containers[c["id"]] = c
+        return 200, {"id": c["id"]}
+
+    def container_out(self, c):
+        code = ("PUBLISHED" if c["published"] else "EXPIRED" if c["expired"] else "ERROR" if c["error"]
+                else "IN_PROGRESS" if now() < c["ready_at"] else "FINISHED")
+        return {"id": c["id"], "status_code": code, "status": c["error"] or code.title()}
+
+    def publish(self, p):
+        c = self.containers.get(p.get("creation_id") or "")
+        if c is None:
+            return self.err(100, "Invalid parameter: creation_id")
+        code = self.container_out(c)["status_code"]
+        if code == "PUBLISHED" or c["item"]:
+            return self.err(100, "This container cannot be published")
+        if code != "FINISHED":
+            return self.err(9007, "Media ID is not available", sub=2207027)
+        if self.quota_used >= self.quota_total:
+            return self.err(9, "Content publishing limit reached", sub=2207042)
+        c["published"] = True
+        self.quota_used += 1
+        src = self.containers[c["kids"][0]] if c["type"] == "CAROUSEL" else c
+        if c["type"] == "CAROUSEL":
+            mtype, product = "CAROUSEL_ALBUM", "FEED"
+        elif c["type"] == "STORIES":
+            mtype, product = ("VIDEO" if c["video"] else "IMAGE"), "STORY"
+        elif c["video"]:
+            mtype, product = "VIDEO", "REELS"
+        else:
+            mtype, product = "IMAGE", "FEED"
+        m = self.make_media(c["caption"], mtype, now(), 0, self.seq % len(PALETTE), product, src["blob"])
+        (self.stories if product == "STORY" else self.media).insert(0, m)
+        return 200, {"id": m["id"]}
+
+    def comment_out(self, c):
+        out = {"id": c["id"], "text": c["text"], "timestamp": iso(c["ts"]), "username": c["username"],
+               "from": {"id": c["user_id"], "username": c["username"]}, "hidden": c["hidden"], "like_count": 0}
+        if c["parent_id"]:
+            out["parent_id"] = c["parent_id"]
+        return out
+
+    def comments_out(self, m, p):
+        tops = sorted([c for c in self.comments.values() if c["media_id"] == m["id"] and not c["parent_id"]],
+                      key=lambda c: (-c["ts"], c["id"]))
+        limit = clamp(p.get("limit") or 50, 1, 100)
+        data = []
+        for c in tops[:limit]:
+            out = self.comment_out(c)
+            kids = sorted([r for r in self.comments.values() if r["parent_id"] == c["id"]], key=lambda r: (r["ts"], r["id"]))
+            if kids:
+                out["replies"] = {"data": [self.comment_out(r) for r in kids[:25]]}
+            data.append(out)
+        res = {"data": data}
+        if len(tops) > limit:
+            res["paging"] = {"cursors": {"after": "next"}, "next": "https://graph.invalid/next"}
+        return 200, res
+
+    def page_comment(self, media_id, parent, message):
+        if not message:
+            return self.err(100, "The parameter message is required")
+        return 200, {"id": self.add_comment(message, self.user["username"], parent=parent, media_id=media_id)}
+
+    def conv_out(self, c):
+        return {"id": c["id"], "updated_time": iso(c["updated"]),
+                "participants": {"data": [{"id": self.user["user_id"], "username": self.user["username"]},
+                                          {"id": c["user_id"], "username": c["username"]}]}}
+
+    def msg_out(self, conv, m):
+        page = {"id": self.user["user_id"], "username": self.user["username"]}
+        other = {"id": conv["user_id"], "username": conv["username"]}
+        return {"id": m["id"], "created_time": iso(m["ts"]), "message": m["text"], "from": page if m["from_me"] else other,
+                "to": {"data": [other if m["from_me"] else page]}}
+
+    def send_message(self, b):
+        rec, msg = b.get("recipient"), b.get("message")
+        rec = jload(rec, {}) if isinstance(rec, str) else (rec or {})
+        msg = jload(msg, {}) if isinstance(msg, str) else (msg or {})
+        text = msg.get("text") or ""
+        if not rec or not text:
+            return self.err(100, "Invalid parameter")
+        if len(text.encode("utf-8")) > 1000:
+            return self.err(100, "Length of param message[text] must be less than or equal to 1000")
+        if rec.get("comment_id"):
+            c = self.comments.get(str(rec["comment_id"]))
+            if c is None:
+                return self.err(100, "Invalid parameter: comment_id")
+            if c["dm_done"] or now() - c["ts"] > 7 * 86400:
+                return self.err(10, "This message is sent outside of allowed window.", sub=2534022)
+            c["dm_done"] = True
+            conv = self.conv_for(c["username"])
+        else:
+            conv = next((x for x in self.convs.values() if x["user_id"] == str(rec.get("id"))), None)
+            if conv is None:
+                return self.err(100, "No matching user found", sub=2018001)
+            if now() - max([x["ts"] for x in conv["messages"] if not x["from_me"]] or [0]) > 86400:
+                return self.err(10, "This message is sent outside of allowed window.", sub=2534022)
+        mid = self.nid("m_")
+        conv["messages"].append({"id": mid, "from_me": True, "text": text, "ts": now()})
+        conv["updated"] = max(now(), conv["updated"] + 1)
+        return 200, {"recipient_id": conv["user_id"], "message_id": mid}
+
+    @staticmethod
+    def metric(name, since, until):
+        base = {"reach": 370, "views": 1010, "accounts_engaged": 57, "total_interactions": 127, "likes": 91, "comments": 13,
+                "shares": 9, "saves": 13, "replies": 7, "profile_links_taps": 5}[name]
+        days = max(1, int(round((until - since) / 86400.0)))
+        wobble = zlib.crc32(("%s:%d" % (name, int(since) // 86400)).encode()) % 50
+        return int(base * days * (0.75 + wobble / 100.0))
+
+    def account_insights(self, p):
+        names = [x for x in (p.get("metric") or "").split(",") if x]
+        if names == ["follower_demographics"]:
+            table = {"gender": [("F", 1012), ("M", 736), ("U", 92)],
+                     "age": [("25-34", 810), ("18-24", 520), ("35-44", 330), ("45-54", 120), ("13-17", 60)],
+                     "city": [("Tehran, Tehran Province", 640), ("Mashhad, Razavi Khorasan", 210), ("Isfahan", 190),
+                              ("Shiraz, Fars", 150), ("Kabul", 90)],
+                     "country": [("IR", 1500), ("AF", 140), ("DE", 80), ("TR", 60), ("NL", 30)]}.get(p.get("breakdown"))
+            if table is None:
+                return self.err(100, "Invalid parameter: breakdown")
+            results = [{"dimension_values": [k], "value": v} for k, v in table]
+            return 200, {"data": [{"name": "follower_demographics", "period": "lifetime",
+                                   "total_value": {"breakdowns": [{"dimension_keys": [p["breakdown"]], "results": results}]}}]}
+        bad = [x for x in names if x not in ACCOUNT_METRICS]
+        if bad or not names:
+            return self.err(100, "metric[0] must be one of the following values: " + ", ".join(ACCOUNT_METRICS))
+        since, until = float(p.get("since") or now() - 86400), float(p.get("until") or now())
+        if until - since > 30 * 86400 + 60:
+            return self.err(100, "There cannot be more than 30 days (2592000 s) between since and until")
+        return 200, {"data": [{"name": x, "period": "day", "title": x, "total_value": {"value": self.metric(x, since, until)}}
+                              for x in names]}
+
+    def media_insights(self, m, p):
+        names = [x for x in (p.get("metric") or "").split(",") if x]
+        allowed = MEDIA_METRICS["STORY" if m["media_product_type"] == "STORY" else "FEED"]
+        if not names or any(x not in allowed for x in names):
+            return self.err(100, "The Media Insights API does not support the requested metric for this media type")
+        likes = m["like_count"]
+        comments = len([1 for c in self.comments.values() if c["media_id"] == m["id"]])
+        vals = {"reach": likes * 3 + 40, "views": likes * 7 + 90, "likes": likes, "comments": comments, "saved": likes // 7,
+                "shares": likes // 10, "replies": likes // 20}
+        vals["total_interactions"] = likes + comments + vals["saved"] + vals["shares"]
+        return 200, {"data": [{"name": x, "period": "lifetime", "values": [{"value": vals[x]}]} for x in names]}
+
+    # ── pictures of the fake page ──
+    def asset(self, name):
+        m = re.fullmatch(r"pub/(\d+)\.jpg", name)
+        if m:
+            item = next((x for x in self.media + self.stories if x["id"] == m.group(1) and x["blob"]), None)
+            return ("image/jpeg", item["blob"]) if item else None
+        m = re.fullmatch(r"img/(\d+|avatar)\.svg", name)
+        if not m:
+            return None
+        a, b = PALETTE[1] if m.group(1) == "avatar" else PALETTE[int(m.group(1)) % len(PALETTE)]
+        svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400"><defs><linearGradient id="g" x1="0" y1="0" '
+               'x2="1" y2="1"><stop offset="0" stop-color="%s"/><stop offset="1" stop-color="%s"/></linearGradient></defs>'
+               '<rect width="400" height="400" fill="url(#g)"/><circle cx="310" cy="90" r="120" fill="#fff" opacity=".14"/>'
+               '<circle cx="70" cy="350" r="140" fill="#000" opacity=".12"/></svg>' % (a, b))
+        return "image/svg+xml", svg.encode("utf-8")
+
+
+# ───────────────────────────── web panel (server side) ─────────────────────────────
+
+KEY_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+SESSION_COOKIE = "ia_session"
+ICON_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="1" x2="1" y2="0">'
+            '<stop offset="0" stop-color="#f59e0b"/><stop offset=".5" stop-color="#ec4899"/><stop offset="1" stop-color="#8b5cf6"/>'
+            '</linearGradient></defs><rect width="64" height="64" rx="16" fill="url(#g)"/><rect x="16" y="16" width="32" height="32" '
+            'rx="10" fill="none" stroke="#fff" stroke-width="4"/><circle cx="32" cy="32" r="7.5" fill="none" stroke="#fff" '
+            'stroke-width="4"/><circle cx="42" cy="22" r="2.6" fill="#fff"/></svg>')
+MANIFEST = {"name": "ایجنت اینستاگرام", "short_name": "ایجنت پیج", "start_url": "/", "display": "standalone", "dir": "rtl",
+            "lang": "fa", "background_color": "#0b0f1a", "theme_color": "#0b0f1a",
+            "icons": [{"src": "/icon-192.png", "sizes": "192x192", "type": "image/png"},
+                      {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png"}]}
+
+
+def make_icon_png(size):
+    """The home-screen icon, drawn by hand so that no image library is needed."""
+    rows = bytearray()
+    mid, ring_out, ring_in, dot = (size - 1) / 2.0, size * 0.30, size * 0.23, size * 0.08
+    for y in range(size):
+        rows.append(0)
+        for x in range(size):
+            t = (x + (size - y)) / (2.0 * size)
+            col = (int(245 + (139 - 245) * t), int(158 + (92 - 158) * t), int(11 + (246 - 11) * t))
+            d = ((x - mid) ** 2 + (y - mid) ** 2) ** 0.5
+            if ring_in <= d <= ring_out or d <= dot:
+                col = (255, 255, 255)
+            rows.extend(col)
+
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(bytes(rows), 9)) + chunk(b"IEND", b""))
+
+
+class Web:
+    """Login key, session cookie and brute-force lock-out for the panel."""
+
+    def __init__(self, cfg, agent):
+        self.cfg, self.agent = cfg, agent
+        self.key = cfg.password or self.load("key.txt", lambda: "-".join(
+            "".join(secrets.choice(KEY_ALPHABET) for _ in range(5)) for _ in range(2)))
+        self.secret = self.load("secret.txt", lambda: secrets.token_hex(32))
+        self.fails, self.icons = {}, {}
+        self.lock = threading.Lock()
+
+    def load(self, name, make):
+        path = os.path.join(self.cfg.data_dir, name)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                value = fh.read().strip()
+            if value:
+                return value
+        except OSError:
+            pass
+        value = make()
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(value + "\n")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return value
+
+    def session(self):
+        return hmac.new(self.secret.encode("utf-8"), ("session:" + self.key).encode("utf-8"), hashlib.sha256).hexdigest()
+
+    @staticmethod
+    def norm_key(value):
+        return re.sub(r"[^A-Z0-9]", "", str(value or "").translate(_FA_DIGITS).upper())
+
+    def key_ok(self, value, ip):
+        with self.lock:
+            recent = [t for t in self.fails.get(ip, []) if t > now() - 600]
+            self.fails[ip] = recent
+            if len(recent) >= 8:
+                raise UserError("تلاش‌های ناموفق زیاد بود؛ ده دقیقهٔ دیگر دوباره امتحان کن.", 429)
+        given = str(value or "")
+        if self.cfg.password:
+            ok = hmac.compare_digest(given.strip().encode("utf-8"), self.key.encode("utf-8"))
+        else:
+            ok = hmac.compare_digest(self.norm_key(given).encode("utf-8"), self.norm_key(self.key).encode("utf-8"))
+        if not ok:
+            with self.lock:
+                self.fails.setdefault(ip, []).append(now())
+        return ok
+
+    def authed(self, headers):
+        if self.cfg.no_auth:
+            return True
+        want = self.session()
+        for part in (headers.get("Cookie") or "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == SESSION_COOKIE and hmac.compare_digest(value.strip(), want):
+                return True
+        return False
+
+    def icon(self, size):
+        if size not in self.icons:
+            self.icons[size] = make_icon_png(size)
+        return self.icons[size]
+
+
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 64
+
+    def handle_error(self, request, client_address):
+        if not isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, socket.timeout)):
+            log("http:", traceback.format_exc())
+
+
+def make_handler(app, media_only=False):
+    cfg, agent, web = app.cfg, app.agent, app.web
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        server_version = "InstaAgent"
+        sys_version = ""
+        timeout = 120
+
+        def log_message(self, fmt, *args):
+            pass
+
+        def do_GET(self):
+            self.dispatch("GET")
+
+        def do_HEAD(self):
+            self.dispatch("HEAD")
+
+        def do_POST(self):
+            self.dispatch("POST")
+
+        def do_DELETE(self):
+            self.dispatch("DELETE")
+
+        # ── plumbing ──
+        def dispatch(self, method):
+            self.body_read = method != "POST"
+            try:
+                self.route(method)
+            except UserError as e:
+                self.send_json(e.status, {"error": e.message, "code": e.code})
+            except GraphError as e:
+                agent.problem(e, "panel")
+                self.send_json(502, {"error": e.fa, "kind": e.kind})
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                self.close_connection = True
+            except Exception:
+                log("panel:", traceback.format_exc())
+                try:
+                    self.send_json(500, {"error": "خطای داخلی برنامه؛ جزئیات در ترمینال نوشته شد."})
+                except Exception:
+                    self.close_connection = True
+            if not self.body_read:
+                self.close_connection = True           # an unread request body would corrupt the next request
+
+        def send_bytes(self, status, body, ctype, extra=None):
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            if not cfg.embed_ok:
+                self.send_header("X-Frame-Options", "DENY")
+            for k, v in (extra or {}).items():
+                self.send_header(k, v)
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+
+        def send_json(self, status, obj, extra=None):
+            headers = {"Cache-Control": "no-store"}
+            headers.update(extra or {})
+            self.send_bytes(status, jdump(obj).encode("utf-8"), "application/json; charset=utf-8", headers)
+
+        def send_text(self, status, text):
+            self.send_bytes(status, text.encode("utf-8"), "text/plain; charset=utf-8", {"Cache-Control": "no-store"})
+
+        def read_body(self, limit=2 * 1024 * 1024):
+            n = int(self.headers.get("Content-Length") or 0)
+            if n > limit:
+                raise UserError("درخواست بیش از حد بزرگ است.", 413)
+            raw = self.rfile.read(n) if n > 0 else b""
+            self.body_read = True
+            return raw
+
+        def read_json(self):
+            raw = self.read_body()
+            if not raw:
+                return {}
+            data = jload(raw.decode("utf-8", "replace"), None)
+            if not isinstance(data, dict):
+                raise UserError("قالب درخواست نادرست است.")
+            return data
+
+        def cookie(self):
+            secure = "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" else ""
+            return "%s=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000%s" % (SESSION_COOKIE, web.session(), secure)
+
+        def host_ok(self):
+            if not cfg.loopback:
+                return True
+            host = (self.headers.get("Host") or "").lower()
+            name = host[:host.rfind(":")] if ":" in host and not host.endswith("]") else host
+            return name in ("127.0.0.1", "localhost", "[::1]")
+
+        def send_file(self, path, mime):
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                return self.send_text(404, "not found")
+            start, end, status = 0, size - 1, 200
+            rng = re.fullmatch(r"bytes=(\d*)-(\d*)", (self.headers.get("Range") or "").strip())
+            if rng and (rng.group(1) or rng.group(2)) and size:
+                if rng.group(1):
+                    start = int(rng.group(1))
+                    end = min(int(rng.group(2)), size - 1) if rng.group(2) else size - 1
+                else:
+                    start = max(0, size - int(rng.group(2)))
+                if start > end:
+                    self.send_response(416)
+                    self.send_header("Content-Range", "bytes */%d" % size)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return None
+                status = 206
+            length = end - start + 1
+            self.send_response(status)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(length))
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Cache-Control", "private, max-age=3600")
+            if status == 206:
+                self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
+            self.end_headers()
+            if self.command == "HEAD":
+                return None
+            with open(path, "rb") as fh:
+                fh.seek(start)
+                while length > 0:
+                    chunk = fh.read(min(65536, length))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    length -= len(chunk)
+            return None
+
+        def send_media(self, name):
+            m = re.fullmatch(r"([0-9a-f]{24})\.(jpg|mp4|mov)", name)
+            f = agent.store.get(m.group(1)) if m else None
+            if not f or f["ext"] != m.group(2):
+                return self.send_text(404, "not found")
+            return self.send_file(agent.store.path(f), f["mime"])
+
+        # ── routes ──
+        def route(self, method):
+            u = urllib.parse.urlsplit(self.path)
+            path, q = urllib.parse.unquote(u.path), dict(urllib.parse.parse_qsl(u.query))
+            if path == "/healthz":
+                return self.send_text(200, "ok")
+            if path.startswith("/m/") and method in ("GET", "HEAD"):
+                return self.send_media(path[3:])
+            if media_only:
+                return self.send_text(404, "not found")
+            if not self.host_ok():
+                return self.send_text(403, "forbidden host")
+            if path.startswith("/_sim/") and agent.sim is not None:
+                return self.sim_route(method, path[6:], q)
+            if method in ("GET", "HEAD"):
+                if path in ("/", "/index.html"):
+                    return self.page(q)
+                if path == "/manifest.webmanifest":
+                    return self.send_bytes(200, jdump(MANIFEST).encode("utf-8"), "application/manifest+json")
+                if path == "/icon.svg":
+                    return self.send_bytes(200, ICON_SVG.encode("utf-8"), "image/svg+xml", {"Cache-Control": "max-age=86400"})
+                m = re.fullmatch(r"/icon-(192|512)\.png", path)
+                if m:
+                    return self.send_bytes(200, web.icon(int(m.group(1))), "image/png", {"Cache-Control": "max-age=86400"})
+            if path.startswith("/api/"):
+                return self.api(method, path[5:].strip("/"), q)
+            return self.send_text(404, "not found")
+
+        def page(self, q):
+            if "k" in q:                               # the link printed in the terminal: log in, then drop the key from the address
+                try:
+                    ok = web.key_ok(q.get("k"), self.client_address[0])
+                except UserError:
+                    ok = False
+                self.send_response(303)
+                self.send_header("Location", "/")
+                if ok:
+                    self.send_header("Set-Cookie", self.cookie())
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return None
+            nonce = secrets.token_urlsafe(16)
+            html = UI_HTML.replace("__NONCE__", nonce).replace("__VERSION__", VERSION)
+            csp = ("default-src 'self'; script-src 'nonce-%s'; style-src 'nonce-%s'; img-src 'self' https: data: blob:; "
+                   "media-src 'self' https: blob:; connect-src 'self'; base-uri 'none'; form-action 'self'; object-src 'none'"
+                   % (nonce, nonce)) + ("" if cfg.embed_ok else "; frame-ancestors 'none'")
+            return self.send_bytes(200, html.encode("utf-8"), "text/html; charset=utf-8",
+                                   {"Content-Security-Policy": csp, "Cache-Control": "no-store"})
+
+        def sim_route(self, method, rest, q):
+            sim = agent.sim
+            if rest.startswith(("img/", "pub/")):
+                found = sim.asset(rest)
+                if not found:
+                    return self.send_text(404, "not found")
+                return self.send_bytes(200, found[1], found[0], {"Cache-Control": "max-age=3600",
+                                                               "Content-Security-Policy": "default-src 'none'"})
+            raw = self.read_body(8 * 1024 * 1024) if method == "POST" else b""
+            form = dict(urllib.parse.parse_qsl(raw.decode("utf-8", "replace"))) if raw else {}
+            if rest.startswith("tg/"):
+                sim.telegram.append(form)
+                return self.send_json(200, {"ok": True})
+            host, _, tail = rest.partition("/")
+            if host not in ("ig", "fb"):
+                return self.send_text(404, "not found")
+            params, body = dict(q), None
+            if "json" in (self.headers.get("Content-Type") or ""):
+                body = jload(raw.decode("utf-8", "replace"), {})
+            else:
+                params.update(form)
+            auth = self.headers.get("Authorization") or ""
+            status, obj = sim.handle(method, host, tail, params, body, auth[7:] if auth.startswith("Bearer ") else "")
+            if obj is None:
+                return self.send_bytes(status, b"<html><body>Bad Gateway</body></html>", "text/html")
+            return self.send_json(status, obj)
+
+        def api(self, method, path, q):
+            if method not in ("GET", "HEAD"):
+                if self.headers.get("X-IA") != "1":    # a plain form or a foreign page cannot add this header
+                    raise UserError("درخواست نامعتبر است.", 403)
+                origin = self.headers.get("Origin")
+                if origin and not cfg.demo:
+                    host = urllib.parse.urlsplit(origin).netloc
+                    if host not in (self.headers.get("Host"), self.headers.get("X-Forwarded-Host")):
+                        raise UserError("درخواست از مبدأ ناشناس رد شد.", 403)
+            if path == "upload" and method == "POST":
+                if not web.authed(self.headers):
+                    raise UserError("ابتدا با کد ورود وارد شو.", 401, "auth")
+                return self.send_json(200, self.upload(q))
+            body = self.read_json() if method == "POST" else {}
+            if path == "login" and method == "POST":
+                if web.key_ok(body.get("key"), self.client_address[0]):
+                    return self.send_json(200, {"ok": True}, {"Set-Cookie": self.cookie()})
+                raise UserError("کد ورود درست نیست.", 401)
+            if not web.authed(self.headers):
+                raise UserError("ابتدا با کد ورود وارد شو.", 401, "auth")
+            if path == "logout" and method == "POST":
+                return self.send_json(200, {"ok": True}, {"Set-Cookie": SESSION_COOKIE + "=; Path=/; Max-Age=0"})
+            m = re.fullmatch(r"file/([0-9a-f]{24})", path)
+            if m and method in ("GET", "HEAD"):
+                f = agent.store.get(m.group(1))
+                if not f:
+                    return self.send_text(404, "not found")
+                return self.send_file(agent.store.path(f), f["mime"])
+            out = api_call(app, method, path, q, body)
+            return self.send_json(200, out)
+
+        def upload(self, q):
+            n = int(self.headers.get("Content-Length") or 0)
+            if n <= 0:
+                raise UserError("فایلی نرسید.")
+            if n > VIDEO_MAX:
+                raise UserError("فایل خیلی بزرگ است (حداکثر ۳۰۰ مگابایت).", 413)
+            tmp = os.path.join(agent.store.dir, "up-%s.part" % secrets.token_hex(8))
+            left = n
+            with open(tmp, "wb") as fh:
+                while left > 0:
+                    chunk = self.rfile.read(min(left, 65536))
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    left -= len(chunk)
+            if left:
+                os.remove(tmp)
+                raise UserError("بارگذاری ناقص ماند؛ دوباره تلاش کن.")
+            self.body_read = True
+            return agent.store.view(agent.store.add(tmp, q.get("name") or ""))
+
+    return Handler
+
+
+def api_call(app, method, path, q, body):
+    """All JSON routes of the panel. Returns a JSON-able object or raises UserError / GraphError."""
+    agent = app.agent
+    ig, pub, inbox, dm = agent.ig, agent.publisher, agent.inbox, agent.direct
+    G, P, D = method in ("GET", "HEAD"), method == "POST", method == "DELETE"
+
+    def online():
+        if not ig.connected:
+            raise UserError("اول پیج را وصل کن.", 409)
+
+    if path == "status" and G:
+        return agent.status()
+    if path == "connect" and P:
+        agent.connect(body.get("token"))
+        return agent.status()
+    if path == "disconnect" and P:
+        agent.disconnect()
+        return agent.status()
+    if path == "token/refresh" and P:
+        online()
+        ig.refresh_token()
+        ig.save_acct(token_next=now() + 7 * 86400)
+        return {"ok": True, "token_expires": ig.acct.get("token_expires")}
+    if path == "settings":
+        if P:
+            agent.settings.patch(body)
+            agent.wake.set()
+        return agent.settings.public()
+    if path == "telegram/test" and P:
+        if not agent.telegram("✅ ایجنت اینستاگرام به تلگرام وصل است."):
+            raise UserError("اول توکن ربات و شناسهٔ چت را ذخیره کن.")
+        return {"ok": True}
+    if path == "log" and G:
+        rows = agent.db.q("SELECT id, ts, level, kind, text, seen FROM log ORDER BY id DESC LIMIT ?", (clamp(q.get("limit") or 60, 1, 200),))
+        return {"items": rows}
+    if path == "log/seen" and P:
+        agent.db.x("UPDATE log SET seen=1 WHERE seen=0")
+        return {"ok": True}
+
+    # posts
+    if path == "posts":
+        if P:
+            return pub.save(body)
+        return {"items": pub.list(q.get("group") or "all")}
+    m = re.fullmatch(r"posts/(\d+)(?:/(publish|cancel|duplicate))?", path)
+    if m:
+        pid, action = int(m.group(1)), m.group(2)
+        if action and P:
+            return getattr(pub, {"publish": "publish_now", "cancel": "cancel", "duplicate": "duplicate"}[action])(pid)
+        if not action and G:
+            return pub.get(pid)
+        if not action and P:
+            return pub.save(body, pid)
+        if not action and D:
+            pub.delete(pid)
+            return {"ok": True}
+    if path == "slots" and G:
+        return {"items": pub.slots(), "best_hours": agent.analytics.best_hours()}
+
+    # the page itself
+    if path == "media" and G:
+        online()
+        return {"items": agent.media_list(refresh=q.get("refresh") == "1" or now() - agent.media_at > 60)}
+    m = re.fullmatch(r"media/(\d+)", path)
+    if m and G:
+        online()
+        return agent.analytics.media_detail(m.group(1))
+
+    # comments
+    if path == "comments" and G:
+        return {"items": inbox.threads(q.get("filter") or "open", q.get("media")), "open": inbox.open_count()}
+    if path == "comments/sync" and P:
+        online()
+        inbox.sync()
+        return {"ok": True, "open": inbox.open_count()}
+    if path == "comments/dismiss_all" and P:
+        inbox.dismiss_all()
+        return {"ok": True}
+    m = re.fullmatch(r"comments/([\w.\-]+)/(reply|private|hide|unhide|delete|dismiss|suggest)", path)
+    if m and P:
+        cid, action = m.group(1), m.group(2)
+        if action == "suggest":
+            return inbox.suggest(cid)
+        if action == "dismiss":
+            inbox.dismiss(cid)
+            return {"ok": True}
+        online()
+        thread_id = inbox.row(cid)["parent_id"] or cid
+        if action == "reply":
+            inbox.reply(cid, body.get("text"))
+        elif action == "private":
+            inbox.private(cid, body.get("text"))
+        elif action == "delete":
+            inbox.delete(cid)
+        else:
+            inbox.hide(cid, action == "hide")
+        return {"ok": True, "thread": inbox.thread(thread_id)}
+
+    # direct messages
+    if path == "dm" and G:
+        return {"items": dm.list(), "open": dm.open_count(), "blocked": agent.db.get("dm.blocked") or ""}
+    if path == "dm/sync" and P:
+        online()
+        agent.sync_dms()
+        return {"ok": True, "open": dm.open_count()}
+    m = re.fullmatch(r"dm/([^/]+)(?:/(send|dismiss|suggest))?", path)
+    if m:
+        cid, action = m.group(1), m.group(2)
+        if not action and G:
+            return dm.get(cid)
+        if action == "send" and P:
+            online()
+            dm.send(cid, body.get("text"))
+            return dm.get(cid)
+        if action == "dismiss" and P:
+            dm.dismiss(cid)
+            return {"ok": True}
+        if action == "suggest" and P:
+            return dm.suggest(cid)
+
+    # rules
+    if path == "rules":
+        if P:
+            return agent.rules.save(body)
+        return {"items": agent.rules.list()}
+    if path == "rules/test" and P:
+        rule = agent.rules.match(body.get("scope") or "comment", body.get("text") or "")
+        return {"rule": rule, "spam": looks_spam(body.get("text") or "")}
+    m = re.fullmatch(r"rules/(\d+)", path)
+    if m and P:
+        return agent.rules.save(body, int(m.group(1)))
+    if m and D:
+        agent.rules.delete(int(m.group(1)))
+        return {"ok": True}
+
+    # numbers
+    if path == "insights" and G:
+        online()
+        return agent.analytics.overview(q.get("days") or 7, q.get("refresh") == "1")
+    if path == "insights/audience" and G:
+        online()
+        return agent.analytics.audience()
+
+    # assistant
+    if path == "ai/captions" and P:
+        return agent.ai.captions(body.get("topic"), body.get("kind") or "image")
+    if path == "ai/hashtags" and P:
+        return agent.ai.hashtags(body.get("topic"))
+    if path == "ai/ideas" and P:
+        return agent.ai.ideas(clamp(body.get("count") or 6, 1, 10))
+    if path == "ai/plan" and P:
+        ideas = agent.ai.ideas(clamp(body.get("count") or 5, 1, 10))
+        made = []
+        for idea in ideas["items"]:
+            caption = "%s\n\n%s" % (idea, " ".join(agent.ai.offline_hashtags(idea)[:5]))
+            made.append(pub.save({"kind": "image", "caption": caption, "media": [], "action": "draft"}))
+        return {"items": made, "source": ideas["source"]}
+    if path == "chat" and P:
+        return agent.ai.chat(body.get("messages"), agent.facts())
+    raise UserError("چنین نشانی‌ای در برنامه نیست.", 404)
+
+
+# ───────────────────────────── application ─────────────────────────────
+
+class App:
+    def __init__(self, argv=None, env=None):
+        self.cfg = Config(argv, env)
+        self.agent = Agent(self.cfg)
+        self.web = Web(self.cfg, self.agent)
+        self.httpd = self.media_httpd = self.lock_fh = None
+        self.port = self.media_port = 0
+
+    def acquire_lock(self):
+        try:
+            import fcntl
+        except ImportError:
+            return
+        fh = open(os.path.join(self.cfg.data_dir, "agent.lock"), "w")
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.close()
+            raise UserError("ایجنت همین حالا روی این دستگاه در حال اجراست (شاید در یک پنجرهٔ دیگر). اول آن را ببند.")
+        self.lock_fh = fh
+
+    def start(self):
+        cfg = self.cfg
+        self.acquire_lock()
+        try:
+            self.httpd = Server((cfg.host, cfg.port), make_handler(self))
+        except OSError as e:
+            raise UserError("پورت %d آزاد نیست (%s). با --port یک پورت دیگر بده." % (cfg.port, e))
+        self.port = self.httpd.server_address[1]
+        for candidate in ([self.port + 1, self.port + 2, 0] if cfg.port else [0]):
+            try:
+                self.media_httpd = Server(("127.0.0.1", candidate), make_handler(self, media_only=True))
+                break
+            except OSError:
+                continue
+        self.media_port = self.agent.store.media_port = self.media_httpd.server_address[1]
+        if cfg.sim:
+            self.agent.sim = Sim()
+            base = "http://127.0.0.1:%d/_sim" % self.port
+            cfg.ig_graph, cfg.fb_graph, cfg.telegram_api = base + "/ig", base + "/fb", base + "/tg"
+        for srv in (self.httpd, self.media_httpd):     # the servers answer first: the simulator is reached over HTTP
+            threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True).start()
+        if cfg.demo:
+            self.demo_setup()
+        elif cfg.env_token and not self.agent.ig.connected:
+            try:
+                self.agent.connect(cfg.env_token)
+            except (UserError, GraphError) as e:
+                log("IG_ACCESS_TOKEN:", e.fa if isinstance(e, GraphError) else e.message)
+        if not cfg.no_loop:
+            self.agent.start()
+
+    def demo_setup(self):
+        """Demo data lives in memory, so every demo start begins with a freshly connected fake page."""
+        agent = self.agent
+        agent.wipe_page()
+        agent.connect(SIM_TOKEN)
+        if not agent.db.get("demo.ready"):
+            agent.settings.patch({"auto": {"comment_reply": True, "spam_hide": True, "dm_reply": True},
+                                  "brand": {"about": "کافهٔ کوچک محلی با قهوهٔ تازه و کیک خانگی"}})
+            agent.db.set("demo.ready", 1)
+        else:                                          # only what arrives from now on is handled automatically
+            s = agent.settings.all()
+            agent.settings.patch({"autopilot": False})
+            agent.settings.patch({"autopilot": s["autopilot"]})
+
+    def stop(self):
+        self.agent.stop()
+        for srv in (self.httpd, self.media_httpd):
+            if srv is not None:
+                srv.shutdown()
+                srv.server_close()
+        self.agent.db.close()
+        if self.lock_fh is not None:
+            self.lock_fh.close()
+            self.lock_fh = None
+
+
+def open_browser(url):
+    try:
+        exe = shutil.which("termux-open-url")
+        if exe:
+            subprocess.Popen([exe, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif "com.termux" not in os.environ.get("PREFIX", ""):
+            webbrowser.open(url)
+    except Exception:
+        pass
+
+
+def main(argv=None):
+    try:
+        app = App(argv)
+        if app.cfg.show_key:
+            print(app.web.key)
+            return 0
+        app.start()
+    except UserError as e:
+        sys.stderr.write("✗ %s\n" % e.message)
+        return 2
+    cfg = app.cfg
+    url = "http://%s:%d/" % ("127.0.0.1" if cfg.host in ("0.0.0.0", "") else cfg.host, app.port)
+    link = url if cfg.no_auth else url + "?k=" + app.web.key
+    line = "=" * 58
+    print("\n".join(["", line, "  Insta Agent %s%s" % (VERSION, "   [DEMO - fake page]" if cfg.demo else ""),
+                     "  Panel : " + link, "  Key   : " + ("(not needed)" if cfg.no_auth else app.web.key),
+                     "  Data  : " + cfg.data_dir, "  Stop  : Ctrl+C", line,
+                     "  پنل را در مرورگر گوشی باز کن. تا وقتی این پنجره باز است ایجنت کار می‌کند.",
+                     "  در ترموکس برای بیدار ماندن گوشی:  termux-wake-lock", ""]))
+    sys.stdout.flush()
+    if not cfg.no_browser:
+        open_browser(link)
+    stop = threading.Event()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, lambda *_: stop.set())
+        except (ValueError, OSError):
+            pass
+    try:
+        while not stop.wait(1):
+            pass
+    except KeyboardInterrupt:
+        pass
+    print("\nدر حال بستن ایجنت…")
+    app.stop()
+    return 0
+
+
+UI_HTML = "<!doctype html><meta charset='utf-8'><title>insta agent</title><p>__UI_PLACEHOLDER__</p>"
+
+
+if __name__ == "__main__":
+    sys.exit(main())
