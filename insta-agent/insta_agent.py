@@ -4007,6 +4007,7 @@ label.f{font-size:.85rem;color:var(--mut);display:block;margin:6px 2px -4px}
 .bubble{max-width:86%;padding:7px 12px;border-radius:16px;background:var(--soft);align-self:flex-start;white-space:pre-wrap;overflow-wrap:anywhere}
 .bubble.me{align-self:flex-end;background:var(--pri);color:#fff}
 .bubble small{display:block;opacity:.75;font-size:.72rem;direction:rtl}
+.bubble span[dir]{display:block;text-align:start}
 .sheet{position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.5);display:flex;align-items:flex-end;justify-content:center}
 .panel{background:var(--bg);width:100%;max-width:640px;max-height:92vh;max-height:92dvh;border-radius:22px 22px 0 0;display:flex;flex-direction:column}
 .panel .head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 16px;border-bottom:1px solid var(--line)}
@@ -4549,7 +4550,7 @@ function threadCard(t, keep) {
       if (r.thread && (keep || S.filter !== 'open' || r.thread.open)) paint(r.thread); else gone();
     });
     const send = h('button', {class: 'btn pri', 'aria-label': 'فرستادن پاسخ', onclick: () => act(send, 'reply', {text: ta.value}, 'پاسخ فرستاده شد ✓')}, icon('send'));
-    const bubble = c => h('div', {class: 'bubble' + (c.mine ? ' me' : '')}, h('small', null, h('b', {class: 'ltr'}, '@' + c.username), ' · ' + ago(c.ts) + (c.hidden ? ' · مخفی‌شده' : '') + (c.dm_sent ? ' · پیام خصوصی رفت' : '')), c.text);
+    const bubble = c => h('div', {class: 'bubble' + (c.mine ? ' me' : '')}, h('small', null, h('b', {class: 'ltr'}, '@' + c.username), ' · ' + ago(c.ts) + (c.hidden ? ' · مخفی‌شده' : '') + (c.dm_sent ? ' · پیام خصوصی رفت' : '')), h('span', {dir: 'auto'}, c.text));
     fill(card, h('div', {class: 'row'}, thumb(t.media.thumb, 'image', 'thumb s'), h('div', {class: 'grow muted sm clamp'}, t.media.caption || 'پست'),
         t.open ? h('span', {class: 'pill pri'}, 'منتظر پاسخ') : null, h('button', {class: 'iconbtn', 'aria-label': 'بیشتر', onclick: () => menu(t, act, paint)}, icon('more'))),
       h('div', {class: 'chat'}, bubble(t.top), t.replies.map(bubble)),
@@ -4581,7 +4582,7 @@ function syncBtn(path) {
 }
 function convRow(c) {
   return h('button', {class: 'card row', 'data-conv': c.id, onclick: () => chatSheet(c.id)}, h('span', {class: 'avatar s'}, (c.username || '?').charAt(0).toUpperCase()),
-    h('div', {class: 'grow'}, h('div', {class: 'row'}, h('b', {class: 'ltr grow'}, '@' + c.username), h('small', {class: 'muted'}, ago(c.last_ts))), h('div', {class: 'muted sm clamp'}, (c.last_from_me ? 'شما: ' : '') + c.last_text)),
+    h('div', {class: 'grow'}, h('div', {class: 'row'}, h('b', {class: 'ltr grow'}, '@' + c.username), h('small', {class: 'muted'}, ago(c.last_ts))), h('div', {class: 'muted sm clamp', dir: 'auto'}, (c.last_from_me ? 'شما: ' : '') + c.last_text)),
     c.open ? h('span', {class: 'pill pri'}, 'تازه') : null);
 }
 async function chatSheet(id) {
@@ -4592,7 +4593,7 @@ async function chatSheet(id) {
   const paint = d => {
     const c = d.conv, sig = d.messages.map(m => m.id).join();
     fill(s.title, h('span', {class: 'ltr'}, '@' + c.username));
-    if (sig !== seen) { seen = sig; fill(box, d.messages.map(m => h('div', {class: 'bubble' + (m.mine ? ' me' : '')}, m.text, h('small', null, ago(m.ts))))); s.body.scrollTop = s.body.scrollHeight; }
+    if (sig !== seen) { seen = sig; fill(box, d.messages.map(m => h('div', {class: 'bubble' + (m.mine ? ' me' : '')}, h('span', {dir: 'auto'}, m.text), h('small', null, ago(m.ts))))); s.body.scrollTop = s.body.scrollHeight; }
     fill(note, c.can_reply ? (c.open ? h('button', {class: 'btn sm', onclick: e => run(e.currentTarget, async () => { await POST(url + '/dismiss'); await refresh(); s.close(); })}, icon('check'), 'نیازی به پاسخ نیست') : null)
       : 'از آخرین پیام این کاربر بیش از ۲۴ ساعت گذشته است؛ اینستاگرام اجازهٔ پاسخ از اینجا را نمی‌دهد. از خود اپ اینستاگرام جواب بده.');
     ta.disabled = !c.can_reply;
