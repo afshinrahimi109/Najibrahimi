@@ -4011,6 +4011,7 @@ UI_HTML = r'''<!doctype html>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.75 Vazirmatn,Vazir,IRANSans,Tahoma,system-ui,sans-serif}
 body{padding-bottom:calc(78px + env(safe-area-inset-bottom))}
+body.hasfab{padding-bottom:calc(152px + env(safe-area-inset-bottom))}
 button,input,textarea,select{font:inherit;color:inherit}
 button{cursor:pointer;border:0;background:none;padding:0}
 a{color:var(--info)}
@@ -4020,7 +4021,8 @@ p{margin:0}
 .ltr{direction:ltr;unicode-bidi:isolate}
 input.ltr,textarea.ltr{text-align:left}
 .muted{color:var(--mut)}.sm{font-size:.86rem}.center{text-align:center}
-.row{display:flex;align-items:center;gap:10px}.grow{flex:1;min-width:0}.wrap{flex-wrap:wrap}.fix{flex:none;width:136px}
+.row{display:flex;align-items:center;gap:10px}.grow{flex:1;min-width:0}.wrap{flex-wrap:wrap}.fix{flex:none;width:128px}
+.when .in{padding-inline:8px;font-size:.92rem}
 .col{display:flex;flex-direction:column;gap:10px}
 .up{color:var(--ok)}.down{color:var(--bad)}
 #top{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:10px 14px;display:flex;align-items:center;gap:10px}
@@ -4055,7 +4057,7 @@ label.f{font-size:.85rem;color:var(--mut);display:block;margin:6px 2px -4px}
 .pill .ic{width:14px;height:14px}
 .pill.ok{color:var(--ok);border-color:var(--ok)}.pill.warn{color:var(--warn);border-color:var(--warn)}.pill.bad{color:var(--bad);border-color:var(--bad)}.pill.info{color:var(--info);border-color:var(--info)}.pill.pri{background:var(--pri);color:#fff;border-color:var(--pri)}
 .seg{display:flex;background:var(--soft);border:1px solid var(--line);border-radius:14px;padding:4px;gap:4px}
-.seg button{flex:1;padding:7px 4px;border-radius:10px;font-weight:600;color:var(--mut);display:flex;gap:6px;align-items:center;justify-content:center}
+.seg button{flex:1;padding:7px 4px;border-radius:10px;font-weight:600;font-size:.92rem;white-space:nowrap;color:var(--mut);display:flex;gap:6px;align-items:center;justify-content:center}
 .seg button.on{background:var(--card);color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.18)}
 .chips{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .chip{border:1px solid var(--line);border-radius:99px;padding:5px 12px;font-size:.86rem;background:var(--card)}
@@ -4095,9 +4097,9 @@ label.f{font-size:.85rem;color:var(--mut);display:block;margin:6px 2px -4px}
 .panel .body{padding:14px;overflow:auto;display:flex;flex-direction:column;gap:12px;flex:1}
 .panel .body>*{flex:none}
 .panel .foot{padding:10px 14px calc(10px + env(safe-area-inset-bottom));border-top:1px solid var(--line);display:flex;gap:8px;align-items:center}
-.panel .foot .btn{flex:1}
+.panel .foot .btn{flex:1;padding-inline:8px;font-size:.92rem}
 #toasts{position:fixed;top:12px;left:0;right:0;z-index:40;display:flex;flex-direction:column;align-items:center;gap:8px;pointer-events:none}
-.toast{background:var(--card);border:1px solid var(--ok);border-radius:14px;padding:8px 14px;box-shadow:0 6px 20px rgba(0,0,0,.25);max-width:90%}
+.toast{background:var(--card);border:1px solid var(--ok);border-radius:14px;padding:8px 14px;box-shadow:0 6px 20px rgba(0,0,0,.25);max-width:90%;pointer-events:auto}
 .toast.bad{border-color:var(--bad)}
 #fab{position:fixed;bottom:calc(88px + env(safe-area-inset-bottom));inset-inline-end:16px;z-index:7;width:54px;height:54px;border-radius:18px;background:var(--grad);color:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 8px 22px rgba(236,72,153,.4)}
 .kinds{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
@@ -4223,7 +4225,8 @@ async function api(method, path, body, raw) {
 }
 const GET = p => api('GET', p), POST = (p, b) => api('POST', p, b || {}), DEL = p => api('DELETE', p);
 function toast(msg, kind) {
-  const t = h('div', {class: 'toast ' + (kind || ''), role: 'status'}, msg);
+  const t = h('div', {class: 'toast ' + (kind || ''), role: 'status', onclick: () => t.remove()}, msg);
+  $('#toasts').textContent = '';                       /* the newest message is the one that matters */
   $('#toasts').appendChild(t);
   setTimeout(() => t.remove(), kind === 'bad' ? 6500 : 3000);
 }
@@ -4288,11 +4291,12 @@ function paintNav() {
   const c = S.st.counts, n = c.open_comments + c.open_dms;
   fill($('#nav'), TABS.map(t => h('button', {class: S.tab === t[0] ? 'on' : '', 'data-tab': t[0], onclick: () => go(t[0])}, icon(t[2]), t[1], t[0] === 'inbox' && n ? h('span', {class: 'badge'}, fa(n)) : null)));
   $('#fab').classList.toggle('hide', S.tab !== 'content' || !!S.st.account.invalid);
+  document.body.classList.toggle('hasfab', !$('#fab').classList.contains('hide'));
 }
 function go(tab, sub) { S.tab = tab; if (sub) S.sub[tab] = sub; window.scrollTo(0, 0); render(true); }
 async function render(fresh) {
   const view = $('#view'), st = S.st;
-  const chrome = on => { $('#top').classList.toggle('hide', !on); $('#nav').classList.toggle('hide', !on); if (!on) $('#fab').classList.add('hide'); };
+  const chrome = on => { $('#top').classList.toggle('hide', !on); $('#nav').classList.toggle('hide', !on); if (!on) { $('#fab').classList.add('hide'); document.body.classList.remove('hasfab'); } };
   S.seq++;
   if (!S.authed) { chrome(false); return fill(view, loginView()); }
   if (!st) { chrome(false); return fill(view, h('div', {class: 'empty'}, 'در حال اتصال به ایجنت…')); }
@@ -4319,7 +4323,7 @@ async function poll() {
 function loginView() {
   const inp = h('input', {class: 'in ltr center', placeholder: 'ABCDE-FGHJK', autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false', 'aria-label': 'کد ورود'});
   const btn = h('button', {class: 'btn pri block', type: 'submit'}, icon('lock'), 'ورود');
-  const submit = e => { e.preventDefault(); run(btn, async () => { await POST('/api/login', {key: inp.value}); S.authed = true; S.st = await GET('/api/status'); render(true); }); };
+  const submit = e => { e.preventDefault(); run(btn, async () => { await POST('/api/login', {key: inp.value}); $('#toasts').textContent = ''; S.authed = true; S.st = await GET('/api/status'); render(true); }); };
   return [h('div', {class: 'hero'}, h('img', {src: '/icon.svg', alt: ''}), h('h2', null, 'ایجنت اینستاگرام'), h('p', {class: 'muted'}, 'کدی را که هنگام اجرای برنامه در ترمینال نشان داده شد وارد کن.')),
     h('form', {class: 'card col', onsubmit: submit}, h('label', {class: 'f'}, 'کد ورود (Key)'), inp, btn,
       h('p', {class: 'muted sm'}, 'کد را گم کرده‌ای؟ در ترمینال بزن: ', h('code', null, 'python insta_agent.py --show-key')))];
@@ -4469,7 +4473,7 @@ function postSheet(id) {
       timer = setTimeout(load, 1500);
       if (p.attempts || p.next_try_at > S.st.now + 20) kids.push(act('توقف و برگشت به پیش‌نویس', async () => { clearTimeout(timer); await POST('/api/posts/' + id + '/cancel'); toast('به پیش‌نویس‌ها برگشت'); await again(); }, '', 'x'));
     } else if (p.status === 'published') {
-      if (p.permalink) kids.push(h('a', {class: 'btn', href: p.permalink, target: '_blank', rel: 'noopener'}, icon('external'), 'دیدن در اینستاگرام'));
+      if (p.permalink) kids.push(h('a', {class: 'btn', href: p.permalink, target: '_blank', rel: 'noopener'}, icon('external'), 'اینستاگرام'));
       kids.push(act('کپی به پیش‌نویس', async () => { await POST('/api/posts/' + id + '/duplicate'); toast('در پیش‌نویس‌ها کپی شد'); s.close(); go('content', 'drafts'); }, '', 'layers'));
     } else {
       kids.push(act('حذف', async () => { if (await ask('این پست حذف شود؟', 'حذف', true)) { await DEL('/api/posts/' + id); s.close(); await refresh(); render(false); } }, 'danger', 'trash'));
@@ -4554,14 +4558,14 @@ function composer(post) {
     for (let i = 0; i < 75; i++) {
       const x = new Date(t0.getFullYear(), t0.getMonth(), t0.getDate() + i);
       if (x.toDateString() === d.toDateString()) pick = i;
-      dsel.appendChild(h('option', {value: i}, (i === 0 ? 'امروز — ' : i === 1 ? 'فردا — ' : '') + day(x)));
+      dsel.appendChild(h('option', {value: i}, (i === 0 ? 'امروز، ' : i === 1 ? 'فردا، ' : '') + day(x)));
     }
     dsel.value = String(pick);
     const label = h('div', {class: 'muted sm'}, when(p.at)), chips = h('div', {class: 'chips'});
     const sync = () => { const t = (time.value || '12:00').split(':'), x = new Date(t0.getFullYear(), t0.getMonth(), t0.getDate() + Number(dsel.value), Number(t[0]), Number(t[1])); p.at = x.getTime() / 1000; fill(label, when(p.at)); };
     dsel.addEventListener('change', sync); time.addEventListener('change', sync);
     GET('/api/slots').then(r => fill(chips, r.items.map(ts => h('button', {class: 'chip', onclick: () => { p.at = ts; paintTiming(); }}, when(ts))))).catch(() => {});
-    add(timing, h('div', {class: 'row'}, h('div', {class: 'grow'}, dsel), h('div', {class: 'fix'}, time)), label, h('div', {class: 'muted sm'}, 'پیشنهاد ایجنت (ساعت‌هایی که پست‌هایت بهتر دیده شده):'), chips);
+    add(timing, h('div', {class: 'row when'}, h('div', {class: 'grow'}, dsel), h('div', {class: 'fix'}, time)), label, h('div', {class: 'muted sm'}, 'پیشنهاد ایجنت (ساعت‌هایی که پست‌هایت بهتر دیده شده):'), chips);
   };
   const paint = () => {
     fill(kinds, Object.keys(KIND).map(k => h('button', {class: p.kind === k ? 'on' : '', 'data-kind': k, onclick: () => { p.kind = k; p.media = p.media.slice(0, max()); paint(); }}, icon(KIND[k][1]), KIND[k][0])));
