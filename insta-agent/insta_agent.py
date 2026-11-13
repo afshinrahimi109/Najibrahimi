@@ -488,14 +488,16 @@ class GraphError(Exception):
             return "window"
         if s == 2207027 or c == 9007:
             return "not_ready"
-        if s == 2207008 or c == 24:
+        if s in (2207006, 2207008, 2207020) or c == 24:
             return "expired"
         if s == 2207042 or c == 9:
             return "quota"
         if s in (2207050, 2207051) or c in (25, 368):
             return "blocked"
-        if s == 2207052 or c == 9004:
+        if s in (2207003, 2207052) or c == 9004:
             return "fetch"
+        if s in (2207001, 2207032, 2207053):
+            return "transient"
         if s in (2207004, 2207005, 2207009, 2207010, 2207023, 2207026, 2207028, 2207035, 2207036, 2207037) \
                 or 36000 <= c <= 36010:
             return "media"
@@ -1477,6 +1479,7 @@ QUOTA_RETRY_SEC = 3600
 MISSED_AFTER_SEC = 6 * 3600
 LINK_WAIT_SEC = 600
 VIDEO_WAIT_SEC = 1500
+RESTART_SEC = 1
 POST_COLS = ("id", "kind", "caption", "status", "scheduled_at", "error", "progress", "attempts", "next_try_at",
              "ig_media_id", "permalink", "created_at", "updated_at", "published_at")
 
@@ -1490,6 +1493,7 @@ class Publisher:
 
     def __init__(self, agent):
         self.agent, self.db = agent, agent.db
+        self.lock = threading.RLock()                  # the panel and the background loop never touch a post at once
 
     # ── reading ──
     def raw(self, pid):
@@ -1587,12 +1591,21 @@ class Publisher:
                 "first_comment": str(src.get("first_comment") or "").strip()[:2200],
                 "share_to_feed": src.get("share_to_feed") is not False, "comments_off": src.get("comments_off") is True}
         action = data.get("action") or "draft"
-        when = float(data.get("scheduled_at") or 0)
+        try:
+            when = float(data.get("scheduled_at") or 0)
+        except (TypeError, ValueError):
+            raise UserError("زمان انتشار نامعتبر است.")
+        with self.lock:
+            return self._save(pid, kind, caption, media, opts, action, when)
+
+    def _save(self, pid, kind, caption, media, opts, action, when):
         state = {}
         if pid:
             old = self.raw(pid)
-            if old["status"] in ("publishing", "published"):
-                raise UserError("این پست دیگر قابل ویرایش نیست.")
+            if old["status"] == "published":
+                raise UserError("این پست منتشر شده و دیگر قابل ویرایش نیست.")
+            if old["status"] == "publishing":
+                raise UserError("این پست در حال انتشار است؛ اول «توقف» را بزن، بعد ویرایش کن.")
             state = self.carry_state(jload(old["state"], {}), dirty=True)
         status, manual = "draft", 0
         if action in ("schedule", "now"):
@@ -1626,25 +1639,33 @@ class Publisher:
         return {}
 
     def publish_now(self, pid):
-        r = self.raw(pid)
-        if r["status"] == "published":
-            raise UserError("این پست قبلاً منتشر شده است.")
-        if r["status"] == "publishing":
-            raise UserError("این پست همین حالا در حال انتشار است.")
-        self.validate(r["kind"], r["caption"], jload(r["media"], []), jload(r["opts"], {}))
-        state = self.carry_state(jload(r["state"], {}))
-        self.db.x("UPDATE posts SET status='scheduled', manual=1, scheduled_at=?, attempts=0, next_try_at=0, error='', "
-                  "progress='', state=?, updated_at=? WHERE id=?", (now(), jdump(state), now(), pid))
+        with self.lock:
+            r = self.raw(pid)
+            if r["status"] == "published":
+                raise UserError("این پست قبلاً منتشر شده است.")
+            if r["status"] == "publishing":
+                raise UserError("این پست همین حالا در حال انتشار است.")
+            self.validate(r["kind"], r["caption"], jload(r["media"], []), jload(r["opts"], {}))
+            state = self.carry_state(jload(r["state"], {}))
+            self.db.x("UPDATE posts SET status='scheduled', manual=1, scheduled_at=?, attempts=0, next_try_at=0, error='', "
+                      "progress='', state=?, updated_at=? WHERE id=?", (now(), jdump(state), now(), pid))
         self.agent.wake.set()
         return self.get(pid)
 
-    def cancel(self, pid):
-        r = self.raw(pid)
-        if r["status"] == "publishing":
-            raise UserError("این پست در حال انتشار است و دیگر نمی‌شود جلویش را گرفت.")
+    def stoppable(self, r):
+        """Once the publish request has left, the post may already be live: it cannot be pulled back any more."""
         if r["status"] == "published":
             raise UserError("این پست منتشر شده است.")
-        self.db.x("UPDATE posts SET status='draft', manual=0, error='', progress='', updated_at=? WHERE id=?", (now(), pid))
+        if r["status"] == "publishing" and (jload(r["state"], {}) or {}).get("sent"):
+            raise UserError("درخواست انتشار این پست به اینستاگرام رفته و ایجنت در حال بررسی نتیجه است؛ چند لحظه صبر کن.")
+
+    def cancel(self, pid):
+        with self.lock:
+            r = self.raw(pid)
+            self.stoppable(r)
+            state = self.carry_state(jload(r["state"], {}))
+            self.db.x("UPDATE posts SET status='draft', manual=0, error='', progress='', attempts=0, next_try_at=0, state=?, "
+                      "updated_at=? WHERE id=?", (jdump(state), now(), pid))
         return self.get(pid)
 
     def duplicate(self, pid):
@@ -1654,10 +1675,11 @@ class Publisher:
         return self.get(new)
 
     def delete(self, pid):
-        r = self.raw(pid)
-        if r["status"] == "publishing":
-            raise UserError("این پست در حال انتشار است؛ چند لحظه صبر کن.")
-        self.db.x("DELETE FROM posts WHERE id=?", (pid,))
+        with self.lock:
+            r = self.raw(pid)
+            if r["status"] != "published":
+                self.stoppable(r)
+            self.db.x("DELETE FROM posts WHERE id=?", (pid,))
 
     def published_last_day(self):
         return self.db.val("SELECT COUNT(*) FROM posts WHERE status='published' AND published_at>?", (now() - 86400,))
@@ -1706,26 +1728,37 @@ class Publisher:
     def tick(self):
         t = now()
         s = self.agent.settings.all()
-        rows = self.db.q("SELECT * FROM posts WHERE (status='publishing' OR (status='scheduled' AND scheduled_at<=?)) "
+        rows = self.db.q("SELECT id FROM posts WHERE (status='publishing' OR (status='scheduled' AND scheduled_at<=?)) "
                          "AND next_try_at<=? ORDER BY scheduled_at LIMIT 6", (t, t))
-        for r in rows:
-            if r["status"] == "scheduled":
-                if not r["manual"]:
-                    if not s["autopilot"]:
-                        continue
-                    if t - r["scheduled_at"] > MISSED_AFTER_SEC:
-                        self.db.x("UPDATE posts SET status='missed', updated_at=?, error=? WHERE id=?",
-                                  (t, "ایجنت در زمان این پست روشن نبود. اگر هنوز می‌خواهی، دستی منتشرش کن.", r["id"]))
-                        self.agent.note("یک %s زمان‌بندی‌شده جا ماند چون ایجنت در آن ساعت روشن نبود." % KIND_FA[r["kind"]],
-                                        "warn", "publish")
-                        continue
-                    if self.published_last_day() >= s["limits"]["daily_posts"]:
-                        self.later(r["id"], 1800, "سقف روزانه‌ای که خودت گذاشته‌ای پر است؛ بعداً دوباره بررسی می‌شود.")
-                        continue
-                self.db.x("UPDATE posts SET status='publishing', error='', progress='در حال آماده‌سازی…', updated_at=? WHERE id=?",
-                          (t, r["id"]))
-                r = self.raw(r["id"])
-            self.step(r)
+        for row in rows:
+            with self.lock:
+                self.tick_one(row["id"], s, t)
+
+    def tick_one(self, pid, s, t):
+        r = self.db.one("SELECT * FROM posts WHERE id=?", (pid,))
+        if not r or r["next_try_at"] > t:
+            return
+        if r["status"] == "scheduled":
+            if r["scheduled_at"] > t:
+                return
+            if not r["manual"]:
+                if not s["autopilot"]:
+                    return
+                if t - r["scheduled_at"] > MISSED_AFTER_SEC:
+                    self.db.x("UPDATE posts SET status='missed', updated_at=?, error=? WHERE id=?",
+                              (t, "ایجنت در زمان این پست روشن نبود. اگر هنوز می‌خواهی، دستی منتشرش کن.", pid))
+                    self.agent.note("یک %s زمان‌بندی‌شده جا ماند چون ایجنت در آن ساعت روشن نبود." % KIND_FA[r["kind"]],
+                                    "warn", "publish")
+                    return
+                if self.published_last_day() >= s["limits"]["daily_posts"]:
+                    self.later(pid, 1800, "سقف روزانه‌ای که خودت گذاشته‌ای پر است؛ بعداً دوباره بررسی می‌شود.")
+                    return
+            self.db.x("UPDATE posts SET status='publishing', error='', progress='در حال آماده‌سازی…', updated_at=? WHERE id=?",
+                      (t, pid))
+            r = self.raw(pid)
+        elif r["status"] != "publishing":
+            return                                     # changed from the panel a moment ago
+        self.step(r)
 
     def step(self, r):
         pid, st = r["id"], (jload(r["state"], {}) or {})
@@ -1760,12 +1793,12 @@ class Publisher:
             raise Permanent("فایل این پست دیگر روی دستگاه نیست؛ پست را ویرایش و فایل را دوباره انتخاب کن.")
         return self.agent.store.public_url(f), f["kind"]
 
-    def restart(self, r, st):
-        n = st.get("restarts", 0) + 1
+    def restart(self, r, st, count=True):
+        n = st.get("restarts", 0) + (1 if count else 0)
         if n > 2:
             raise Permanent("اینستاگرام چند بار بارگذاری را ناتمام گذاشت. کمی بعد دوباره تلاش کن.")
         self.put(r["id"], {"restarts": n}, "شروع دوباره…")
-        self.later(r["id"], 1)
+        self.later(r["id"], RESTART_SEC)
 
     def advance(self, r, st):
         pid, ig, kind = r["id"], self.agent.ig, r["kind"]
@@ -1848,8 +1881,10 @@ class Publisher:
             except GraphError as e:
                 if e.kind in ("network", "transient"):
                     return self.later(pid, PUBLISH_RECHECK_SEC, "پاسخ اینستاگرام نرسید؛ در حال بررسی نتیجه…")
-                st["stage"] = "wait" if e.kind == "not_ready" else "publish"      # a clear "no": nothing was published
-                st.pop("sent", None)
+                st.pop("sent", None)                   # a clear "no": nothing was published
+                if e.kind == "expired":
+                    return self.restart(r, st)
+                st["stage"] = "wait" if e.kind == "not_ready" else "publish"
                 self.put(pid, st)
                 if e.kind == "not_ready":
                     return self.later(pid, CONTAINER_POLL_SEC)
@@ -1865,8 +1900,8 @@ class Publisher:
             if code == "FINISHED":
                 st["checks"] = st.get("checks", 0) + 1
                 if st["checks"] >= 2:                  # Instagram says twice that nothing was published
-                    if st.get("dirty"):
-                        return self.restart(r, {})
+                    if st.get("dirty"):                # …and the post was edited meanwhile → build it again
+                        return self.restart(r, st, count=False)
                     st["stage"] = "publish"
                     st.pop("sent", None)
                     self.put(pid, st)
@@ -1877,20 +1912,23 @@ class Publisher:
             if code == "ERROR":
                 raise Permanent("اینستاگرام این فایل را نپذیرفت. " + text)
             if code == "EXPIRED":
-                return self.restart(r, {})
+                return self.restart(r, st)
             return self.later(pid, CONTAINER_POLL_SEC)
 
     def find_published(self, r, st):
         """Looks for this post on the page itself (used when a publish answer was lost)."""
         since = st.get("sent", now()) - 120
         want = (st.get("caption", r["caption"]) or "").strip()
+        ours = {x["ig_media_id"] for x in self.db.q("SELECT ig_media_id FROM posts WHERE ig_media_id!='' AND id!=?", (r["id"],))}
         try:
             if r["kind"] == "story":
                 for m in self.agent.ig.stories():
-                    if parse_ts(m.get("timestamp")) >= since:
+                    if parse_ts(m.get("timestamp")) >= since and str(m.get("id")) not in ours:
                         return str(m.get("id"))
                 return ""
             for m in self.agent.ig.media(limit=8):
+                if str(m.get("id")) in ours:
+                    continue                           # that one belongs to another post of this panel
                 if parse_ts(m.get("timestamp")) >= since and (m.get("caption") or "").strip() == want:
                     return str(m.get("id"))
         except GraphError:
@@ -2134,8 +2172,8 @@ class Inbox:
         if not s["autopilot"] or not (auto["comment_reply"] or auto["spam_hide"] or auto["ai_suggest"]):
             return
         rows = self.db.q("SELECT * FROM comments WHERE state='open' AND mine=0 AND deleted=0 AND hidden=0 AND auto=0 "
-                         "AND ts>=? ORDER BY ts LIMIT 25", (now() - AUTO_MAX_AGE,))
-        ai_calls = 0
+                         "AND ts>=? ORDER BY ts LIMIT 200", (now() - AUTO_MAX_AGE,))
+        ai_calls, quiet = 0, self.agent.quiet()
         for c in rows:
             mark = "UPDATE comments SET auto=1 WHERE id=?"     # always written BEFORE acting: never answer twice
             if auto["spam_hide"] and c["ts"] >= since["spam_hide"] and looks_spam(c["text"]):
@@ -2151,19 +2189,21 @@ class Inbox:
             if auto["comment_reply"] and c["ts"] >= since["comment_reply"]:
                 rule = self.agent.rules.match("comment", c["text"])
                 if rule:
-                    if self.agent.quiet():
-                        continue
+                    if quiet:
+                        continue                       # waits for the end of the quiet hours
                     if not self.agent.may_act():
                         return
                     self.db.x(mark, (c["id"],))
                     if not self.agent.cooling(self.ukey(c)):
                         self.apply(rule, c)
                     continue
-            if auto["ai_suggest"] and c["ts"] >= since["ai_suggest"] and ai_calls < 3:
+            if auto["ai_suggest"] and c["ts"] >= since["ai_suggest"]:
+                if ai_calls >= 3:
+                    continue                           # the next round takes the rest
                 ai_calls += 1
                 self.db.x(mark, (c["id"],))
                 out = self.agent.ai.reply(c["text"], self.media_brief(c["media_id"])["caption"])
-                send = (auto["ai_send"] and out["source"] == "ai" and c["ts"] >= since["ai_send"] and not self.agent.quiet()
+                send = (auto["ai_send"] and out["source"] == "ai" and c["ts"] >= since["ai_send"] and not quiet
                         and not self.agent.cooling(self.ukey(c)) and self.agent.may_act())
                 try:
                     if send:
@@ -2173,6 +2213,8 @@ class Inbox:
                         self.db.x("UPDATE comments SET suggest=? WHERE id=?", (out["text"], c["parent_id"] or c["id"]))
                 except GraphError as e:
                     self.agent.problem(e, "comments")
+                continue
+            self.db.x(mark, (c["id"],))                # nothing applies → it stays for the human and is not looked at again
 
     def apply(self, rule, c):
         rules = self.agent.rules
@@ -2313,7 +2355,7 @@ class Direct:
         if not (s["autopilot"] and s["auto"]["dm_reply"]):
             return
         floor = max(s["since"]["dm_reply"], now() - AUTO_MAX_AGE)
-        rows = self.db.q("SELECT * FROM convs WHERE %s AND last_id!=auto_id AND last_user_ts>=? ORDER BY last_user_ts LIMIT 20"
+        rows = self.db.q("SELECT * FROM convs WHERE %s AND last_id!=auto_id AND last_user_ts>=? ORDER BY last_user_ts LIMIT 100"
                          % self.OPEN, (floor,))
         for c in rows:
             rule = self.agent.rules.match("dm", c["last_text"])
@@ -4385,8 +4427,10 @@ function postSheet(id) {
       h('div', {class: 'pre'}, p.caption || '— بدون کپشن —'));
     const act = (label, fn, cls, ic) => h('button', {class: 'btn ' + (cls || ''), onclick: e => run(e.currentTarget, fn)}, ic ? icon(ic) : null, label);
     const kids = [];
-    if (p.status === 'publishing') timer = setTimeout(load, 1500);
-    else if (p.status === 'published') {
+    if (p.status === 'publishing') {
+      timer = setTimeout(load, 1500);
+      if (p.attempts || p.next_try_at > S.st.now + 20) kids.push(act('توقف و برگشت به پیش‌نویس', async () => { clearTimeout(timer); await POST('/api/posts/' + id + '/cancel'); toast('به پیش‌نویس‌ها برگشت'); await again(); }, '', 'x'));
+    } else if (p.status === 'published') {
       if (p.permalink) kids.push(h('a', {class: 'btn', href: p.permalink, target: '_blank', rel: 'noopener'}, icon('external'), 'دیدن در اینستاگرام'));
       kids.push(act('کپی به پیش‌نویس', async () => { await POST('/api/posts/' + id + '/duplicate'); toast('در پیش‌نویس‌ها کپی شد'); s.close(); go('content', 'drafts'); }, '', 'layers'));
     } else {

@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -18,6 +19,7 @@ ia.CONTAINER_POLL_SEC = 0.02
 ia.PUBLISH_RECHECK_SEC = 0.05
 ia.RETRY_BACKOFF = [0.05, 0.05, 0.05, 0.05, 0.05]
 ia.QUOTA_RETRY_SEC = 0.05
+ia.RESTART_SEC = 0.02
 
 
 def jpeg(width=1080, height=1080, pad=0):
@@ -99,7 +101,7 @@ class Rig:
         return data
 
     def upload(self, data, name="file.jpg"):
-        status, out, _ = self.req("POST", "/api/upload?name=" + name, raw=data, headers={"Content-Type": "application/octet-stream"})
+        status, out, _ = self.req("POST", "/api/upload?name=" + urllib.parse.quote(name), raw=data, headers={"Content-Type": "application/octet-stream"})
         assert status == 200, out
         return out
 
