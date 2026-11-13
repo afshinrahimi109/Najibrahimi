@@ -4345,7 +4345,7 @@ function guide() {
   const li = (...k) => h('li', null, k);
   return h('ol', {class: 'steps'},
     li('پیج باید «حرفه‌ای» (Business یا Creator) باشد: در اینستاگرام ← تنظیمات ← نوع حساب ← «تغییر به حساب حرفه‌ای» (رایگان است).'),
-    li('در سایت ', h('a', {href: 'https://developers.facebook.com/apps/', target: '_blank', rel: 'noopener'}, 'developers.facebook.com'), ' وارد شو، «Create App» را بزن و نوع «Business» را انتخاب کن.'),
+    li('در سایت ', h('a', {href: 'https://developers.facebook.com/apps/', target: '_blank', rel: 'noopener'}, 'developers.facebook.com'), ' وارد شو و «Create App» را بزن. اگر «Use case» پرسید گزینهٔ اینستاگرام (Manage messaging & content on Instagram) را بردار؛ در فرم قدیمی‌تر: Other ← Business.'),
     li('در برنامه‌ای که ساختی محصول «Instagram» را اضافه کن و به بخش «API setup with Instagram login» برو.'),
     li('در قسمت «Generate access tokens» پیج خودت را اضافه کن، همهٔ دسترسی‌ها را تأیید کن و «Generate token» را بزن.'),
     li('توکن (رشتهٔ بلندی که با IGAA شروع می‌شود) را کپی کن و همین‌جا بچسبان.'));
