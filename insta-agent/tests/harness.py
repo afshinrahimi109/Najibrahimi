@@ -1,10 +1,12 @@
 """Shared test rig: one running agent wired to the built-in simulator, in a throw-away folder."""
+import http.server
 import json
 import os
 import shutil
 import struct
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -137,3 +139,34 @@ class Rig:
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
+
+
+class FakeAI:
+    """A stand-in for an OpenAI-compatible chat service: answers with `self.answer` and remembers what it was asked."""
+
+    def __init__(self, answer="سلام 🌹 در دایرکت راهنمایی می‌کنیم."):
+        self.answer, self.asked, self.status = answer, [], 200
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode("utf-8"))
+                outer.asked.append({"path": self.path, "auth": self.headers.get("Authorization"), "body": body})
+                answer = outer.answer(body) if callable(outer.answer) else outer.answer
+                out = json.dumps({"choices": [{"message": {"role": "assistant", "content": answer}}]}).encode("utf-8")
+                self.send_response(outer.status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = "http://127.0.0.1:%d/v1" % self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()

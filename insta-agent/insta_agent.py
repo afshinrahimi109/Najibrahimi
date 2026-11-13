@@ -667,7 +667,9 @@ PROFILE_FIELDS = ["user_id,username,name,account_type,profile_picture_url,follow
 FB_PROFILE_FIELDS = "id,username,name,profile_picture_url,followers_count,follows_count,media_count,biography,website"
 MEDIA_FIELDS = ["id,caption,media_type,media_product_type,media_url,thumbnail_url,permalink,timestamp,like_count,"
                 "comments_count", "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp"]
-COMMENT_FIELDS = "id,text,timestamp,username,from,hidden,parent_id,like_count"
+COMMENT_FIELDS = ["id,text,timestamp,username,from,hidden,parent_id,like_count", "id,text,timestamp,username,hidden,parent_id",
+                  "id,text,timestamp,username"]
+MESSAGE_FIELDS = ["id,created_time,from,to,message,attachments", "id,created_time,from,to,message", "id,created_time,from,message"]
 ACCOUNT_METRICS = ["reach", "views", "accounts_engaged", "total_interactions", "likes", "comments", "shares", "saves",
                    "replies", "profile_links_taps"]
 MEDIA_METRICS = {"FEED": ["reach", "views", "likes", "comments", "saved", "shares", "total_interactions"],
@@ -691,6 +693,7 @@ class Instagram:
 
     def __init__(self, cfg, db, graph):
         self.cfg, self.db, self.graph = cfg, db, graph
+        self.good = {}                                 # which field list worked last time, per kind of call
 
     # ── account ──
     @property
@@ -804,13 +807,17 @@ class Instagram:
         return self.save_acct(token_at=now(), token_expires=now() + int(d.get("expires_in") or 5184000))
 
     # ── content ──
-    def _fields_call(self, path, field_sets, extra):
+    def _fields_call(self, path, field_sets, extra, key, make=None):
+        """One field the token may not read fails the whole call, so the request steps down to a shorter list
+        (and remembers which one worked)."""
         last = None
-        for fields in field_sets:
+        for i in range(min(self.good.get(key, 0), len(field_sets) - 1), len(field_sets)):
             try:
                 params = dict(extra)
-                params["fields"] = fields
-                return self.call("GET", path, params)
+                params["fields"] = make(field_sets[i]) if make else field_sets[i]
+                out = self.call("GET", path, params)
+                self.good[key] = i
+                return out
             except GraphError as e:
                 last = e
                 if e.kind != "param":
@@ -818,13 +825,13 @@ class Instagram:
         raise last
 
     def media(self, limit=30):
-        return self._fields_call("%s/media" % self.me(), MEDIA_FIELDS, {"limit": limit}).get("data") or []
+        return self._fields_call("%s/media" % self.me(), MEDIA_FIELDS, {"limit": limit}, "media").get("data") or []
 
     def stories(self):
-        return self._fields_call("%s/stories" % self.me(), MEDIA_FIELDS[1:], {}).get("data") or []
+        return self._fields_call("%s/stories" % self.me(), MEDIA_FIELDS[1:], {}, "stories").get("data") or []
 
     def media_info(self, media_id):
-        return self._fields_call(media_id, MEDIA_FIELDS, {})
+        return self._fields_call(media_id, MEDIA_FIELDS, {}, "media")
 
     def create_container(self, params):
         return str(self.call("POST", "%s/media" % self.me(), params, timeout=90)["id"])
@@ -843,8 +850,8 @@ class Instagram:
 
     # ── comments ──
     def comments(self, media_id, limit=50):
-        fields = "%s,replies.limit(25){%s}" % (COMMENT_FIELDS, COMMENT_FIELDS)
-        d = self.call("GET", "%s/comments" % media_id, {"fields": fields, "limit": limit})
+        d = self._fields_call("%s/comments" % media_id, COMMENT_FIELDS, {"limit": limit}, "comments",
+                              lambda f: "%s,replies.limit(25){%s}" % (f, f))
         return d.get("data") or [], bool((d.get("paging") or {}).get("next"))
 
     def reply(self, comment_id, text):
@@ -869,7 +876,7 @@ class Instagram:
         return d.get("data") or []
 
     def messages(self, conv_id, limit=20):
-        d = self.call("GET", conv_id, {"fields": "messages.limit(%d){id,created_time,from,to,message,attachments}" % limit})
+        d = self._fields_call(conv_id, MESSAGE_FIELDS, {}, "messages", lambda f: "messages.limit(%d){%s}" % (limit, f))
         return (d.get("messages") or {}).get("data") or []
 
     def send(self, recipient, text):
@@ -1345,7 +1352,7 @@ class AI:
 
     def chat(self, history, facts):
         history = [{"role": "assistant" if m.get("role") == "assistant" else "user", "content": str(m.get("content") or "")[:2000]}
-                   for m in (history or []) if m.get("content")][-12:]
+                   for m in (history if isinstance(history, list) else []) if isinstance(m, dict) and m.get("content")][-12:]
         if not history or history[-1]["role"] != "user":
             raise UserError("پیامی نوشته نشده است.")
         try:
@@ -2022,7 +2029,10 @@ class Inbox:
             mine = 1 if self.is_me(uid, username) else 0
             ts = parse_ts(c.get("timestamp")) or now()
             hidden = 1 if c.get("hidden") else 0
-            if self.db.one("SELECT id FROM comments WHERE id=?", (cid,)) is None:
+            known = self.db.one("SELECT hidden FROM comments WHERE id=?", (cid,))
+            if known is not None and "hidden" not in c:
+                hidden = known["hidden"]               # this token cannot read the flag → keep what we know
+            if known is None:
                 state = "done" if (mine or hidden or ts < now() - FRESH_SEC) else "open"
                 self.db.x("INSERT INTO comments (id, media_id, parent_id, user_id, username, text, ts, hidden, mine, state) "
                           "VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -2182,7 +2192,7 @@ class Inbox:
         if not s["autopilot"] or not (auto["comment_reply"] or auto["spam_hide"] or auto["ai_suggest"]):
             return
         rows = self.db.q("SELECT * FROM comments WHERE state='open' AND mine=0 AND deleted=0 AND hidden=0 AND auto=0 "
-                         "AND ts>=? ORDER BY ts LIMIT 200", (now() - AUTO_MAX_AGE,))
+                         "AND ts>=? ORDER BY ts, id LIMIT 200", (now() - AUTO_MAX_AGE,))
         ai_calls, quiet = 0, self.agent.quiet()
         for c in rows:
             mark = "UPDATE comments SET auto=1 WHERE id=?"     # always written BEFORE acting: never answer twice
@@ -2214,6 +2224,7 @@ class Inbox:
                 self.db.x(mark, (c["id"],))
                 out = self.agent.ai.reply(c["text"], self.media_brief(c["media_id"])["caption"])
                 send = (auto["ai_send"] and out["source"] == "ai" and c["ts"] >= since["ai_send"] and not quiet
+                        and not looks_spam(out["text"]) and "@" not in out["text"]      # plain words only go out unseen
                         and not self.agent.cooling(self.ukey(c)) and self.agent.may_act())
                 try:
                     if send:
@@ -2769,6 +2780,7 @@ class Agent:
                 self.wipe_page()
             acct.update(connected_at=now(), token_at=now(), token_expires=0, token_next=now() + 25 * 3600, invalid="")
             self.graph.token, self.graph.version = stored, acct["version"]
+            self.ig.good.clear()
             self.db.set("secret.token", stored)
             self.db.set("account", acct)
             self.db.drop("dm.blocked")
@@ -3018,14 +3030,14 @@ class Sim:
                 if method == "POST":
                     return self.create_container(params, fetched)
                 limit = clamp(params.get("limit") or 25, 1, 100)
-                return 200, {"data": [self.media_out(m) for m in self.media[:limit]]}
+                return 200, {"data": [self.media_out(m, params) for m in self.media[:limit]]}
             if edge == "media_publish" and method == "POST":
                 return self.publish(params)
             if edge == "content_publishing_limit":
                 return 200, {"data": [{"quota_usage": self.quota_used, "config": {"quota_total": self.quota_total,
                                                                                "quota_duration": 86400}}]}
             if edge == "stories":
-                return 200, {"data": [self.media_out(m) for m in self.stories if m["ts"] > now() - 86400]}
+                return 200, {"data": [self.media_out(m, params) for m in self.stories if m["ts"] > now() - 86400]}
             if edge == "tags":
                 return 200, {"data": []}
             if edge == "insights":
@@ -3039,7 +3051,7 @@ class Sim:
         m = next((x for x in self.media + self.stories if x["id"] == head), None)
         if m is not None:
             if n == 1 and method == "GET":
-                return 200, self.media_out(m)
+                return 200, self.media_out(m, params)
             if n == 1 and method == "POST":
                 if "comment_enabled" in params:
                     m["comment_enabled"] = params["comment_enabled"] == "true"
@@ -3083,7 +3095,7 @@ class Sim:
             out[f] = full[f]
         return 200, out
 
-    def media_out(self, m):
+    def media_out(self, m, params=None):
         thumb = "/_sim/pub/%s.jpg" % m["id"] if m["blob"] else "/_sim/img/%d.svg" % m["n"]
         out = {"id": m["id"], "caption": m["caption"], "media_type": m["media_type"], "timestamp": iso(m["ts"]),
                "media_product_type": m["media_product_type"], "permalink": "https://www.instagram.com/p/%s/" % m["code"],
@@ -3093,7 +3105,8 @@ class Sim:
             out["thumbnail_url"] = thumb
         else:
             out["media_url"] = thumb
-        return out
+        asked = [f for f in ((params or {}).get("fields") or "").split(",") if f]
+        return {k: v for k, v in out.items() if k == "id" or k in asked} if asked else out
 
     def create_container(self, p, fetched):
         mtype = (p.get("media_type") or "IMAGE").upper()
