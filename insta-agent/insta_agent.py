@@ -46,11 +46,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 VERSION = "1.0.0"
 DEFAULT_PORT = 8787
-API_VERSIONS = ["v27.0", "v26.0", "v25.0", ""]
+API_VERSIONS = ["v26.0", "v27.0", "v25.0", ""]
 KINDS = ("image", "carousel", "reel", "story")
 KIND_FA = {"image": "پست", "carousel": "پست چندتایی", "reel": "ریل", "story": "استوری"}
 IMAGE_MAX = 8 * 1024 * 1024
 VIDEO_MAX = 300 * 1024 * 1024
+STORY_VIDEO_MAX = 100 * 1024 * 1024
+MAX_HASHTAGS = 5                # Instagram's own limit per post since December 2025 (it used to be 30)
 FRESH_SEC = 3 * 86400          # older comments/messages are imported as "already handled"
 AUTO_MAX_AGE = 86400           # the agent never auto-answers anything older than this
 QUIET = False
@@ -682,6 +684,7 @@ MEDIA_FIELDS = ["id,caption,media_type,media_product_type,media_url,thumbnail_ur
 COMMENT_FIELDS = ["id,text,timestamp,username,from,hidden,parent_id,like_count", "id,text,timestamp,username,hidden,parent_id",
                   "id,text,timestamp,username"]
 MESSAGE_FIELDS = ["id,created_time,from,to,message,attachments", "id,created_time,from,to,message", "id,created_time,from,message"]
+CONV_FIELDS = ["id,updated_time,participants", "id,updated_time"]
 ACCOUNT_METRICS = ["reach", "views", "accounts_engaged", "total_interactions", "likes", "comments", "shares", "saves",
                    "replies", "profile_links_taps"]
 MEDIA_METRICS = {"FEED": ["reach", "views", "likes", "comments", "saved", "shares", "total_interactions"],
@@ -853,7 +856,9 @@ class Instagram:
         return str(d.get("status_code") or "").upper(), str(d.get("status") or "")
 
     def publish(self, container_id):
-        return str(self.call("POST", "%s/media_publish" % self.me(), {"creation_id": container_id}, timeout=90)["id"])
+        """Returns (media id, config_issue). The second is set when Instagram published the post but left a part out."""
+        d = self.call("POST", "%s/media_publish" % self.me(), {"creation_id": container_id}, timeout=90)
+        return str(d["id"]), str(d.get("config_issue") or "")
 
     def quota(self):
         d = self.call("GET", "%s/content_publishing_limit" % self.me(), {"fields": "quota_usage,config"})
@@ -883,13 +888,35 @@ class Instagram:
 
     # ── direct messages ──
     def conversations(self, limit=25):
-        d = self.call("GET", "%s/conversations" % self.inbox_owner(),
-                      {"platform": "instagram", "fields": "id,updated_time,participants", "limit": limit})
+        d = self._fields_call("%s/conversations" % self.inbox_owner(), CONV_FIELDS, {"platform": "instagram", "limit": limit},
+                              "convs")
         return d.get("data") or []
 
-    def messages(self, conv_id, limit=20):
-        d = self._fields_call(conv_id, MESSAGE_FIELDS, {}, "messages", lambda f: "messages.limit(%d){%s}" % (limit, f))
-        return (d.get("messages") or {}).get("data") or []
+    def messages(self, conv_id, limit=20, known=()):
+        """The newest messages of one chat, newest first. They are asked for in a single call; if Instagram refuses
+        that form, the longer way from Meta's guide is used from then on: the list of message ids first, then each
+        message that is not stored yet (`known`) on its own. Only the 20 newest can be read that way."""
+        if not self.good.get("messages_one_by_one"):
+            try:
+                d = self._fields_call(conv_id, MESSAGE_FIELDS, {}, "messages",
+                                      lambda f: "messages.limit(%d){%s}" % (limit, f))
+                return (d.get("messages") or {}).get("data") or []
+            except GraphError as e:
+                if e.kind != "param":
+                    raise
+        d = self.call("GET", conv_id, {"fields": "messages"})        # (fails too when the chat itself is the problem)
+        self.good["messages_one_by_one"] = 1
+        out = []
+        for row in ((d.get("messages") or {}).get("data") or [])[:min(limit, 20)]:
+            mid = str(row.get("id") or "")
+            if not mid or mid in known:
+                continue
+            try:
+                out.append(self._fields_call(mid, MESSAGE_FIELDS, {}, "message"))
+            except GraphError as e:
+                if e.kind != "param":
+                    raise                              # (a single unreadable message is skipped)
+        return out
 
     def send(self, recipient, text):
         return self.call("POST", "%s/messages" % self.inbox_owner(), body={"recipient": recipient, "message": {"text": text}})
@@ -1296,10 +1323,10 @@ class AI:
         try:
             text = self.ask(self.persona(),
                             "برای یک %s اینستاگرام با موضوع «%s» سه کپشن متفاوت بنویس: کوتاه، معمولی، و داستانی. "
-                            "هر کپشن با ۳ تا ۶ هشتگ مرتبط تمام شود. بین کپشن‌ها فقط یک خط شامل === بگذار و هیچ "
+                            "هر کپشن با ۳ تا ۵ هشتگ مرتبط تمام شود (نه بیشتر). بین کپشن‌ها فقط یک خط شامل === بگذار و هیچ "
                             "توضیح، شماره یا عنوانی ننویس." % (KIND_FA.get(kind, "پست"), topic))
             items = [re.sub(r"^\s*(کپشن\s*)?[\d۰-۹]+\s*[\.\):\-]\s*", "", p.strip()) for p in re.split(r"\n\s*={3,}\s*\n?", text)]
-            items = [i for i in items if i][:5]
+            items = [limit_tags(i) for i in items if i][:5]
             if items:
                 return {"items": items, "source": "ai"}
         except AIDown:
@@ -1313,17 +1340,18 @@ class AI:
     def hashtags(self, topic):
         topic = str(topic or "").strip()[:500]
         try:
-            text = self.ask(self.persona(), "برای پستی با موضوع «%s» پانزده هشتگ فارسی و انگلیسی مرتبط پیشنهاد بده. "
-                                            "فقط هشتگ‌ها را با فاصله بنویس." % (topic or "معرفی پیج"), max_tokens=300)
+            text = self.ask(self.persona(), "برای پستی با موضوع «%s» ده هشتگ فارسی و انگلیسی دقیق و مرتبط پیشنهاد بده "
+                                            "(نه هشتگ‌های کلی مثل #explore). فقط هشتگ‌ها را با فاصله بنویس."
+                            % (topic or "معرفی پیج"), max_tokens=300)
             tags = []
             for t in re.findall(r"#[^\s#،,]+", text):
                 if norm(t) not in [norm(x) for x in tags]:
                     tags.append(t)
             if len(tags) >= 3:
-                return {"items": tags[:30], "source": "ai"}
+                return {"items": tags[:12], "source": "ai", "max": MAX_HASHTAGS}
         except AIDown:
             pass
-        return {"items": self.offline_hashtags(topic), "source": "offline"}
+        return {"items": self.offline_hashtags(topic)[:12], "source": "offline", "max": MAX_HASHTAGS}
 
     def ideas(self, count=6):
         about = self.settings.all()["brand"]["about"] or "پیج"
@@ -1519,6 +1547,20 @@ def count_tags(caption):
     return len(re.findall(r"#[^\s#]+", caption)), len(re.findall(r"(?<![\w.])@[\w.]+", caption))
 
 
+def limit_tags(text, most=MAX_HASHTAGS):
+    """Drops every hashtag after the allowed number from a text the assistant wrote."""
+    seen = [0]
+
+    def keep(m):
+        seen[0] += 1
+        return m.group(0) if seen[0] <= most else ""
+
+    out = re.sub(r"#[^\s#]+", keep, text)
+    if seen[0] <= most:
+        return text
+    return re.sub(r"[ \t]+(?=\n|$)", "", re.sub(r"[ \t]{2,}", " ", out)).strip()
+
+
 class Publisher:
     """Scheduled posts as a resumable state machine: a post is never published twice."""
 
@@ -1582,8 +1624,9 @@ class Publisher:
         if len(caption) > 2200:
             raise UserError("کپشن بلندتر از ۲۲۰۰ نویسه است.")
         tags, mentions = count_tags(caption)
-        if tags > 30:
-            raise UserError("کپشن بیش از ۳۰ هشتگ دارد.")
+        if tags > MAX_HASHTAGS:
+            raise UserError("کپشن %s هشتگ دارد؛ اینستاگرام در هر پست حداکثر %s هشتگ می‌پذیرد. چندتا را بردار."
+                            % (fa(tags), fa(MAX_HASHTAGS)))
         if mentions > 20:
             raise UserError("کپشن بیش از ۲۰ منشن دارد.")
         for m in media:
@@ -1592,6 +1635,8 @@ class Publisher:
             f = self.agent.store.get(m["file"])
             if not f or not os.path.exists(self.agent.store.path(f)):
                 raise UserError("یکی از فایل‌ها دیگر روی دستگاه نیست؛ دوباره انتخابش کن.")
+            if kind == "story" and f["kind"] == "video" and f["size"] > STORY_VIDEO_MAX:
+                raise UserError("ویدیوی استوری باید کمتر از ۱۰۰ مگابایت (و حداکثر ۶۰ ثانیه) باشد.")
             if f["kind"] == "image" and kind != "story" and f["width"] and f["height"]:
                 ratio = f["width"] / float(f["height"])
                 if not 0.79 <= ratio <= 1.92:
@@ -1834,6 +1879,27 @@ class Publisher:
         self.put(r["id"], {"restarts": n}, "شروع دوباره…")
         self.later(r["id"], RESTART_SEC)
 
+    EXTRAS = {"alt_text": "«متن جایگزین عکس»", "share_to_feed": "«نمایش ریل در صفحهٔ اصلی»"}
+
+    def create(self, p):
+        """Sends one file to Instagram. When the request is refused and it carried an optional extra, it is tried
+        once more without the extras: a post without alt text is better than no post."""
+        ig = self.agent.ig
+        extras = [k for k in self.EXTRAS if k in p]
+        try:
+            return ig.create_container(p)
+        except GraphError as e:
+            if e.kind != "param" or not extras:
+                raise
+            first = e
+        try:
+            cid = ig.create_container({k: v for k, v in p.items() if k not in extras})
+        except GraphError:
+            raise first
+        self.agent.note("اینستاگرام گزینهٔ %s را نپذیرفت؛ پست بدون آن فرستاده شد." % " و ".join(self.EXTRAS[k] for k in extras),
+                        "warn", "publish")
+        return cid
+
     def advance(self, r, st):
         pid, ig, kind = r["id"], self.agent.ig, r["kind"]
         media, opts = jload(r["media"], []), jload(r["opts"], {})
@@ -1869,7 +1935,7 @@ class Publisher:
                         p["alt_text"] = opts["alt_text"]
                 if kind != "story" and r["caption"]:
                     p["caption"] = r["caption"]
-                st["container"] = ig.create_container(p)
+                st["container"] = self.create(p)
                 st["stage"] = "wait"
             st["wait_from"] = now()
             self.put(pid, st, "اینستاگرام در حال پردازش فایل است…")
@@ -1911,7 +1977,7 @@ class Publisher:
             st.update(stage="verify", sent=now(), verify_at=now() + PUBLISH_RECHECK_SEC, checks=0)
             self.put(pid, st)
             try:
-                mid = ig.publish(st["container"])
+                mid, issue = ig.publish(st["container"])
             except GraphError as e:
                 if e.kind in ("network", "transient"):
                     return self.later(pid, PUBLISH_RECHECK_SEC, "پاسخ اینستاگرام نرسید؛ در حال بررسی نتیجه…")
@@ -1923,7 +1989,7 @@ class Publisher:
                 if e.kind == "not_ready":
                     return self.later(pid, CONTAINER_POLL_SEC)
                 raise
-            return self.finish(r, st, mid)
+            return self.finish(r, st, mid, issue)
         if st["stage"] == "verify":
             if now() < st.get("verify_at", 0):
                 return self.later(pid, max(1, st["verify_at"] - now()))
@@ -1969,7 +2035,7 @@ class Publisher:
             pass
         return ""
 
-    def finish(self, r, st, media_id):
+    def finish(self, r, st, media_id, issue=""):
         pid, ig, opts = r["id"], self.agent.ig, jload(r["opts"], {})
         permalink = ""
         if media_id:
@@ -1980,6 +2046,11 @@ class Publisher:
         self.db.x("UPDATE posts SET status='published', ig_media_id=?, permalink=?, published_at=?, updated_at=?, error='', "
                   "progress='', manual=0, state=? WHERE id=?", (media_id or "", permalink, now(), now(), jdump({"stage": "done"}), pid))
         self.agent.note("%s منتشر شد ✓" % KIND_FA[r["kind"]], "ok", "publish")
+        if issue:
+            what = {"CAPTION_NOT_ATTACHED": "کپشن را روی آن نگذاشت (معمولاً به‌خاطر هشتگ یا متنی که نمی‌پسندد). "
+                                            "کپشن را از خود اپ اینستاگرام اضافه کن.",
+                    "USER_TAGGING_FAILURE": "تگ‌کردن افراد را انجام نداد."}.get(issue, "بخشی از آن را اعمال نکرد (%s)." % issue)
+            self.agent.note("%s منتشر شد، ولی اینستاگرام %s" % (KIND_FA[r["kind"]], what), "alert", "publish")
         if media_id and r["kind"] != "story":
             try:
                 if opts.get("first_comment"):
@@ -2304,7 +2375,8 @@ class Direct:
 
     def load(self, cid, updated, other, row):
         items = []
-        for m in reversed(self.agent.ig.messages(cid)):       # Instagram lists newest first
+        known = set(r["id"] for r in self.db.q("SELECT id FROM msgs WHERE conv_id=?", (cid,)))
+        for m in reversed(self.agent.ig.messages(cid, known=known)):       # Instagram lists newest first
             mid = str(m.get("id") or "")
             if not mid:
                 continue
@@ -2881,6 +2953,9 @@ class Sim:
         self.media, self.stories, self.comments, self.convs, self.containers = [], [], {}, {}, {}
         self.calls, self.faults, self.fetched, self.telegram = [], [], [], []
         self.unknown_fields, self.bad_versions = set(), set()
+        self.config_issue, self.versions = "", set()
+        self.flat_messages = False                     # True: chats only give message ids; each message is read on its own
+        self.refused_params = set()                    # parameter names that POST /media answers with an error
         self.video_seconds = 3
         self.lively = True
         self.quota_used, self.quota_total = 0, 50
@@ -3006,6 +3081,7 @@ class Sim:
     def handle(self, method, host, path, params, body=None, bearer=""):
         parts = [p for p in path.split("/") if p]
         if parts and re.fullmatch(r"v\d+\.\d+", parts[0]):
+            self.versions.add(parts[0])
             if parts.pop(0) in self.bad_versions:
                 return self.err(2635, "You are calling a version of the API that is not available")
         key = "/".join(parts)
@@ -3061,7 +3137,8 @@ class Sim:
             if edge == "insights":
                 return self.account_insights(params)
             if edge == "conversations":
-                return 200, {"data": [self.conv_out(c) for c in sorted(self.convs.values(), key=lambda c: -c["updated"])]}
+                return 200, {"data": [self.conv_out(c, params.get("fields") or "id,updated_time")
+                                      for c in sorted(self.convs.values(), key=lambda c: -c["updated"])]}
             if edge == "messages" and method == "POST":
                 return self.send_message(body if isinstance(body, dict) else params)
         if head in self.containers and n == 1 and method == "GET":
@@ -3098,7 +3175,23 @@ class Sim:
                 return self.page_comment(c["media_id"], c["id"], params.get("message"))
         conv = self.convs.get(head)
         if conv is not None and n == 1 and method == "GET":
-            return 200, {"id": conv["id"], "messages": {"data": [self.msg_out(conv, x) for x in reversed(conv["messages"][-30:])]}}
+            fields = params.get("fields") or ""
+            if "messages" not in fields:
+                return 200, {"id": conv["id"], "updated_time": iso(conv["updated"])}
+            if re.search(r"messages\s*[.{]", fields):
+                if self.flat_messages:
+                    return self.err(100, "Syntax error: field expansion is not supported on this edge")
+                rows = [self.msg_out(conv, x) for x in reversed(conv["messages"][-30:])]
+            else:
+                rows = [{"id": x["id"], "created_time": iso(x["ts"])} for x in reversed(conv["messages"])]
+            return 200, {"id": conv["id"], "messages": {"data": rows}}
+        for conv in self.convs.values():
+            for i, x in enumerate(reversed(conv["messages"])):
+                if x["id"] == head and n == 1 and method == "GET":
+                    if i >= 20:
+                        return self.err(100, "This message has been deleted")
+                    want = set((params.get("fields") or "id,created_time").split(","))
+                    return 200, {k: v for k, v in self.msg_out(conv, x).items() if k in want or k == "id"}
         return self.err(100, "Unsupported request - object with ID '%s' does not exist" % head, sub=33)
 
     def profile(self, fields, host):
@@ -3127,6 +3220,9 @@ class Sim:
         return {k: v for k, v in out.items() if k == "id" or k in asked} if asked else out
 
     def create_container(self, p, fetched):
+        for name in sorted(self.refused_params):
+            if name in p:
+                return self.err(100, "Unsupported parameter: %s is not available for this API" % name)
         mtype = (p.get("media_type") or "IMAGE").upper()
         caption = p.get("caption") or ""
         if len(caption) > 2200:
@@ -3174,6 +3270,7 @@ class Sim:
             return self.err(9, "Content publishing limit reached", sub=2207042)
         c["published"] = True
         self.quota_used += 1
+        issue = self.config_issue if c["caption"] else ""
         src = self.containers[c["kids"][0]] if c["type"] == "CAROUSEL" else c
         if c["type"] == "CAROUSEL":
             mtype, product = "CAROUSEL_ALBUM", "FEED"
@@ -3183,9 +3280,10 @@ class Sim:
             mtype, product = "VIDEO", "REELS"
         else:
             mtype, product = "IMAGE", "FEED"
-        m = self.make_media(c["caption"], mtype, now(), 0, self.seq % len(PALETTE), product, src["blob"])
+        m = self.make_media("" if issue == "CAPTION_NOT_ATTACHED" else c["caption"], mtype, now(), 0,
+                            self.seq % len(PALETTE), product, src["blob"])
         (self.stories if product == "STORY" else self.media).insert(0, m)
-        return 200, {"id": m["id"]}
+        return 200, ({"id": m["id"], "config_issue": issue} if issue else {"id": m["id"]})
 
     def comment_out(self, c):
         out = {"id": c["id"], "text": c["text"], "timestamp": iso(c["ts"]), "username": c["username"],
@@ -3215,10 +3313,12 @@ class Sim:
             return self.err(100, "The parameter message is required")
         return 200, {"id": self.add_comment(message, self.user["username"], parent=parent, media_id=media_id)}
 
-    def conv_out(self, c):
-        return {"id": c["id"], "updated_time": iso(c["updated"]),
-                "participants": {"data": [{"id": self.user["user_id"], "username": self.user["username"]},
-                                          {"id": c["user_id"], "username": c["username"]}]}}
+    def conv_out(self, c, fields="id,updated_time,participants"):
+        out = {"id": c["id"], "updated_time": iso(c["updated"])}
+        if "participants" in fields.split(","):
+            out["participants"] = {"data": [{"id": self.user["user_id"], "username": self.user["username"]},
+                                            {"id": c["user_id"], "username": c["username"]}]}
+        return out
 
     def msg_out(self, conv, m):
         page = {"id": self.user["user_id"], "username": self.user["username"]}
@@ -3858,7 +3958,7 @@ def api_call(app, method, path, q, body):
         ideas = agent.ai.ideas(clamp(body.get("count") or 5, 1, 10))
         made = []
         for idea in ideas["items"]:
-            caption = "%s\n\n%s" % (idea, " ".join(agent.ai.offline_hashtags(idea)[:5]))
+            caption = limit_tags("%s\n\n%s" % (idea, " ".join(agent.ai.offline_hashtags(idea)[:MAX_HASHTAGS])))
             made.append(pub.save({"kind": "image", "caption": caption, "media": [], "action": "draft"}))
         return {"items": made, "source": ideas["source"]}
     if path == "chat" and P:
@@ -4353,7 +4453,7 @@ function loginView() {
 function guide() {
   const li = (...k) => h('li', null, k);
   return h('ol', {class: 'steps'},
-    li('پیج باید «حرفه‌ای» (Business یا Creator) باشد: در اینستاگرام ← تنظیمات ← نوع حساب ← «تغییر به حساب حرفه‌ای» (رایگان است).'),
+    li('پیج باید «حرفه‌ای» (Business یا Creator) و عمومی (نه خصوصی) باشد: در اینستاگرام ← تنظیمات ← نوع حساب ← «تغییر به حساب حرفه‌ای» (رایگان است).'),
     li('در سایت ', h('a', {href: 'https://developers.facebook.com/apps/', target: '_blank', rel: 'noopener'}, 'developers.facebook.com'), ' وارد شو و «Create App» را بزن. اگر «Use case» پرسید گزینهٔ اینستاگرام (Manage messaging & content on Instagram) را بردار؛ در فرم قدیمی‌تر: Other ← Business.'),
     li('در برنامه‌ای که ساختی محصول «Instagram» را اضافه کن و به بخش «API setup with Instagram login» برو.'),
     li('در قسمت «Generate access tokens» پیج خودت را اضافه کن، همهٔ دسترسی‌ها را تأیید کن و «Generate token» را بزن.'),
@@ -4551,10 +4651,11 @@ function composer(post) {
   const counter = h('div', {class: 'muted sm row'}), strip = h('div', {class: 'strip'}), kinds = h('div', {class: 'kinds'}), hint = h('div', {class: 'muted sm'}), timing = h('div', {class: 'card col'});
   const optBox = h('div', {class: 'col'}), capBox = h('div', {class: 'col'});
   const max = () => (p.kind === 'carousel' ? 20 : 1);
+  const TAG_MAX = 5, tagCount = () => (cap.value.match(/#[^\s#]+/g) || []).length;   /* Instagram takes five hashtags per post */
   const count = () => {
-    const tags = (cap.value.match(/#[^\s#]+/g) || []).length;
-    fill(counter, h('span', {class: 'grow'}, fa(cap.value.length) + ' از ۲٬۲۰۰ نویسه'), h('span', null, fa(tags) + ' هشتگ (حداکثر ۳۰)'));
-    counter.classList.toggle('down', cap.value.length > 2200 || tags > 30);
+    const tags = tagCount();
+    fill(counter, h('span', {class: 'grow'}, fa(cap.value.length) + ' از ۲٬۲۰۰ نویسه'), h('span', null, fa(tags) + ' هشتگ (حداکثر ' + fa(TAG_MAX) + ')'));
+    counter.classList.toggle('down', cap.value.length > 2200 || tags > TAG_MAX);
   };
   cap.addEventListener('input', count);
   const addUrl = () => {
@@ -4567,7 +4668,7 @@ function composer(post) {
     const txt = (key, label, ph, rows) => { const el = h(rows ? 'textarea' : 'input', {class: 'in', placeholder: ph, rows, value: p.opts[key] || ''}); el.addEventListener('input', () => { p.opts[key] = el.value; }); return field(label, el); };
     const sw = (key, label, def) => h('div', {class: 'row'}, h('span', {class: 'grow'}, label), toggle(p.opts[key] == null ? def : p.opts[key], async v => { p.opts[key] = v; }, label));
     fill(optBox, p.kind === 'image' ? txt('alt_text', 'متن جایگزین عکس (برای نابینایان)', 'توضیح کوتاه عکس') : null,
-      p.kind !== 'story' ? txt('first_comment', 'اولین کامنت (مثلاً هشتگ‌ها)', 'بعد از انتشار، خود پیج این را زیر پست می‌نویسد', 2) : null,
+      p.kind !== 'story' ? txt('first_comment', 'اولین کامنت (اختیاری)', 'بعد از انتشار، خود پیج این را زیر پست می‌نویسد', 2) : null,
       p.kind === 'reel' ? sw('share_to_feed', 'نمایش ریل در صفحهٔ اصلی پیج', true) : null,
       p.kind !== 'story' ? sw('comments_off', 'بستن کامنت‌های این پست', false) : h('div', {class: 'muted sm'}, 'استوری گزینهٔ دیگری ندارد.'));
   };
@@ -4599,7 +4700,7 @@ function composer(post) {
       more ? h('button', {class: 'mitem add', 'data-add': 'file', onclick: () => file.click()}, icon('upload'), 'از گالری') : null,
       more ? h('button', {class: 'mitem add', 'data-add': 'url', onclick: addUrl}, icon('link'), 'با لینک') : null);
     fill(hint, {image: 'یک عکس. خودکار به JPEG تبدیل و اگر لازم باشد به نسبت مجاز (۴:۵ تا ۱٫۹۱:۱) بریده می‌شود.', carousel: '۲ تا ۲۰ عکس یا ویدیو؛ مخاطب ورق می‌زند.',
-      reel: 'یک ویدیوی MP4 (عمودی ۹:۱۶ بهتر دیده می‌شود).', story: 'یک عکس یا ویدیو (۹:۱۶). استوری کپشن ندارد و بعد از ۲۴ ساعت پاک می‌شود.'}[p.kind]);
+      reel: 'یک ویدیوی MP4 (عمودی ۹:۱۶ بهتر دیده می‌شود)؛ از ۳ ثانیه تا ۱۵ دقیقه و حداکثر ۳۰۰ مگابایت.', story: 'یک عکس یا ویدیو (۹:۱۶)؛ ویدیو حداکثر ۶۰ ثانیه و ۱۰۰ مگابایت. بدون کپشن فرستاده می‌شود و بعد از ۲۴ ساعت پاک می‌شود.'}[p.kind]);
     capBox.classList.toggle('hide', p.kind === 'story');
     paintOpts(); paintTiming(); paintFoot();
   };
@@ -4628,8 +4729,12 @@ function composer(post) {
       try { r = await POST(path, {topic: topic.value, kind: p.kind}); } catch (e) { fill(list); throw e; }
       const note = r.source === 'offline' ? h('div', {class: 'muted sm'}, 'سرویس هوش مصنوعی در دسترس نبود؛ این‌ها الگوهای آماده‌اند.') : null;
       if (single) fill(list, note, r.items.map(t => h('button', {class: 'card pre', 'data-pick': '1', onclick: () => { cap.value = t; count(); a.close(); }}, t)));
-      else fill(list, note, h('div', {class: 'chips'}, r.items.map(t => h('button', {class: 'chip ltr', onclick: e => { cap.value = (cap.value.trim() + ' ' + t).trim(); count(); e.currentTarget.remove(); }}, t))),
-        h('button', {class: 'btn', onclick: () => { cap.value = (cap.value.trim() + '\n\n' + r.items.slice(0, 12).join(' ')).trim(); count(); a.close(); }}, 'افزودن همه به کپشن'));
+      else {
+        const full = () => { if (tagCount() < TAG_MAX) return false; toast('اینستاگرام در هر پست حداکثر ' + fa(TAG_MAX) + ' هشتگ می‌پذیرد.', 'bad'); return true; };
+        fill(list, note, h('div', {class: 'muted sm'}, 'اینستاگرام در هر پست حداکثر ' + fa(TAG_MAX) + ' هشتگ می‌پذیرد؛ دقیق‌ترین‌ها را بردار.'),
+          h('div', {class: 'chips'}, r.items.map(t => h('button', {class: 'chip', dir: 'auto', onclick: e => { if (full()) return; cap.value = (cap.value.trim() + ' ' + t).trim(); count(); e.currentTarget.remove(); }}, t))),
+          h('button', {class: 'btn', 'data-fill': '1', onclick: () => { if (full()) return; cap.value = (cap.value.trim() + '\n\n' + r.items.slice(0, TAG_MAX - tagCount()).join(' ')).trim(); count(); a.close(); }}, 'افزودن ' + fa(TAG_MAX) + ' تای اول'));
+      }
     })}, icon('spark'), 'بنویس');
     add(a.body, field(label, h('div', {class: 'row'}, topic, go_)), list);
   };
@@ -4878,7 +4983,8 @@ function helpSheet() {
   add(s.body,
     sec('ایجنت چه کارهایی می‌کند؟', 'پست، پست چندتایی، ریل و استوری را همین حالا یا در زمان دلخواه منتشر می‌کند.', 'کامنت‌ها و دایرکت‌ها را در یک صندوق نشان می‌دهد و می‌توانی از همین‌جا جواب بدهی، مخفی یا حذف کنی.',
       'طبق قانون‌هایی که می‌نویسی خودش جواب می‌دهد و کامنت‌های تبلیغاتی را مخفی می‌کند.', 'آمار پیج و بهترین ساعت انتشار را نشان می‌دهد و در نوشتن کپشن و هشتگ کمک می‌کند.'),
-    sec('چه چیزهایی شدنی نیست؟', 'اینستاگرام از راه رسمی اجازهٔ فالو/آنفالو، لایک‌کردن، دیدن فهرست دنبال‌کننده‌ها، ویرایش کپشن یا بیو و گذاشتن استیکر و لینک روی استوری را نمی‌دهد؛ ایجنت هم سراغ راه‌های غیررسمی (که پیج را در خطر بسته‌شدن می‌گذارد) نمی‌رود.',
+    sec('چه چیزهایی شدنی نیست؟', 'اینستاگرام از راه رسمی اجازهٔ فالو/آنفالو، دیدن فهرست دنبال‌کننده‌ها، ویرایش کپشن یا بیو و گذاشتن استیکر و لینک روی استوری را نمی‌دهد؛ ایجنت هم سراغ راه‌های غیررسمی (که پیج را در خطر بسته‌شدن می‌گذارد) نمی‌رود.',
+      'لایک‌کردن و حذف پست هم در این ایجنت نیست (متا برای این دو مجوز جداگانه می‌خواهد)؛ این دو را از خود اپ اینستاگرام انجام بده.',
       'دایرکت با عموم مردم فقط وقتی کار می‌کند که برنامه‌ات در متا «Advanced Access» گرفته باشد؛ تا آن موقع فقط با حساب‌هایی که در برنامه نقش دارند.'),
     sec('ایجنت باید روشن بماند', 'زمان‌بندی و پاسخ خودکار فقط تا وقتی کار می‌کند که برنامه در ترموکس باز باشد. در ترموکس بزن: termux-wake-lock و بهینه‌سازی باتری را برای ترموکس خاموش کن.',
       'اگر ایجنت در زمان یک پست خاموش باشد و بیش از ۶ ساعت بگذرد، آن پست «جامانده» می‌شود و خودکار منتشر نمی‌شود.'),

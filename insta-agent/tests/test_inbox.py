@@ -587,6 +587,91 @@ class DirectTests(Base):
         self.assertEqual(self.rig.ok("GET", "/api/dm")["blocked"], "")
 
 
+class DirectTheLongWayTests(unittest.TestCase):
+    """Meta's guide reads a chat in two steps (ids first, then each message). The agent asks for everything in one
+    call and must fall back to the documented way when Instagram refuses the short form."""
+
+    def setUp(self):
+        self.rig = Rig()
+        self.sim = self.rig.sim
+
+    def tearDown(self):
+        self.rig.close()
+
+    def gets(self, pattern):
+        return [c for c in self.sim.calls if c[0] == "GET" and re.search(pattern, c[1])]
+
+    def troubles(self):
+        return [n["text"] for n in self.rig.ok("GET", "/api/log")["items"] if n["level"] in ("warn", "alert")]
+
+    def test_messages_read_one_by_one(self):
+        self.sim.flat_messages = True
+        self.rig.tick()
+        d = self.rig.ok("GET", "/api/dm")
+        self.assertEqual((d["open"], d["blocked"]), (2, ""))
+        self.assertEqual([c["username"] for c in d["items"]], ["elham.gh", "reza.dev", "bahar.s"])
+        self.assertEqual([c["can_reply"] for c in d["items"]], [True, True, False])
+        chat = self.rig.ok("GET", "/api/dm/" + d["items"][2]["id"])
+        self.assertEqual([(m["mine"], m["text"]) for m in chat["messages"]],
+                         [(False, "سفارش عمده هم قبول می‌کنید؟"), (True, "سلام، بله 🌹 جزئیات را بفرمایید.")])
+        self.assertEqual(self.troubles(), [])                              # no warning: this is a normal way to work
+        singles = len(self.gets(r"^m_"))
+        self.assertGreaterEqual(singles, 4)
+        self.rig.tick(2)
+        self.assertEqual(len(self.gets(r"^m_")), singles)                  # a message is fetched once, never again
+        conv = next(c for c in self.sim.convs.values() if c["username"] == "elham.gh")
+        self.sim.add_dm("یک سؤال دیگر هم داشتم", "elham.gh")
+        self.rig.tick()
+        self.assertEqual(len(self.gets(r"^m_")), singles + 1)              # only the new one
+        chat = self.rig.ok("GET", "/api/dm/" + conv["id"])
+        self.assertEqual([m["text"] for m in chat["messages"]][-1], "یک سؤال دیگر هم داشتم")
+        self.assertEqual(chat["conv"]["last_text"], "یک سؤال دیگر هم داشتم")
+        out = self.rig.ok("POST", "/api/dm/%s/send" % conv["id"], {"text": "بفرمایید 🌹"})
+        self.rig.tick(2)                                                   # the sent message comes back once, not twice
+        again = self.rig.ok("GET", "/api/dm/" + conv["id"])
+        self.assertEqual([m["text"] for m in again["messages"]][-2:], ["یک سؤال دیگر هم داشتم", "بفرمایید 🌹"])
+        self.assertEqual(len(again["messages"]), len(out["messages"]))
+
+    def test_rule_answers_work_the_long_way_too(self):
+        self.sim.flat_messages = True
+        self.rig.tick()
+        self.rig.ok("POST", "/api/rules", HOURS_RULE)
+        self.rig.ok("POST", "/api/settings", {"auto": {"dm_reply": True}})
+        self.sim.add_dm("ساعت کاری شما؟", "newcomer")
+        self.rig.tick(2)
+        conv = next(c for c in self.sim.convs.values() if c["username"] == "newcomer")
+        self.assertEqual([m["text"] for m in conv["messages"]], ["ساعت کاری شما؟", "سلام 🌹 هر روز ۹ تا ۲۳ بازیم."])
+        self.rig.tick(3)
+        self.assertEqual(len(conv["messages"]), 2)                         # answered once
+
+    def test_chat_longer_than_twenty_messages(self):
+        self.sim.flat_messages = True
+        for i in range(25):
+            self.sim.add_dm("پیام %d" % i, "talker", ts=time.time() - 3000 + i * 60)
+        self.rig.tick()
+        conv = next(c for c in self.sim.convs.values() if c["username"] == "talker")
+        chat = self.rig.ok("GET", "/api/dm/" + conv["id"])
+        self.assertEqual([m["text"] for m in chat["messages"]], ["پیام %d" % i for i in range(5, 25)])   # the 20 newest
+        self.assertEqual(self.troubles(), [])
+
+    def test_without_the_participants_field(self):
+        self.sim.unknown_fields = {"participants"}
+        self.rig.tick()
+        d = self.rig.ok("GET", "/api/dm")
+        self.assertEqual([c["username"] for c in d["items"]], ["elham.gh", "reza.dev", "bahar.s"])   # names come from the messages
+        self.assertEqual((d["open"], d["blocked"]), (2, ""))
+        conv = next(c for c in self.sim.convs.values() if c["username"] == "reza.dev")
+        self.rig.ok("POST", "/api/dm/%s/send" % conv["id"], {"text": "سلام 🌹"})
+        self.assertEqual(conv["messages"][-1]["text"], "سلام 🌹")
+        self.rig.tick()
+        self.assertEqual(len(self.gets(r"/conversations$")), len([c for c in self.gets(r"/conversations$") if "participants" not in c[2]["fields"]]) + 1)
+
+    def test_short_way_is_kept_when_it_works(self):
+        self.rig.tick(2)
+        self.assertEqual(self.gets(r"^m_"), [])
+        self.assertFalse(self.rig.agent.ig.good.get("messages_one_by_one"))
+
+
 class DirectAutomationTests(Base):
     def fresh(self, text, user="visitor"):
         self.sim.add_dm(text, user)

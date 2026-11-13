@@ -79,10 +79,16 @@ class ConnectTests(Base):
         self.rig.tick(3)
         self.assertEqual(self.sim.calls, [])
 
-    def test_older_api_version_is_found(self):
-        self.sim.bad_versions = {"v27.0"}
+    def test_api_version_that_meta_lists_is_used(self):
         self.rig.ok("POST", "/api/connect", {"token": ia.SIM_TOKEN})
-        self.assertEqual((self.agent.ig.acct["version"], self.agent.graph.version), ("v26.0", "v26.0"))
+        self.assertEqual((ia.API_VERSIONS[0], self.agent.graph.version), ("v26.0", "v26.0"))
+        self.rig.tick()
+        self.assertEqual(self.sim.versions, {"v26.0"})                    # every call carries it
+
+    def test_another_api_version_is_found(self):
+        self.sim.bad_versions = {"v26.0"}
+        self.rig.ok("POST", "/api/connect", {"token": ia.SIM_TOKEN})
+        self.assertEqual((self.agent.ig.acct["version"], self.agent.graph.version), ("v27.0", "v27.0"))
         self.rig.tick()
         self.assertEqual(self.rig.ok("GET", "/api/status")["counts"]["open_comments"], 5)
         self.assertEqual(self.notes("warn") + self.notes("alert"), [])
@@ -236,6 +242,40 @@ class TokenTests(Base):
         self.assertAlmostEqual(a["token_next"] - time.time(), 86400, delta=60)   # tries again tomorrow
         self.assertEqual(self.notes("alert"), [])
 
+    def test_token_dying_during_a_routine_check_stops_the_agent(self):
+        self.rig.ok("POST", "/api/settings", {"telegram": {"token": "1:a", "chat_id": "9"}})
+        self.sim.fail(r"/comments$", code=190, message="Error validating access token: session has expired", method="GET", times=99)
+        self.rig.tick()
+        st = self.rig.ok("GET", "/api/status")
+        self.assertTrue(st["connected"])                                  # the page is still remembered …
+        self.assertTrue(st["account"]["invalid"])                         # … and shown as needing a new token
+        alerts = self.notes("alert")
+        self.assertEqual(len(alerts), 1, alerts)
+        self.assertIn("اتصال پیج قطع شد", alerts[0])
+        self.assertEqual(len(self.sim.telegram), 1)
+        n = len(self.sim.calls)
+        self.rig.tick(3)
+        self.assertEqual(len(self.sim.calls), n)                          # Instagram is left alone until a new token arrives
+        self.assertEqual((len(self.notes("alert")), len(self.sim.telegram)), (1, 1))   # and the owner is told once
+        self.sim.faults[:] = []
+        self.rig.ok("POST", "/api/connect", {"token": ia.SIM_TOKEN})
+        self.assertEqual(self.rig.ok("GET", "/api/status")["account"]["invalid"], "")
+        self.rig.tick()
+        self.assertGreater(len(self.sim.calls), n)                        # back to work
+
+    def test_token_dying_on_a_tap_in_the_panel(self):
+        self.rig.tick()
+        t = self.rig.ok("GET", "/api/comments?filter=open")["items"][0]
+        self.sim.fail(r"/replies$", code=190, sub=463, method="POST", message="Session has expired")
+        status, body, _ = self.rig.post("/api/comments/%s/reply" % t["id"], {"text": "سلام"})
+        self.assertEqual(status, 502)
+        self.assertTrue(body["error"])
+        self.assertEqual(body["kind"], "auth")
+        self.assertTrue(self.rig.ok("GET", "/api/status")["account"]["invalid"])
+        again = [x for x in self.rig.ok("GET", "/api/comments?filter=open")["items"] if x["id"] == t["id"]]
+        self.assertEqual(len(again), 1)                                   # the comment is still waiting for its answer
+        self.assertEqual([r for r in again[0]["replies"] if r["mine"]], [r for r in t["replies"] if r["mine"]])
+
     def test_warns_when_the_end_is_near(self):
         self.rig.ok("POST", "/api/settings", {"telegram": {"token": "1:a", "chat_id": "9"}})
         self.sim.fail(r"refresh_access_token", code=190, times=5)
@@ -363,7 +403,7 @@ class AssistantOfflineTests(Base):
         c = self.rig.ok("POST", "/api/ai/captions", {"topic": "لاتهٔ پاییزی", "kind": "reel"})
         self.assertEqual((c["source"], len(c["items"])), ("offline", 3))
         self.assertTrue(all("لاتهٔ پاییزی" in x and "#کافه_دمو" in x for x in c["items"]))
-        self.assertTrue(all(len(x) <= 2200 for x in c["items"]))
+        self.assertTrue(all(len(x) <= 2200 and len(re.findall(r"#[^\s#]+", x)) <= 5 for x in c["items"]), c["items"])
         h = self.rig.ok("POST", "/api/ai/hashtags", {"topic": "قهوه دمی صبحگاهی"})
         self.assertEqual(h["items"][:2], ["#کافه_دمو", "#قهوه_تازه"])
         self.assertIn("#قهوه", h["items"])
@@ -379,6 +419,7 @@ class AssistantOfflineTests(Base):
         drafts = self.rig.ok("GET", "/api/posts?group=drafts")["items"]
         self.assertEqual(len(drafts), 3)
         self.assertTrue(all(d["status"] == "draft" and "#" in d["caption"] and not d["media"] for d in drafts))
+        self.assertTrue(all(len(re.findall(r"#[^\s#]+", d["caption"])) <= 5 for d in drafts))
         self.rig.tick(2)
         self.assertEqual(self.rig.feed_count(), 10)                       # a plan publishes nothing
 
@@ -414,10 +455,15 @@ class AssistantOnlineTests(unittest.TestCase):
         self.assertIn("لاته", asked["body"]["messages"][-1]["content"])
         self.assertIsNone(asked["auth"])
 
+    def test_a_caption_never_gets_more_hashtags_than_instagram_takes(self):
+        self.ai.answer = "لاتهٔ پاییزی رسید ☕️\n\n#a #b #c #d #e #f #g\n===\nدومی #یک #دو"
+        out = self.rig.ok("POST", "/api/ai/captions", {"topic": "لاته"})["items"]
+        self.assertEqual(out, ["لاتهٔ پاییزی رسید ☕️\n\n#a #b #c #d #e", "دومی #یک #دو"])
+
     def test_hashtags_and_ideas(self):
         self.ai.answer = "حتماً! #قهوه، #کافه #coffee #قهوه #لاته_آرت"
         self.assertEqual(self.rig.ok("POST", "/api/ai/hashtags", {"topic": "قهوه"}),
-                         {"items": ["#قهوه", "#کافه", "#coffee", "#لاته_آرت"], "source": "ai"})
+                         {"items": ["#قهوه", "#کافه", "#coffee", "#لاته_آرت"], "source": "ai", "max": 5})
         self.ai.answer = "- پشت‌صحنهٔ برشته‌کاری قهوه\n2. معرفی باریستای ماه\n\n• نظرسنجی طعم جدید\nباشه"
         self.assertEqual(self.rig.ok("POST", "/api/ai/ideas", {"count": 5})["items"],
                          ["پشت‌صحنهٔ برشته‌کاری قهوه", "معرفی باریستای ماه", "نظرسنجی طعم جدید"])

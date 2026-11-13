@@ -52,6 +52,20 @@ try {
   // reel
   await page.click('#fab'); await sleep(400);
   await page.click('.sheet .kinds button[data-kind="reel"]');
+  // a video over Instagram's 300 MB limit is refused on the spot, before any upload starts
+  let uploads = 0;
+  const countUploads = r => { if (r.url().includes('/api/upload')) uploads++; };
+  page.on('request', countUploads);
+  await page.evaluate(() => {
+    const input = document.querySelector('.sheet input[type=file]');
+    Object.defineProperty(input, 'files', {configurable: true, value: [{name: 'huge.mp4', type: 'video/mp4', size: 301 * 1024 * 1024}]});
+    input.dispatchEvent(new Event('change'));
+    delete input.files;
+  });
+  const refused = await t.waitText('حجم ویدیو بیش از ۳۰۰ مگابایت است', 4000);
+  await sleep(300);
+  page.off('request', countUploads);
+  t.check('oversized video is refused before upload', refused && uploads === 0 && !(await page.$('.sheet .mitem .tag')), {refused, uploads});
   await (await page.$('.sheet input[type=file]')).uploadFile(ASSETS + '/clip.mp4');
   await page.waitForFunction(() => { const s = [...document.querySelectorAll('.sheet')].pop(); const g = s && s.querySelector('.mitem .tag'); return g && g.textContent === 'ویدیو'; }, {timeout: 15000});
   await t.type('textarea[aria-label="کپشن"]', 'ریل آزمایشی 🎬');
@@ -69,12 +83,28 @@ try {
   await t.shot('14-captions');
   await t.inTop(s => s.querySelector('[data-pick]').click()); await sleep(300);
   t.check('picked caption lands in the composer', (await page.$eval('.sheet textarea[aria-label="کپشن"]', e => e.value)).includes('لاتهٔ پاییزی'));
-  await t.clickText('هشتگ پیشنهادی');
-  await t.type('input[aria-label="موضوع"]', 'قهوه دمی');
-  await t.clickText('بنویس');
-  await page.waitForFunction(() => { const s = [...document.querySelectorAll('.sheet')].pop(); return s && s.querySelectorAll('.chip').length >= 3; }, {timeout: 60000});
-  await t.clickText('افزودن همه به کپشن');
-  t.check('hashtags added to the caption', (await page.$eval('.sheet textarea[aria-label="کپشن"]', e => e.value)).includes('#قهوه'));
+  // Instagram takes five hashtags per post: the suggested caption already has its five, so a sixth is refused
+  const capValue = () => page.$eval('.sheet textarea[aria-label="کپشن"]', e => e.value);
+  const tagsIn = v => (v.match(/#[^\s#]+/g) || []).length;
+  const askTags = async () => {
+    await t.clickText('هشتگ پیشنهادی');
+    await t.type('input[aria-label="موضوع"]', 'قهوه دمی');
+    await t.clickText('بنویس');
+    await page.waitForFunction(() => { const s = [...document.querySelectorAll('.sheet')].pop(); return s && s.querySelectorAll('.chip').length >= 3; }, {timeout: 60000});
+  };
+  const picked = await capValue();
+  await askTags();
+  await t.inTop(s => s.querySelector('.chips .chip').click());
+  const told = await t.waitText('حداکثر ۵ هشتگ می‌پذیرد.', 3000);
+  t.check('a sixth hashtag is refused', tagsIn(picked) === 5 && told && (await capValue()) === picked, {tags: tagsIn(picked), told});
+  await t.shot('14b-hashtag-limit');
+  await t.closeSheet();
+  await page.evaluate(() => { const c = document.querySelector('.sheet textarea[aria-label="کپشن"]'); c.value = 'قهوهٔ امروز #تازه'; c.dispatchEvent(new Event('input', {bubbles: true})); });
+  await askTags();
+  await page.click('.sheet [data-fill]'); await sleep(300);
+  const filled = await capValue();
+  t.check('suggested hashtags fill up to five', tagsIn(filled) === 5 && filled.includes('#قهوه') && filled.startsWith('قهوهٔ امروز #تازه'), filled);
+  t.check('counter shows the limit', (await page.$eval('.sheet .muted.sm.row', e => e.textContent)).includes('۵ هشتگ (حداکثر ۵)'));
   await t.closeSheet();
 
   // page grid and media detail

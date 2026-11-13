@@ -112,6 +112,46 @@ class KindsTests(Base):
         self.assertEqual([(c["text"], c["username"]) for c in mine], [("#قهوه #کافه", "demo.cafe")])
         self.assertFalse(self.sim.media[0]["comment_enabled"])
 
+    def test_published_without_its_caption_is_reported(self):
+        self.rig.ok("POST", "/api/settings", {"telegram": {"token": "111:abc", "chat_id": "42"}})
+        self.sim.config_issue = "CAPTION_NOT_ATTACHED"
+        p = self.rig.new_post(caption="متن پست")
+        done = self.rig.run_post(p["id"])
+        self.assertEqual((done["status"], self.rig.feed_count()), ("published", self.feed0 + 1))
+        self.assertEqual(self.sim.media[0]["caption"], "")
+        notes = [n for n in self.rig.ok("GET", "/api/log")["items"] if n["level"] == "alert"]
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn("کپشن را روی آن نگذاشت", notes[0]["text"])
+        self.assertTrue(any("کپشن را روی آن نگذاشت" in m["text"] for m in self.sim.telegram), self.sim.telegram)
+        self.sim.config_issue = ""
+        q = self.rig.new_post(caption="متن دوم")                          # and nothing is said when all is well
+        self.rig.run_post(q["id"])
+        self.assertEqual(len([n for n in self.rig.ok("GET", "/api/log")["items"] if n["level"] == "alert"]), 1)
+
+    def test_refused_extra_does_not_stop_the_post(self):
+        self.sim.refused_params = {"share_to_feed", "alt_text"}
+        clip = self.rig.upload(mp4())["id"]
+        reel = self.rig.ok("POST", "/api/posts", {"kind": "reel", "media": [{"file": clip}], "caption": "ریل", "action": "now"})
+        self.assertEqual(self.rig.run_post(reel["id"])["status"], "published")
+        img = self.rig.new_post(caption="با متن جایگزین", opts={"alt_text": "یک فنجان قهوه"})
+        self.assertEqual(self.rig.run_post(img["id"])["status"], "published")
+        self.assertEqual(self.rig.feed_count(), self.feed0 + 2)
+        self.assertEqual([m["caption"] for m in self.sim.media[:2]], ["با متن جایگزین", "ریل"])
+        warns = [n["text"] for n in self.rig.ok("GET", "/api/log")["items"] if n["level"] == "warn"]
+        self.assertEqual(len(warns), 2, warns)
+        self.assertTrue(any("نمایش ریل در صفحهٔ اصلی" in w for w in warns) and any("متن جایگزین عکس" in w for w in warns), warns)
+        sent = [c[2] for c in self.calls(r"/media$")]
+        self.assertEqual([("share_to_feed" in x, "alt_text" in x) for x in sent],
+                         [(True, False), (False, False), (False, True), (False, False)])    # each: once with, once without
+
+    def test_refusal_that_is_not_about_an_extra_still_fails(self):
+        self.sim.refused_params = {"image_url"}
+        p = self.rig.new_post(caption="x", opts={"alt_text": "توضیح"})
+        done = self.rig.run_post(p["id"])
+        self.assertEqual((done["status"], self.rig.feed_count()), ("failed", self.feed0))
+        self.assertIn("image_url", done["error"])
+        self.assertEqual([n for n in self.rig.ok("GET", "/api/log")["items"] if n["level"] == "warn"], [])
+
     def test_first_comment_failure_does_not_undo_the_post(self):
         self.sim.fail(r"/comments$", code=100, method="POST")
         p = self.rig.new_post(opts={"first_comment": "سلام"})
@@ -151,7 +191,7 @@ class RulesOfThePlatformTests(Base):
         self.refuse(kind="image", media=[{"file": strip}], action="now")
         self.refuse(kind="image", media=[{"file": wide}], action="now")
         self.refuse(kind="image", media=one, action="now", caption="آ" * 2201)
-        self.refuse(kind="image", media=one, action="now", caption=" ".join("#t%d" % i for i in range(31)))
+        self.assertIn("حداکثر ۵ هشتگ", self.refuse(kind="image", media=one, action="now", caption="سلام " + " ".join("#t%d" % i for i in range(6))))
         self.refuse(kind="image", media=one, action="now", caption=" ".join("@u%d" % i for i in range(21)))
         self.refuse(kind="image", media=[{"url": "http://example.com/a.jpg"}], action="now")
         self.refuse(kind="image", media=[{"url": "https://example.com/عکس.jpg"}], action="now")
@@ -162,6 +202,26 @@ class RulesOfThePlatformTests(Base):
         self.refuse(kind="image", media=one, action="explode")
         self.assertEqual(self.sim.calls, [c for c in self.sim.calls if c[0] == "GET"])   # nothing was sent to Instagram
         self.assertEqual(self.rig.ok("GET", "/api/posts")["items"], [])
+
+    def test_five_hashtags_are_the_most(self):
+        img = self.rig.upload(jpeg())["id"]
+        five = "قهوهٔ تازه ☕️ " + " ".join("#t%d" % i for i in range(5))
+        p = self.rig.ok("POST", "/api/posts", {"kind": "image", "media": [{"file": img}], "action": "now", "caption": five})
+        self.assertEqual(self.rig.run_post(p["id"])["status"], "published")
+        self.assertEqual(self.sim.media[0]["caption"], five)
+        six = five + " #t5"                                               # an idea can be kept as a draft, but not sent
+        d = self.rig.ok("POST", "/api/posts", {"kind": "image", "media": [{"file": img}], "action": "draft", "caption": six})
+        self.assertEqual(self.rig.post("/api/posts/%d/publish" % d["id"])[0], 400)
+        self.assertEqual(self.rig.post("/api/posts/%d" % d["id"], {"kind": "image", "media": [{"file": img}], "caption": six,
+                                                                 "action": "schedule", "scheduled_at": time.time() + 3600})[0], 400)
+        self.assertEqual(self.rig.feed_count(), self.feed0 + 1)
+
+    def test_story_video_has_a_smaller_size_limit(self):
+        clip = self.rig.upload(mp4())["id"]
+        self.rig.agent.db.x("UPDATE files SET size=? WHERE id=?", (101 * 1024 * 1024, clip))
+        self.assertIn("۱۰۰ مگابایت", self.refuse(kind="story", media=[{"file": clip}], action="now"))
+        p = self.rig.ok("POST", "/api/posts", {"kind": "reel", "media": [{"file": clip}], "action": "now"})   # fine as a reel
+        self.assertEqual(self.rig.run_post(p["id"])["status"], "published")
 
     def test_twenty_items_are_the_most(self):
         img = self.rig.upload(jpeg())["id"]
