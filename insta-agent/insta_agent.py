@@ -303,6 +303,7 @@ class DB:
         with self.lock:
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA synchronous=NORMAL")
+            self.conn.execute("PRAGMA secure_delete=ON")       # a removed token is overwritten, not just unlinked
             self.conn.executescript(SCHEMA)
         try:
             os.chmod(path, 0o600)
@@ -335,6 +336,14 @@ class DB:
 
     def drop(self, key):
         self.x("DELETE FROM kv WHERE k=?", (key,))
+
+    def scrub(self):
+        """Fold the write-ahead log into the main file, so a secret that was just removed is gone from disk too."""
+        with self.lock:
+            try:
+                self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+            except sqlite3.Error:
+                pass
 
     def close(self):
         with self.lock:
@@ -440,6 +449,9 @@ class Settings:
         with self._lock:
             self.db.set("settings", cur)
             self._cache = cur
+        if any(isinstance(data.get(sec), dict) and (data[sec].get(key + "_clear") is True or data[sec].get(key))
+               for sec, key in SECRET_FIELDS):
+            self.db.scrub()                            # a replaced or removed key does not linger in the journal
         return self.public()
 
     @staticmethod
@@ -1236,6 +1248,8 @@ class AI:
             raise AIDown(str(e))
         data = jload(body.decode("utf-8", "replace"), None)
         try:
+            if status >= 400:
+                raise KeyError(status)
             text = data["choices"][0]["message"]["content"]
         except (TypeError, KeyError, IndexError):
             raise AIDown("HTTP %s" % status)
@@ -2807,6 +2821,7 @@ class Agent:
             self.db.drop("secret.token")
             self.db.set("account", {"last_username": a.get("username") or "", "last_ig_id": a.get("ig_id") or ""})
             self.note("اتصال پیج برداشته شد.", "info", "connect")
+            self.db.scrub()
 
     def status(self):
         a, s, t = self.ig.acct, self.settings.all(), now()
@@ -4699,6 +4714,7 @@ function spark(v) {
 }
 function bar(frac) { const i = h('i'); i.style.width = Math.max(2, Math.round(frac * 100)) + '%'; return h('div', {class: 'bar'}, i); }
 const AUD = {gender: 'جنسیت', age: 'سن', city: 'شهر', country: 'کشور'}, GENDER = {F: 'زن', M: 'مرد', U: 'نامشخص'};
+const region = (() => { try { const d = new Intl.DisplayNames(['fa'], {type: 'region'}); return c => { try { return d.of(c) || c; } catch (e) { return c; } }; } catch (e) { return c => c; } })();
 VIEWS.stats = async () => {
   const d = await GET('/api/insights?days=' + S.days + (S.refresh ? '&refresh=1' : ''));
   S.refresh = false;
@@ -4711,7 +4727,7 @@ VIEWS.stats = async () => {
     if (r.error) return fill(aud, h('div', {class: 'muted sm'}, r.error));
     fill(aud, Object.keys(AUD).filter(k => (r.groups[k] || []).length).map(k => {
       const rows = r.groups[k].slice(0, 5), total = r.groups[k].reduce((a, x) => a + x.value, 0) || 1;
-      return h('div', {class: 'col'}, h('b', {class: 'sm'}, AUD[k]), rows.map(x => h('div', null, h('div', {class: 'row sm'}, h('span', {class: 'grow'}, k === 'gender' ? (GENDER[x.name] || x.name) : x.name), h('span', {class: 'muted'}, fa(Math.round(x.value * 100 / total)) + '٪')), bar(x.value / total))));
+      return h('div', {class: 'col'}, h('b', {class: 'sm'}, AUD[k]), rows.map(x => h('div', null, h('div', {class: 'row sm'}, h('span', {class: 'grow'}, k === 'gender' ? (GENDER[x.name] || x.name) : k === 'country' ? region(x.name) : x.name), h('span', {class: 'muted'}, fa(Math.round(x.value * 100 / total)) + '٪')), bar(x.value / total))));
     }));
   })}, 'نمایش سن، جنسیت و شهر');
   return [h('div', {class: 'row'}, h('div', {class: 'grow'}, segment([[7, '۷ روز اخیر'], [28, '۲۸ روز اخیر']], S.days, v => { S.days = v; render(true); })),
