@@ -2798,7 +2798,7 @@ class Sim:
         self.seq = 1000
         self.media, self.stories, self.comments, self.convs, self.containers = [], [], {}, {}, {}
         self.calls, self.faults, self.fetched, self.telegram = [], [], [], []
-        self.unknown_fields = set()
+        self.unknown_fields, self.bad_versions = set(), set()
         self.video_seconds = 3
         self.lively = True
         self.quota_used, self.quota_total = 0, 50
@@ -2924,7 +2924,8 @@ class Sim:
     def handle(self, method, host, path, params, body=None, bearer=""):
         parts = [p for p in path.split("/") if p]
         if parts and re.fullmatch(r"v\d+\.\d+", parts[0]):
-            parts.pop(0)
+            if parts.pop(0) in self.bad_versions:
+                return self.err(2635, "You are calling a version of the API that is not available")
         key = "/".join(parts)
         fetched = None
         if method == "POST" and key.endswith("/media") and (params.get("video_url") or params.get("image_url")):
@@ -3939,7 +3940,7 @@ p{margin:0}
 .ltr{direction:ltr;unicode-bidi:isolate}
 input.ltr,textarea.ltr{text-align:left}
 .muted{color:var(--mut)}.sm{font-size:.86rem}.center{text-align:center}
-.row{display:flex;align-items:center;gap:10px}.grow{flex:1;min-width:0}.wrap{flex-wrap:wrap}
+.row{display:flex;align-items:center;gap:10px}.grow{flex:1;min-width:0}.wrap{flex-wrap:wrap}.fix{flex:none;width:136px}
 .col{display:flex;flex-direction:column;gap:10px}
 .up{color:var(--ok)}.down{color:var(--bad)}
 #top{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:10px 14px;display:flex;align-items:center;gap:10px}
@@ -3966,7 +3967,7 @@ h3{font-size:.9rem;margin:6px 4px -4px;color:var(--mut)}
 .btn.block{width:100%}
 button:disabled{opacity:.5}
 .iconbtn{width:40px;height:40px;border-radius:12px;display:inline-flex;align-items:center;justify-content:center;position:relative;flex:none}
-.in{width:100%;padding:9px 12px;border-radius:12px;border:1px solid var(--line);background:var(--soft);outline:0;min-height:44px}
+.in{width:100%;min-width:0;padding:9px 12px;border-radius:12px;border:1px solid var(--line);background:var(--soft);outline:0;min-height:44px}
 .in:focus{border-color:var(--pri)}
 textarea.in{resize:vertical;display:block}
 label.f{font-size:.85rem;color:var(--mut);display:block;margin:6px 2px -4px}
@@ -4012,6 +4013,7 @@ label.f{font-size:.85rem;color:var(--mut);display:block;margin:6px 2px -4px}
 .panel{background:var(--bg);width:100%;max-width:640px;max-height:92vh;max-height:92dvh;border-radius:22px 22px 0 0;display:flex;flex-direction:column}
 .panel .head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 16px;border-bottom:1px solid var(--line)}
 .panel .body{padding:14px;overflow:auto;display:flex;flex-direction:column;gap:12px;flex:1}
+.panel .body>*{flex:none}
 .panel .foot{padding:10px 14px calc(10px + env(safe-area-inset-bottom));border-top:1px solid var(--line);display:flex;gap:8px;align-items:center}
 .panel .foot .btn{flex:1}
 #toasts{position:fixed;top:12px;left:0;right:0;z-index:40;display:flex;flex-direction:column;align-items:center;gap:8px;pointer-events:none}
@@ -4477,7 +4479,7 @@ function composer(post) {
     const sync = () => { const t = (time.value || '12:00').split(':'), x = new Date(t0.getFullYear(), t0.getMonth(), t0.getDate() + Number(dsel.value), Number(t[0]), Number(t[1])); p.at = x.getTime() / 1000; fill(label, when(p.at)); };
     dsel.addEventListener('change', sync); time.addEventListener('change', sync);
     GET('/api/slots').then(r => fill(chips, r.items.map(ts => h('button', {class: 'chip', onclick: () => { p.at = ts; paintTiming(); }}, when(ts))))).catch(() => {});
-    add(timing, h('div', {class: 'row'}, h('div', {class: 'grow'}, dsel), time), label, h('div', {class: 'muted sm'}, 'پیشنهاد ایجنت (ساعت‌هایی که پست‌هایت بهتر دیده شده):'), chips);
+    add(timing, h('div', {class: 'row'}, h('div', {class: 'grow'}, dsel), h('div', {class: 'fix'}, time)), label, h('div', {class: 'muted sm'}, 'پیشنهاد ایجنت (ساعت‌هایی که پست‌هایت بهتر دیده شده):'), chips);
   };
   const paint = () => {
     fill(kinds, Object.keys(KIND).map(k => h('button', {class: p.kind === k ? 'on' : '', 'data-kind': k, onclick: () => { p.kind = k; p.media = p.media.slice(0, max()); paint(); }}, icon(KIND[k][1]), KIND[k][0])));
