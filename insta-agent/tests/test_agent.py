@@ -165,7 +165,7 @@ class PageSwitchTests(Base):
         folder = self.rig.app.cfg.data_dir
         for name in os.listdir(folder):                                   # not in the database, its journal, or any other file
             path = os.path.join(folder, name)
-            if os.path.isfile(path):
+            if os.path.isfile(path) and name != "agent.lock":            # (the lock file is empty, and unreadable on Windows)
                 with open(path, "rb") as f:
                     self.assertNotIn(ia.SIM_TOKEN.encode(), f.read(), name)
         n = len(self.sim.calls)

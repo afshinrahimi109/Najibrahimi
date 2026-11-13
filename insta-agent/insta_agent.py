@@ -4603,6 +4603,7 @@ function composer(post) {
       try {
         let blob = f, cropped = false;
         if (/^image\//.test(f.type) || /\.(jpe?g|png|webp|heic|heif)$/i.test(f.name)) { const r = await prepImage(f, p.kind); blob = r.blob; cropped = r.cropped; }
+        else if (f.size > 300 * 1024 * 1024) throw new Error('حجم ویدیو بیش از ۳۰۰ مگابایت است.');
         const up = await api('POST', '/api/upload?name=' + encodeURIComponent(f.name), blob, true);
         p.media.push({file: up.id, type: up.type, preview: up.preview});
         if (cropped) toast('عکس به نسبت مجاز اینستاگرام برش خورد.');
