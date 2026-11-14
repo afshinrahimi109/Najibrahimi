@@ -1,0 +1,82 @@
+name: insta-agent tests
+
+# Runs the Instagram agent's own checks. They need no secrets and no internet:
+# everything talks to the simulator that is built into insta_agent.py.
+
+on:
+  push:
+    paths:
+      - "insta-agent/**"
+      - ".github/workflows/insta-agent-tests.yml"
+  pull_request:
+    paths:
+      - "insta-agent/**"
+      - ".github/workflows/insta-agent-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: insta-agent-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python ${{ matrix.python }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, python: "3.8" }
+          - { os: ubuntu-latest, python: "3.11" }
+          - { os: ubuntu-latest, python: "3.13" }
+          - { os: windows-latest, python: "3.12" }
+          # 3.14 is what Termux installs on a phone today, 3.15 is what it will move to. On these two every
+          # deprecation warning counts as a failure, so the next Python cannot break the agent by surprise.
+          - { os: ubuntu-latest, python: "3.14", warnings: "error::DeprecationWarning,error::PendingDeprecationWarning,error::SyntaxWarning" }
+          - { os: ubuntu-latest, python: "3.15", warnings: "error::DeprecationWarning,error::PendingDeprecationWarning,error::SyntaxWarning" }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
+      - name: Tests (built-in simulator, no network)
+        working-directory: insta-agent/tests
+        env:
+          PYTHONWARNINGS: ${{ matrix.warnings }}
+        run: python ci_run.py
+
+  panel:
+    name: Panel in a real browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"            # the Python that Termux installs
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Install the browser driver
+        working-directory: insta-agent/tests/ui
+        run: npm install --no-audit --no-fund
+      - name: Find Chrome
+        run: echo "CHROME_PATH=$(which google-chrome || which chromium-browser || which chromium)" >> "$GITHUB_ENV"
+      - name: Everyday flows on the demo page
+        working-directory: insta-agent/tests/ui
+        run: python serve.py flows.mjs demo
+      - name: Login, connect and disconnect
+        working-directory: insta-agent/tests/ui
+        run: python serve.py connect.mjs sim
+      - name: Keep the screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: panel-screenshots
+          path: insta-agent/tests/ui/shots
+          if-no-files-found: ignore
