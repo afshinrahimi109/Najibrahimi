@@ -34,13 +34,20 @@ jobs:
           - { os: ubuntu-latest, python: "3.11" }
           - { os: ubuntu-latest, python: "3.13" }
           - { os: windows-latest, python: "3.12" }
+          # 3.14 is what Termux installs on a phone today, 3.15 is what it will move to. On these two every
+          # deprecation warning counts as a failure, so the next Python cannot break the agent by surprise.
+          - { os: ubuntu-latest, python: "3.14", warnings: "error::DeprecationWarning,error::PendingDeprecationWarning,error::SyntaxWarning" }
+          - { os: ubuntu-latest, python: "3.15", warnings: "error::DeprecationWarning,error::PendingDeprecationWarning,error::SyntaxWarning" }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
+          allow-prereleases: true
       - name: Tests (built-in simulator, no network)
         working-directory: insta-agent/tests
+        env:
+          PYTHONWARNINGS: ${{ matrix.warnings }}
         run: python ci_run.py
 
   panel:
@@ -51,7 +58,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.14"            # the Python that Termux installs
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
