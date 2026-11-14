@@ -52,7 +52,8 @@ KIND_FA = {"image": "پست", "carousel": "پست چندتایی", "reel": "ری
 IMAGE_MAX = 8 * 1024 * 1024
 VIDEO_MAX = 300 * 1024 * 1024
 STORY_VIDEO_MAX = 100 * 1024 * 1024
-MAX_HASHTAGS = 5                # Instagram's own limit per post since December 2025 (it used to be 30)
+MAX_HASHTAGS = 30               # the most a caption may carry according to Meta's API reference
+GOOD_HASHTAGS = 5               # what Instagram itself advises since December 2025: more only gets a warning here
 FRESH_SEC = 3 * 86400          # older comments/messages are imported as "already handled"
 AUTO_MAX_AGE = 86400           # the agent never auto-answers anything older than this
 QUIET = False
@@ -556,6 +557,9 @@ class GraphError(Exception):
             return "مهلت این بارگذاری در اینستاگرام تمام شد."
         if k == "fetch":
             return "اینستاگرام نتوانست فایل را از لینک بردارد. لینک باید عمومی، مستقیم و در دسترس باشد."
+        if "hashtag" in detail.lower() and k in ("media", "param", "other"):
+            return ("اینستاگرام این تعداد هشتگ را نپذیرفت. چندتا را بردار (%s تا یا کمتر مطمئن است) و دوباره بفرست."
+                    % fa(GOOD_HASHTAGS))
         if k == "media":
             return {2207004: "حجم فایل بیشتر از حد مجاز اینستاگرام است.",
                     2207005: "فرمت فایل پذیرفته نیست (عکس باید JPEG و ویدیو MP4 باشد).",
@@ -1348,10 +1352,10 @@ class AI:
                 if norm(t) not in [norm(x) for x in tags]:
                     tags.append(t)
             if len(tags) >= 3:
-                return {"items": tags[:12], "source": "ai", "max": MAX_HASHTAGS}
+                return {"items": tags[:12], "source": "ai"}
         except AIDown:
             pass
-        return {"items": self.offline_hashtags(topic)[:12], "source": "offline", "max": MAX_HASHTAGS}
+        return {"items": self.offline_hashtags(topic)[:12], "source": "offline"}
 
     def ideas(self, count=6):
         about = self.settings.all()["brand"]["about"] or "پیج"
@@ -1547,8 +1551,8 @@ def count_tags(caption):
     return len(re.findall(r"#[^\s#]+", caption)), len(re.findall(r"(?<![\w.])@[\w.]+", caption))
 
 
-def limit_tags(text, most=MAX_HASHTAGS):
-    """Drops every hashtag after the allowed number from a text the assistant wrote."""
+def limit_tags(text, most=GOOD_HASHTAGS):
+    """Drops every hashtag after the advised number from a text the assistant wrote (the owner may add more by hand)."""
     seen = [0]
 
     def keep(m):
@@ -1624,8 +1628,8 @@ class Publisher:
         if len(caption) > 2200:
             raise UserError("کپشن بلندتر از ۲۲۰۰ نویسه است.")
         tags, mentions = count_tags(caption)
-        if tags > MAX_HASHTAGS:
-            raise UserError("کپشن %s هشتگ دارد؛ اینستاگرام در هر پست حداکثر %s هشتگ می‌پذیرد. چندتا را بردار."
+        if tags > MAX_HASHTAGS:                        # (above GOOD_HASHTAGS the panel warns, but the choice is the owner's)
+            raise UserError("کپشن %s هشتگ دارد؛ اینستاگرام حداکثر %s هشتگ می‌پذیرد. چندتا را بردار."
                             % (fa(tags), fa(MAX_HASHTAGS)))
         if mentions > 20:
             raise UserError("کپشن بیش از ۲۰ منشن دارد.")
@@ -2956,6 +2960,7 @@ class Sim:
         self.config_issue, self.versions = "", set()
         self.flat_messages = False                     # True: chats only give message ids; each message is read on its own
         self.refused_params = set()                    # parameter names that POST /media answers with an error
+        self.hashtag_cap = MAX_HASHTAGS                # captions with more hashtags are refused
         self.video_seconds = 3
         self.lively = True
         self.quota_used, self.quota_total = 0, 50
@@ -3227,6 +3232,8 @@ class Sim:
         caption = p.get("caption") or ""
         if len(caption) > 2200:
             return self.err(36004, "The caption was too long", sub=2207010)
+        if count_tags(caption)[0] > self.hashtag_cap:
+            return self.err(100, "The caption contains too many hashtags")
         c = {"id": self.nid("178"), "type": mtype, "caption": caption, "ready_at": now(), "published": False, "error": "",
              "expired": False, "kids": [], "video": False, "blob": None, "item": p.get("is_carousel_item") == "true"}
         if mtype == "CAROUSEL":
@@ -3958,7 +3965,7 @@ def api_call(app, method, path, q, body):
         ideas = agent.ai.ideas(clamp(body.get("count") or 5, 1, 10))
         made = []
         for idea in ideas["items"]:
-            caption = limit_tags("%s\n\n%s" % (idea, " ".join(agent.ai.offline_hashtags(idea)[:MAX_HASHTAGS])))
+            caption = limit_tags("%s\n\n%s" % (idea, " ".join(agent.ai.offline_hashtags(idea)[:GOOD_HASHTAGS])))
             made.append(pub.save({"kind": "image", "caption": caption, "media": [], "action": "draft"}))
         return {"items": made, "source": ideas["source"]}
     if path == "chat" and P:
@@ -4137,7 +4144,7 @@ input.ltr,textarea.ltr{text-align:left}
 .row{display:flex;align-items:center;gap:10px}.grow{flex:1;min-width:0}.wrap{flex-wrap:wrap}.fix{flex:none;width:128px}
 .when .in{padding-inline:8px;font-size:.92rem}
 .col{display:flex;flex-direction:column;gap:10px}
-.up{color:var(--ok)}.down{color:var(--bad)}
+.up{color:var(--ok)}.down{color:var(--bad)}.amber{color:var(--warn)}
 #top{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:10px 14px;display:flex;align-items:center;gap:10px}
 #top>img{width:36px;height:36px;border-radius:11px}
 #top h1{margin:0;font-size:1.05rem;line-height:1.3;direction:ltr;text-align:right}
@@ -4651,11 +4658,14 @@ function composer(post) {
   const counter = h('div', {class: 'muted sm row'}), strip = h('div', {class: 'strip'}), kinds = h('div', {class: 'kinds'}), hint = h('div', {class: 'muted sm'}), timing = h('div', {class: 'card col'});
   const optBox = h('div', {class: 'col'}), capBox = h('div', {class: 'col'});
   const max = () => (p.kind === 'carousel' ? 20 : 1);
-  const TAG_MAX = 5, tagCount = () => (cap.value.match(/#[^\s#]+/g) || []).length;   /* Instagram takes five hashtags per post */
+  /* Hashtags: Instagram advises five at most (more only gets a warning here); the API refuses more than thirty. */
+  const TAG_GOOD = 5, TAG_MAX = 30, tagList = () => cap.value.match(/#[^\s#]+/g) || [];
+  const tagNote = h('div', {class: 'sm amber hide', 'data-tagnote': '1'}, 'بیشتر از ' + fa(TAG_GOOD) + ' هشتگ: منتشر می‌شود، ولی اینستاگرام ممکن است اضافه‌ها را نادیده بگیرد یا کپشن را نگذارد.');
   const count = () => {
-    const tags = tagCount();
-    fill(counter, h('span', {class: 'grow'}, fa(cap.value.length) + ' از ۲٬۲۰۰ نویسه'), h('span', null, fa(tags) + ' هشتگ (حداکثر ' + fa(TAG_MAX) + ')'));
-    counter.classList.toggle('down', cap.value.length > 2200 || tags > TAG_MAX);
+    const tags = tagList().length, many = tags > TAG_GOOD && tags <= TAG_MAX;
+    fill(counter, h('span', {class: 'grow' + (cap.value.length > 2200 ? ' down' : '')}, fa(cap.value.length) + ' از ۲٬۲۰۰ نویسه'),
+      h('span', {class: tags > TAG_MAX ? 'down' : many ? 'amber' : ''}, fa(tags) + ' هشتگ' + (tags > TAG_MAX ? ' (حداکثر ' + fa(TAG_MAX) + ')' : many ? ' (توصیه: تا ' + fa(TAG_GOOD) + ')' : '')));
+    tagNote.classList.toggle('hide', !many);
   };
   cap.addEventListener('input', count);
   const addUrl = () => {
@@ -4730,10 +4740,14 @@ function composer(post) {
       const note = r.source === 'offline' ? h('div', {class: 'muted sm'}, 'سرویس هوش مصنوعی در دسترس نبود؛ این‌ها الگوهای آماده‌اند.') : null;
       if (single) fill(list, note, r.items.map(t => h('button', {class: 'card pre', 'data-pick': '1', onclick: () => { cap.value = t; count(); a.close(); }}, t)));
       else {
-        const full = () => { if (tagCount() < TAG_MAX) return false; toast('اینستاگرام در هر پست حداکثر ' + fa(TAG_MAX) + ' هشتگ می‌پذیرد.', 'bad'); return true; };
-        fill(list, note, h('div', {class: 'muted sm'}, 'اینستاگرام در هر پست حداکثر ' + fa(TAG_MAX) + ' هشتگ می‌پذیرد؛ دقیق‌ترین‌ها را بردار.'),
-          h('div', {class: 'chips'}, r.items.map(t => h('button', {class: 'chip', dir: 'auto', onclick: e => { if (full()) return; cap.value = (cap.value.trim() + ' ' + t).trim(); count(); e.currentTarget.remove(); }}, t))),
-          h('button', {class: 'btn', 'data-fill': '1', onclick: () => { if (full()) return; cap.value = (cap.value.trim() + '\n\n' + r.items.slice(0, TAG_MAX - tagCount()).join(' ')).trim(); count(); a.close(); }}, 'افزودن ' + fa(TAG_MAX) + ' تای اول'));
+        const fillUp = () => {
+          const got = tagList(), pick = r.items.filter(t => !got.includes(t)).slice(0, Math.max(0, TAG_GOOD - got.length));
+          if (!pick.length) return toast('کپشن همین حالا ' + fa(got.length) + ' هشتگ دارد؛ اگر بیشتر می‌خواهی روی تک‌تک‌شان بزن.');
+          cap.value = (cap.value.trim() + '\n\n' + pick.join(' ')).trim(); count(); a.close();
+        };
+        fill(list, note, h('div', {class: 'muted sm'}, 'روی هر هشتگ بزن تا به کپشن اضافه شود. اینستاگرام ۳ تا ' + fa(TAG_GOOD) + ' هشتگ دقیق را توصیه می‌کند.'),
+          h('div', {class: 'chips'}, r.items.map(t => h('button', {class: 'chip', dir: 'auto', onclick: e => { cap.value = (cap.value.trim() + ' ' + t).trim(); count(); e.currentTarget.remove(); }}, t))),
+          h('button', {class: 'btn', 'data-fill': '1', onclick: fillUp}, 'تکمیل تا ' + fa(TAG_GOOD) + ' هشتگ'));
       }
     })}, icon('spark'), 'بنویس');
     add(a.body, field(label, h('div', {class: 'row'}, topic, go_)), list);
@@ -4748,7 +4762,7 @@ function composer(post) {
     await refresh(); S.tab = 'content'; S.sub.content = action === 'draft' ? 'drafts' : 'queue'; render(true);
     if (action === 'now') postSheet(r.id);
   });
-  add(capBox, field('کپشن', cap), counter, h('div', {class: 'row'}, h('button', {class: 'btn sm grow', onclick: () => helper('کپشن پیشنهادی', 'این پست دربارهٔ چیست؟', '/api/ai/captions', true)}, icon('spark'), 'کپشن پیشنهادی'),
+  add(capBox, field('کپشن', cap), counter, tagNote, h('div', {class: 'row'}, h('button', {class: 'btn sm grow', onclick: () => helper('کپشن پیشنهادی', 'این پست دربارهٔ چیست؟', '/api/ai/captions', true)}, icon('spark'), 'کپشن پیشنهادی'),
     h('button', {class: 'btn sm grow', onclick: () => helper('هشتگ پیشنهادی', 'موضوع پست', '/api/ai/hashtags', false)}, icon('hash'), 'هشتگ پیشنهادی')));
   add(s.body, kinds, strip, hint, file, capBox, h('details', {class: 'box'}, h('summary', null, icon('settings'), 'گزینه‌های بیشتر'), optBox), timing);
   count(); paint();

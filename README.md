@@ -73,6 +73,14 @@ cd vpn && python3 tests/test_relay.py
 یک پنل فارسی از روی گوشی یا کامپیوتر مدیریت می‌کند: انتشار و زمان‌بندی پست، چندتایی، ریل و استوری؛ صندوق کامنت و دایرکت؛
 پاسخ خودکار با قانون و ترمز ایمنی؛ آمار پیج؛ و دستیار کپشن و هشتگ. فقط از API رسمی Meta استفاده می‌کند و رمز پیج را نمی‌خواهد.
 
+روی گوشی (Termux) همین یک خط کافی است:
+
+```bash
+termux-wake-lock; pkg install -y python cloudflared && curl -fsSLO https://github.com/afshinrahimi109/Najibrahimi/raw/main/insta-agent/insta_agent.py && python insta_agent.py
+```
+
+یا از داخل مخزن:
+
 ```bash
 cd insta-agent
 python insta_agent.py --demo     # حالت نمایشی با پیج ساختگی، بدون توکن و اینترنت

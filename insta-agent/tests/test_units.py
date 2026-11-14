@@ -64,6 +64,11 @@ class TextTests(unittest.TestCase):
         self.assertEqual(ia.count_tags("سلام #یک #دو@x و @page.name"), (2, 1))
         self.assertEqual(ia.count_tags("a@b.com نیست منشن"), (0, 0))
 
+    def test_hashtag_limits(self):
+        self.assertEqual((ia.GOOD_HASHTAGS, ia.MAX_HASHTAGS), (5, 30))      # advised by Instagram / accepted by the API
+        self.assertEqual(ia.limit_tags("متن #a #b #c #d #e #f #g"), "متن #a #b #c #d #e")
+        self.assertEqual(ia.limit_tags("متن #a #b\n\nخط دوم"), "متن #a #b\n\nخط دوم")
+
     def test_persian_numbers(self):
         self.assertEqual(ia.fa(1840), "۱٬۸۴۰")
         self.assertEqual(ia.fa(7), "۷")
@@ -88,6 +93,15 @@ class ErrorTests(unittest.TestCase):
         self.assertFalse(ia.GraphError("x", 36001, 2207005).transient)
         for e in (ia.GraphError("x", 190, 460), ia.GraphError("x", 36003, 2207009), ia.GraphError("x", kind="network")):
             self.assertTrue(any("\u0600" <= ch <= "\u06ff" for ch in e.fa))   # always explained in Persian
+
+
+    def test_a_refusal_about_hashtags_is_named(self):
+        for err in (ia.GraphError("The caption contains too many hashtags", 100, 0, 400),
+                    ia.GraphError("Too many hashtags in the caption", 36004, 2207010, 400),
+                    ia.GraphError("Caption has too many Hashtags", 2500, 0, 400)):
+            self.assertIn("این تعداد هشتگ را نپذیرفت", err.fa, err.kind)
+        self.assertNotIn("تعداد هشتگ", ia.GraphError("The caption was too long", 36004, 2207010, 400).fa)
+        self.assertNotIn("تعداد هشتگ", ia.GraphError("hashtag", 190).fa)    # other kinds keep their own explanation
 
 
 class FileTests(unittest.TestCase):

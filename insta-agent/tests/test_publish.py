@@ -191,7 +191,7 @@ class RulesOfThePlatformTests(Base):
         self.refuse(kind="image", media=[{"file": strip}], action="now")
         self.refuse(kind="image", media=[{"file": wide}], action="now")
         self.refuse(kind="image", media=one, action="now", caption="آ" * 2201)
-        self.assertIn("حداکثر ۵ هشتگ", self.refuse(kind="image", media=one, action="now", caption="سلام " + " ".join("#t%d" % i for i in range(6))))
+        self.assertIn("حداکثر ۳۰ هشتگ", self.refuse(kind="image", media=one, action="now", caption="سلام " + " ".join("#t%d" % i for i in range(31))))
         self.refuse(kind="image", media=one, action="now", caption=" ".join("@u%d" % i for i in range(21)))
         self.refuse(kind="image", media=[{"url": "http://example.com/a.jpg"}], action="now")
         self.refuse(kind="image", media=[{"url": "https://example.com/عکس.jpg"}], action="now")
@@ -203,18 +203,35 @@ class RulesOfThePlatformTests(Base):
         self.assertEqual(self.sim.calls, [c for c in self.sim.calls if c[0] == "GET"])   # nothing was sent to Instagram
         self.assertEqual(self.rig.ok("GET", "/api/posts")["items"], [])
 
-    def test_five_hashtags_are_the_most(self):
+    def test_more_than_five_hashtags_is_the_owners_choice(self):
         img = self.rig.upload(jpeg())["id"]
-        five = "قهوهٔ تازه ☕️ " + " ".join("#t%d" % i for i in range(5))
-        p = self.rig.ok("POST", "/api/posts", {"kind": "image", "media": [{"file": img}], "action": "now", "caption": five})
-        self.assertEqual(self.rig.run_post(p["id"])["status"], "published")
-        self.assertEqual(self.sim.media[0]["caption"], five)
-        six = five + " #t5"                                               # an idea can be kept as a draft, but not sent
-        d = self.rig.ok("POST", "/api/posts", {"kind": "image", "media": [{"file": img}], "action": "draft", "caption": six})
+        post = lambda caption, action="now": self.rig.ok("POST", "/api/posts", {"kind": "image", "media": [{"file": img}],
+                                                                              "action": action, "caption": caption})
+        twelve = "قهوهٔ تازه ☕️ " + " ".join("#t%d" % i for i in range(12))
+        self.assertEqual(self.rig.run_post(post(twelve)["id"])["status"], "published")
+        self.assertEqual(self.sim.media[0]["caption"], twelve)             # sent as written: nothing trimmed, nothing refused
+        thirty = " ".join("#t%d" % i for i in range(30))
+        self.assertEqual(self.rig.run_post(post(thirty)["id"])["status"], "published")
+        d = post(thirty + " #t30", "draft")                                # 31 can wait as a draft, but cannot be sent
         self.assertEqual(self.rig.post("/api/posts/%d/publish" % d["id"])[0], 400)
-        self.assertEqual(self.rig.post("/api/posts/%d" % d["id"], {"kind": "image", "media": [{"file": img}], "caption": six,
+        self.assertEqual(self.rig.post("/api/posts/%d" % d["id"], {"kind": "image", "media": [{"file": img}], "caption": thirty + " #t30",
                                                                  "action": "schedule", "scheduled_at": time.time() + 3600})[0], 400)
-        self.assertEqual(self.rig.feed_count(), self.feed0 + 1)
+        self.assertEqual(self.rig.feed_count(), self.feed0 + 2)
+        self.assertEqual([n for n in self.rig.ok("GET", "/api/log")["items"] if n["level"] in ("warn", "alert")], [])
+
+    def test_instagram_refusing_the_hashtags_is_explained(self):
+        self.sim.hashtag_cap = 5                                           # Instagram may be stricter than its API reference
+        p = self.rig.new_post(caption="سلام " + " ".join("#t%d" % i for i in range(6)))
+        done = self.rig.run_post(p["id"])
+        self.assertEqual((done["status"], self.rig.feed_count()), ("failed", self.feed0))
+        self.assertIn("این تعداد هشتگ را نپذیرفت", done["error"])
+        self.assertIn("۵ تا یا کمتر", done["error"])
+        self.assertEqual(len(self.calls(r"/media$")), 1)                   # a clear "no" is not sent again and again
+        self.rig.tick(2)
+        self.assertEqual(len(self.calls(r"/media$")), 1)
+        self.rig.ok("POST", "/api/posts/%d" % p["id"], {"kind": "image", "media": p["media"], "caption": "سلام #t0 #t1", "action": "now"})
+        self.assertEqual((self.rig.run_post(p["id"])["status"], self.rig.feed_count()), ("published", self.feed0 + 1))
+        self.assertEqual(self.sim.media[0]["caption"], "سلام #t0 #t1")
 
     def test_story_video_has_a_smaller_size_limit(self):
         clip = self.rig.upload(mp4())["id"]

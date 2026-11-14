@@ -83,9 +83,12 @@ try {
   await t.shot('14-captions');
   await t.inTop(s => s.querySelector('[data-pick]').click()); await sleep(300);
   t.check('picked caption lands in the composer', (await page.$eval('.sheet textarea[aria-label="کپشن"]', e => e.value)).includes('لاتهٔ پاییزی'));
-  // Instagram takes five hashtags per post: the suggested caption already has its five, so a sixth is refused
+  // Hashtags: Instagram advises five. The suggested caption already has its five; a sixth is added with a warning,
+  // nothing is refused.
   const capValue = () => page.$eval('.sheet textarea[aria-label="کپشن"]', e => e.value);
   const tagsIn = v => (v.match(/#[^\s#]+/g) || []).length;
+  const counterText = () => page.$eval('.sheet .muted.sm.row', e => e.textContent);
+  const noteShown = () => page.$eval('.sheet [data-tagnote]', e => e.offsetParent !== null);
   const askTags = async () => {
     await t.clickText('هشتگ پیشنهادی');
     await t.type('input[aria-label="موضوع"]', 'قهوه دمی');
@@ -93,18 +96,23 @@ try {
     await page.waitForFunction(() => { const s = [...document.querySelectorAll('.sheet')].pop(); return s && s.querySelectorAll('.chip').length >= 3; }, {timeout: 60000});
   };
   const picked = await capValue();
+  t.check('five hashtags bring no warning', tagsIn(picked) === 5 && !(await noteShown()) && !(await counterText()).includes('توصیه'), {tags: tagsIn(picked)});
   await askTags();
-  await t.inTop(s => s.querySelector('.chips .chip').click());
-  const told = await t.waitText('حداکثر ۵ هشتگ می‌پذیرد.', 3000);
-  t.check('a sixth hashtag is refused', tagsIn(picked) === 5 && told && (await capValue()) === picked, {tags: tagsIn(picked), told});
-  await t.shot('14b-hashtag-limit');
+  await t.inTop(s => s.querySelector('.chips .chip').click()); await sleep(300);
+  await page.click('.sheet [data-fill]'); await sleep(300);              // already at five: says so, adds nothing
+  const said = await t.waitText('اگر بیشتر می‌خواهی روی تک‌تک‌شان بزن', 3000);
   await t.closeSheet();
+  const six = await capValue();
+  t.check('a sixth hashtag is added with a warning, not refused', tagsIn(six) === 6 && six.startsWith(picked) && said && (await noteShown()) && (await counterText()).includes('۶ هشتگ (توصیه: تا ۵)') && !(await page.$('#toasts .toast.bad')),
+    {tags: tagsIn(six), said, counter: await counterText()});
+  await t.shot('14b-hashtag-warning');
   await page.evaluate(() => { const c = document.querySelector('.sheet textarea[aria-label="کپشن"]'); c.value = 'قهوهٔ امروز #تازه'; c.dispatchEvent(new Event('input', {bubbles: true})); });
   await askTags();
   await page.click('.sheet [data-fill]'); await sleep(300);
   const filled = await capValue();
-  t.check('suggested hashtags fill up to five', tagsIn(filled) === 5 && filled.includes('#قهوه') && filled.startsWith('قهوهٔ امروز #تازه'), filled);
-  t.check('counter shows the limit', (await page.$eval('.sheet .muted.sm.row', e => e.textContent)).includes('۵ هشتگ (حداکثر ۵)'));
+  t.check('one tap fills up to five hashtags', tagsIn(filled) === 5 && filled.includes('#قهوه') && filled.startsWith('قهوهٔ امروز #تازه') && !(await noteShown()), filled);
+  await page.evaluate(() => { const c = document.querySelector('.sheet textarea[aria-label="کپشن"]'); c.value = Array.from({length: 31}, (_, i) => '#t' + i).join(' '); c.dispatchEvent(new Event('input', {bubbles: true})); });
+  t.check('counter turns red only above thirty', (await counterText()).includes('۳۱ هشتگ (حداکثر ۳۰)') && !(await noteShown()) && await page.$eval('.sheet .muted.sm.row span:last-child', e => e.classList.contains('down')));
   await t.closeSheet();
 
   // page grid and media detail

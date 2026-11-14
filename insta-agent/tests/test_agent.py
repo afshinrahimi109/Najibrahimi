@@ -455,7 +455,7 @@ class AssistantOnlineTests(unittest.TestCase):
         self.assertIn("لاته", asked["body"]["messages"][-1]["content"])
         self.assertIsNone(asked["auth"])
 
-    def test_a_caption_never_gets_more_hashtags_than_instagram_takes(self):
+    def test_the_assistant_never_writes_more_hashtags_than_instagram_advises(self):
         self.ai.answer = "لاتهٔ پاییزی رسید ☕️\n\n#a #b #c #d #e #f #g\n===\nدومی #یک #دو"
         out = self.rig.ok("POST", "/api/ai/captions", {"topic": "لاته"})["items"]
         self.assertEqual(out, ["لاتهٔ پاییزی رسید ☕️\n\n#a #b #c #d #e", "دومی #یک #دو"])
@@ -463,7 +463,7 @@ class AssistantOnlineTests(unittest.TestCase):
     def test_hashtags_and_ideas(self):
         self.ai.answer = "حتماً! #قهوه، #کافه #coffee #قهوه #لاته_آرت"
         self.assertEqual(self.rig.ok("POST", "/api/ai/hashtags", {"topic": "قهوه"}),
-                         {"items": ["#قهوه", "#کافه", "#coffee", "#لاته_آرت"], "source": "ai", "max": 5})
+                         {"items": ["#قهوه", "#کافه", "#coffee", "#لاته_آرت"], "source": "ai"})
         self.ai.answer = "- پشت‌صحنهٔ برشته‌کاری قهوه\n2. معرفی باریستای ماه\n\n• نظرسنجی طعم جدید\nباشه"
         self.assertEqual(self.rig.ok("POST", "/api/ai/ideas", {"count": 5})["items"],
                          ["پشت‌صحنهٔ برشته‌کاری قهوه", "معرفی باریستای ماه", "نظرسنجی طعم جدید"])
