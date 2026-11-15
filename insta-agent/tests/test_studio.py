@@ -385,12 +385,12 @@ class StudioTests(Base):
         self.assertIn("سرویس تصویر خودت", job["notes"][0])
 
     def test_descriptions_are_cleaned_and_a_missing_one_costs_only_its_own_picture(self):
-        plan = dict(PLAN, scenes=[{"text": "یک", "image": 'A sign that reads "20% OFF" beside a latte, cozy café'},
+        plan = dict(PLAN, scenes=[{"text": "یک", "image": 'A card that reads "20% OFF" beside a latte, cozy café'},
                                   {"text": "دو", "image": "تصویر یک فنجان قهوه"}, {"text": "سه"}],
                     image="نمی‌دانم")
         self.text_ai(plan)
         job = self.make(idea="لاتهٔ پاییزی", kind="reel", scenes=3)
-        self.assertEqual(job["pictures"][0]["prompt"], "A sign beside a latte, cozy cafe")          # no writing asked for
+        self.assertEqual(job["pictures"][0]["prompt"], "A card beside a latte, cozy cafe")          # no writing asked for
         self.assertTrue(job["pictures"][0]["file"])
         for pic in job["pictures"][1:]:                                    # Persian or absent: not sent to an English-only service
             self.assertEqual((pic["file"], pic["prompt"]), ("", ""))

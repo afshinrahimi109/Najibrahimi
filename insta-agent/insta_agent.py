@@ -1552,6 +1552,10 @@ def no_writing(prompt):
     text = re.sub(r"\b%s[^,.;]*" % verbs, " ", text, flags=re.I)                              # ... saying Welcome
     text = re.sub(r"\bwith (?:the )?(?:words?|text|letters|caption|inscription|slogan)\b[^,.;]*", " ", text, flags=re.I)
     text = re.sub(r"\bin (?:(?:bold|big|large|capital|neon) )*letters\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(?:an? |the )?(?:[\w-]+ ){0,2}(?:signboard|signage|sign|banner|poster|placard|chalkboard|blackboard|price tag|label)s?\b"
+                  r"[^,.;]*", " ", text, flags=re.I)                                           # a sign is writing too
+    text = re.sub(r"\b(?:an? )?\d+\s*%[^,.;]*", " ", text)                                    # "20% off" cannot be drawn
+    text = re.sub(r"\b(?:with|and|showing|displaying|offering|featuring|holding|beside|next to)\s*(?=[,.;]|$)", " ", text, flags=re.I)
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")       # café → cafe; English only
     text = re.sub(r"\s+([,.;])", r"\1", re.sub(r"\s+", " ", text))
     return re.sub(r"(?:[,.;]\s*){2,}", ", ", text).strip(" ,.;")

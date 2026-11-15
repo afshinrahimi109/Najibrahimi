@@ -121,12 +121,15 @@ class StudioHelperTests(unittest.TestCase):
 
     def test_picture_descriptions_ask_for_no_writing(self):
         cases = {
-            'A hand holding a sign that reads "20% OFF" beside a latte, cozy café interior.': "A hand holding a sign beside a latte, cozy cafe interior",
-            'An inviting café sign with the word "کافه" illuminated, warm lighting': "An inviting cafe sign, warm lighting",
+            'A hand holding a card that reads "20% OFF" beside a latte, cozy café interior.': "A hand holding a card beside a latte, cozy cafe interior",
+            "A medium shot of a latte with a small sign showing 20% off, autumn decor, soft lighting": "A medium shot of a latte, autumn decor, soft lighting",
+            "An inviting cafe doorway with a sign, warm glow, autumn leaves outside": "An inviting cafe doorway, warm glow, autumn leaves outside",
+            'An inviting café entrance with the word "کافه" above it, warm lighting': "An inviting cafe entrance, warm lighting",
             "a display board with the text '20% off this week', customers in the background": "a display board, customers in the background",
-            "A banner saying Welcome; warm light. A cup labeled SALE, on a table": "A banner; warm light. A cup, on a table",
-            "fresh carrot cake on a wooden table, top-down shot": "fresh carrot cake on a wooden table, top-down shot",
-            "a chalkboard sign showing a discount in bold letters, autumn leaves": "a chalkboard sign showing a discount, autumn leaves",
+            "A latte with 20% off this week, warm light": "A latte, warm light",
+            "A cup labeled SALE, on a table; a ribbon saying Welcome": "A cup, on a table; a ribbon",
+            "a menu written in bold letters, autumn leaves": "a menu, autumn leaves",
+            "fresh carrot cake on a wooden table, top-down shot, no text or people in frame": "fresh carrot cake on a wooden table, top-down shot, no text or people in frame",
         }
         for asked, want in cases.items():
             self.assertEqual(ia.no_writing(asked), want)
