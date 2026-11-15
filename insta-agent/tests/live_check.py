@@ -81,5 +81,35 @@ def check_picture():
     run(a, {"idea": "ساعت کاری تازهٔ کافه: هر روز ۸ صبح تا ۱۱ شب", "kind": "image", "style": "art"}, "second picture")
 
 
+def check_voice():
+    """Is there any speech the free services give without a key? (With a key it is documented; without one it is not.)"""
+    import urllib.parse
+    a = agent()
+    say = urllib.parse.quote("سلام! لاتهٔ پاییزی ما تا آخر هفته بیست درصد تخفیف دارد.", safe="")
+
+    def go(title, method, url, body=None, headers=None):
+        t0 = time.time()
+        h = dict(headers or {})
+        if body is not None:
+            h["Content-Type"] = "application/json"
+        try:
+            status, hdrs, raw = a.graph.http(method, url, json.dumps(body).encode("utf-8") if body is not None else None, h, 90)
+        except ia.GraphError as e:
+            status, hdrs, raw = 0, {}, str(e).encode("utf-8")
+        kind = "mp3" if raw[:3] == b"ID3" or raw[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2") else "wav" if raw[:4] == b"RIFF" else "ogg" if raw[:4] == b"OggS" else "other"
+        note("notice" if status == 200 and kind != "other" else "warning", title, "status=%s type=%s kind=%s bytes=%d seconds=%.1f body=%s" % (
+            status, hdrs.get("content-type"), kind, len(raw), time.time() - t0, "" if kind != "other" else raw[:400].decode("utf-8", "replace")))
+        time.sleep(47)
+
+    go("classic GET model=openai-audio", "GET", "https://text.pollinations.ai/%s?model=openai-audio&voice=nova" % say)
+    go("classic POST /openai model=openai-audio", "POST", "https://text.pollinations.ai/openai",
+       {"model": "openai-audio", "modalities": ["text", "audio"], "audio": {"voice": "nova", "format": "mp3"},
+        "messages": [{"role": "user", "content": "این جمله را عیناً بخوان: سلام! لاتهٔ پاییزی ما بیست درصد تخفیف دارد."}]})
+    go("new GET /audio without a key", "GET", "https://gen.pollinations.ai/audio/%s?voice=nova&model=openai/tts-1" % say)
+    go("new POST /v1/audio/speech without a key", "POST", "https://gen.pollinations.ai/v1/audio/speech", {"model": "openai/tts-1", "input": "سلام", "voice": "nova"})
+    go("classic models list", "GET", "https://text.pollinations.ai/models")
+    go("classic image models list", "GET", "https://image.pollinations.ai/models")
+
+
 if __name__ == "__main__":
-    {"reel": check_reel, "picture": check_picture}[sys.argv[1] if len(sys.argv) > 1 else "reel"]()
+    {"reel": check_reel, "picture": check_picture, "voice": check_voice}[sys.argv[1] if len(sys.argv) > 1 else "reel"]()
