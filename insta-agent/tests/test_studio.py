@@ -413,6 +413,22 @@ class StudioTests(Base):
         self.assertIn("تصویرسازها فقط انگلیسی می‌فهمند", job["pictures"][0]["why"])
         self.assertEqual(len(self.calls("pimg")), 1)
 
+    def test_a_blocked_service_is_noticed_in_seconds_not_minutes(self):
+        self.text_ai(PLAN)
+        dead = "http://127.0.0.1:9"                                        # nothing listens there
+        self.rig.app.cfg.image_api, self.rig.app.cfg.horde_api = dead + "/pimg", dead + "/horde"
+        self.rig.agent.ai.FREE_URL = dead + "/openai"
+        started = time.time()
+        job = self.make(idea="لاتهٔ پاییزی", kind="reel", scenes=4)
+        self.assertLess(time.time() - started, 10)
+        self.assertEqual((job["status"], job["plan"]["source"], job["plan"]["why"]), ("done", "offline", "down"))
+        self.assertTrue(all(not p["file"] for p in job["pictures"]))
+        graph = self.rig.agent.graph
+        self.assertEqual(graph.reachable(dead + "/anything"), False)       # remembered: not asked again for a while
+        self.assertEqual(graph.reachable(self.rig.base + "/_sim/ai/pimg"), True)
+        job = self.wait(self.rig.ok("POST", "/api/studio/picture", {"prompt": "a red bicycle"}))
+        self.assertIn("ارتباط با سرویس تصویر برقرار نشد", job["pictures"][0]["why"])
+
     def test_one_more_picture(self):
         job = self.wait(self.rig.ok("POST", "/api/studio/picture", {"prompt": "a red bicycle in the rain", "shape": "square", "style": "3d"}))
         self.assertEqual((job["kind"], job["status"], job["plan"], len(job["pictures"])), ("picture", "done", None, 1))

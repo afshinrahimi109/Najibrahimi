@@ -602,6 +602,7 @@ class Graph:
         self.usage, self.usage_at = 0, 0.0
         self._opener, self._opener_key = None, None
         self._lock = threading.Lock()
+        self._reach = {}
 
     def opener(self):
         proxy = (self.settings.get("network.proxy") or self.cfg.proxy or "").strip()
@@ -631,6 +632,22 @@ class Graph:
             return e.code, {k.lower(): v for k, v in (e.headers.items() if e.headers else [])}, body
         except (urllib.error.URLError, socket.timeout, ssl.SSLError, http.client.HTTPException, OSError) as e:
             raise GraphError("network: %s" % e, kind="network")
+
+    def reachable(self, url, timeout=12):
+        """Does the service at this address answer at all? Where an address is blocked, a request often just hangs;
+        this finds out in seconds, before a long request is sent. The answer is remembered for a while."""
+        parts = urllib.parse.urlsplit(url)
+        root = "%s://%s/" % (parts.scheme, parts.netloc)
+        known = self._reach.get(root)
+        if known and now() < known[1]:
+            return known[0]
+        try:
+            self.http("HEAD", root, timeout=timeout)   # any answer will do, even "not found"
+            ok = True
+        except GraphError:
+            ok = False
+        self._reach[root] = (ok, now() + (600 if ok else 45))
+        return ok
 
     def track_usage(self, headers):
         top = 0
@@ -1608,6 +1625,9 @@ class Studio:
         """Asks the assistant and, inside a job, waits for the free service's turn. Returns (answer, why there is none)."""
         ai, text, why = self.agent.ai, "", ""
         busy = job["step"] if job else ""
+        ep = ai.endpoint()
+        if ep and not self.graph.reachable(ep[0]):
+            return "", "down"                          # known in seconds; the question itself may take a minute
         for attempt in (0, 1, 2):
             try:
                 # The free model needs 10 to 40 seconds for a whole post; the job runs in the background anyway.
@@ -1687,6 +1707,8 @@ class Studio:
     # ── pictures ──
     def fetch(self, method, url, data=None, headers=None, timeout=120):
         try:
+            if not self.graph.reachable(url):
+                raise GraphError("unreachable", kind="network")
             return self.graph.http(method, url, data, headers, timeout)
         except GraphError:
             raise PictureError("ارتباط با سرویس تصویر برقرار نشد (اینترنت یا فیلترشکن را بررسی کن).")
