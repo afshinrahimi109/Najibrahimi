@@ -199,6 +199,58 @@ class FileTests(unittest.TestCase):
                 self.assertEqual(ia.image_size(path), want, name)
 
 
+class SpeechTests(unittest.TestCase):
+    """What the narrator is given to read, and the stand-in voice of the simulator."""
+
+    def test_numbers_in_persian_words(self):
+        for n, words in ((0, "صفر"), (7, "هفت"), (13, "سیزده"), (20, "بیست"), (21, "بیست و یک"), (99, "نود و نه"), (100, "صد"),
+                         (101, "صد و یک"), (110, "صد و ده"), (999, "نهصد و نود و نه"), (1000, "هزار"), (1001, "هزار و یک"),
+                         (2000, "دو هزار"), (12345, "دوازده هزار و سیصد و چهل و پنج"), (100000, "صد هزار"), (1000000, "یک میلیون"),
+                         (2500000, "دو میلیون و پانصد هزار")):
+            self.assertEqual(ia.number_words(n), words, n)
+        self.assertTrue(ia.number_words(999999999).startswith("نهصد و نود و نه میلیون و نهصد"))
+
+    def test_a_line_as_it_is_read_aloud(self):
+        for text, said in (
+                ("۲۰٪ تخفیف لاتهٔ پاییزی ☕️ تا آخر هفته!", "بیست درصد تخفیف لاتهٔ پاییزی تا آخر هفته!"),
+                ("ساعت ۸:۳۰ تا ۲۲", "ساعت هشت و سی تا بیست و دو"),
+                ("قیمت ۱٬۲۵۰٬۰۰۰ تومان", "قیمت یک میلیون و دویست و پنجاه هزار تومان"),
+                ("150000 تومان", "صد و پنجاه هزار تومان"),
+                ("تماس: 09121234567", "تماس: صفر نه یک دو یک دو سه چهار پنج شش هفت"),
+                ("۰۲۱-۱۲۳۴۵۶۷۸", "صفر دو یک یک دو سه چهار پنج شش هفت هشت"),
+                ("۴٫۵ ستاره #کافه_ما @my.page https://x.y/z", "چهار ممیز پنج ستاره کافه ما my.page"),
+                ("تا 1403/08/25 فرصت دارید", "تا هزار و چهارصد و سه هشت بیست و پنج فرصت دارید"),
+                ("❤️\u200d🔥 عالیه 👍🏽", "عالیه"),
+                ("  چند   فاصله\nو خط تازه  ", "چند فاصله و خط تازه"),
+                (None, ""), ("☕️", "")):
+            self.assertEqual(ia.spoken(text), said, text)
+        self.assertEqual(ia.spoken("می\u200cخواهم"), "می\u200cخواهم")                 # the half-space Persian words need stays
+        self.assertEqual(len(ia.spoken("سلام " * 500)), ia.SAY_MAX)
+
+    def test_sound_files_are_known_by_their_first_bytes(self):
+        for head, kind in ((b"ID3\x04\x00\x00", "mp3"), (b"\xff\xfb\x90\x64", "mp3"), (b"\xff\xf3\x44\xc4", "mp3"), (b"\xff\xf1\x4c\x80", "aac"),
+                           (b"RIFF\x24\x00\x00\x00WAVEfmt ", "wav"), (b"OggS\x00\x02", "ogg"), (b"fLaC\x00\x00", "flac"),
+                           (b"\x00\x00\x00\x1cftypM4A ", "m4a")):
+            self.assertEqual(ia.sniff_audio(head)[0], kind, head)
+        for head in (b"", b"\xff", b"<html>", b"{\"error\": 1}", b"\x89PNG\r\n\x1a\n", b"RIFF\x24\x00\x00\x00WEBPVP8 "):
+            self.assertIsNone(ia.sniff_audio(head), head)
+
+    def test_the_stand_in_voice_is_a_wav_as_long_as_the_line(self):
+        short, long = ia.fake_speech("سلام"), ia.fake_speech("سلام " * 12)
+        for wav, text in ((short, "سلام"), (long, "سلام " * 12)):
+            self.assertEqual(ia.sniff_audio(wav[:64]), ("wav", "audio/wav"))
+            fmt, channels, rate, _, _, bits = struct.unpack("<HHIIHH", wav[20:36])
+            self.assertEqual((fmt, channels, rate, bits), (1, 1, 16000, 16))
+            size = struct.unpack("<I", wav[40:44])[0]
+            self.assertEqual(size, len(wav) - 44)
+            self.assertAlmostEqual(size / 2 / 16000.0, 0.35 + 0.07 * len(text), delta=0.011)
+            self.assertGreater(max(abs(x[0]) for x in struct.iter_unpack("<h", wav[44:])), 5000)       # it can be heard
+        self.assertEqual(ia.fake_speech("سلام"), short)                    # the same line sounds the same
+        self.assertNotEqual(ia.fake_speech("درود"), short)
+        self.assertAlmostEqual((len(ia.fake_speech("")) - 44) / 32000.0, 0.6, delta=0.001)
+        self.assertAlmostEqual((len(ia.fake_speech("ب" * 2000)) - 44) / 32000.0, 20.0, delta=0.001)
+
+
 class ConfigTests(unittest.TestCase):
     def test_port_zero_and_defaults(self):
         cfg = ia.Config(["--port", "0"], {"HOME": "/tmp/x"})

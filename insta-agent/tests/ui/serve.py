@@ -65,7 +65,7 @@ def main():
     sim.add_dm(evil, "evil.user")
     sim.media[0]["caption"] += '\n<b onmouseover="window.__xss=4">bold?</b>'
     scratch = os.environ.get("IA_UI_SCRATCH", "/tmp/ia-ui")
-    child = dict(os.environ, BASE="http://127.0.0.1:%d" % app.port, KEY=app.web.key, TOKEN=ia.SIM_TOKEN, ASSETS=tmp,
+    child = dict(os.environ, BASE="http://127.0.0.1:%d" % app.port, KEY=app.web.key, TOKEN=ia.SIM_TOKEN, AI_KEY=sim.ai_key, ASSETS=tmp,
                  SHOTS=os.environ.get("SHOTS", os.path.join(HERE, "shots")),
                  LD_LIBRARY_PATH=os.pathsep.join([os.path.join(scratch, "al2023", "lib"), os.path.join(scratch, "swiftshader"),
                                                   os.environ.get("LD_LIBRARY_PATH", "")]))

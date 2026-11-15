@@ -477,5 +477,175 @@ class StudioTests(Base):
         self.assertEqual(len(self.calls("ptxt")), 3)                       # captions, refused plan, plan
 
 
+SAYS = ["لاتهٔ پاییزی ما این هفته بیست درصد تخفیف دارد.", "هر روز صبح با قهوهٔ تازه منتظر شما هستیم.", "فقط تا آخر همین هفته فرصت دارید."]
+TOLD = dict(PLAN, scenes=[dict(sc, say=say) for sc, say in zip(PLAN["scenes"], SAYS)])
+
+
+class VoiceTests(Base):
+    """The narrator of a reel: a speech service reads one line per scene; the panel lays the clips on the video."""
+
+    def key(self, plan=TOLD, **more):
+        self.sim.ai_text = json.dumps(plan, ensure_ascii=False)
+        self.rig.ok("POST", "/api/settings", {"studio": dict({"pollen": self.sim.ai_key}, **more)})
+
+    def said(self, service="pgen", tail="v1/audio/speech"):
+        return [c[4] for c in self.calls(service, tail)]
+
+    def test_without_a_key_there_is_no_narrator_and_the_reason_is_told(self):
+        self.text_ai(TOLD)
+        self.assertIs(self.rig.ok("GET", "/api/status")["studio"]["voice"], False)
+        job = self.make(idea="لاتهٔ پاییزی", kind="reel", scenes=3, voice=True, pictures=False)
+        self.assertEqual([v["text"] for v in job["voices"]], SAYS)        # the lines are there: the owner may read them aloud
+        self.assertEqual([(v["file"], v["why"]) for v in job["voices"]], [("", ia.NO_VOICE)] * 3)
+        self.assertEqual([sc["say"] for sc in job["plan"]["scenes"]], SAYS)
+        job = self.wait(self.rig.ok("POST", "/api/studio/voice", {"texts": ["سلام دنیا", "خداحافظ"]}))
+        self.assertEqual((job["status"], [v["why"] for v in job["voices"]], job["notes"]), ("done", [ia.NO_VOICE] * 2, [ia.NO_VOICE]))
+        self.assertEqual(self.said() + self.said("oimg", "audio/speech"), [])           # nobody was asked
+
+    def test_narration_is_only_made_when_asked_for(self):
+        self.key()
+        self.assertEqual(self.make(idea="لاتهٔ پاییزی", kind="reel", scenes=3, pictures=False)["voices"], [])
+        self.assertEqual(self.make(idea="لاتهٔ پاییزی", kind="image", voice=True, pictures=False)["voices"], [])      # a picture has no sound
+        self.assertEqual(self.said(), [])
+
+    def test_with_a_key_every_scene_is_read_before_the_pictures_come(self):
+        self.key()
+        st = self.rig.ok("GET", "/api/status")["studio"]
+        self.assertEqual((st["voice"], st["speaker"]), (True, "nova"))
+        job = self.make(idea="لاتهٔ پاییزی", kind="reel", scenes=3, voice=True)
+        self.assertEqual([(v["text"], v["source"], v["why"]) for v in job["voices"]], [(t, "key", "") for t in SAYS])
+        self.assertEqual([c["input"] for c in self.said()], SAYS)
+        self.assertEqual({(c["model"], c["voice"], c["response_format"]) for c in self.said()}, {("openai/tts-1", "nova", "mp3")})
+        self.assertEqual(self.calls("pgen", "v1/audio/speech")[0][5]["authorization"], "Bearer " + self.sim.ai_key)
+        order = [c[2].split("/")[1 if c[2].startswith("v1/") else 0] for c in self.calls("pgen")]
+        self.assertEqual(order, ["chat"] + ["audio"] * 3 + ["image"] * 3)
+        self.assertEqual([p["source"] for p in job["pictures"]], ["key"] * 3)
+        self.assertEqual(job["notes"], [])
+        status, clip, headers = self.rig.req("GET", job["voices"][1]["preview"])        # what the panel decodes and mixes
+        self.assertEqual((status, headers["Content-Type"]), (200, "audio/wav"))
+        self.assertEqual(clip, ia.fake_speech(SAYS[1]))
+
+    def test_the_line_is_cleaned_before_it_is_read(self):
+        plan = dict(TOLD, scenes=[dict(TOLD["scenes"][0], say="۲۰٪ تخفیف ☕️ تا ساعت ۸:۳۰ #کافه_ما"), dict(PLAN["scenes"][1], say="   "),
+                                  dict(PLAN["scenes"][2])])
+        self.key(plan)
+        job = self.make(idea="لاتهٔ پاییزی", kind="reel", scenes=3, voice=True, pictures=False)
+        self.assertEqual([c["input"] for c in self.said()], ["بیست درصد تخفیف تا ساعت هشت و سی کافه ما", "بیست درصد تخفیف", "تا آخر هفته منتظرتیم"])
+        self.assertEqual([v["text"] for v in job["voices"]], ["۲۰٪ تخفیف ☕️ تا ساعت ۸:۳۰ #کافه_ما", "۲۰٪ تخفیف", "تا آخر هفته منتظرتیم"])   # no line: the words on the picture are read
+
+    def test_the_speaker_can_be_chosen(self):
+        self.key(speaker="onyx")
+        self.assertEqual(self.rig.ok("GET", "/api/status")["studio"]["speaker"], "onyx")
+        self.make(idea="لاتهٔ پاییزی", kind="reel", scenes=2, voice=True, pictures=False)
+        self.wait(self.rig.ok("POST", "/api/studio/voice", {"texts": ["سلام دنیا"], "speaker": "shimmer"}))
+        self.wait(self.rig.ok("POST", "/api/studio/voice", {"texts": ["سلام دنیا"], "speaker": "../etc <script>"}))      # not a name: the saved one
+        self.assertEqual([c["voice"] for c in self.said()], ["onyx", "onyx", "shimmer", "onyx"])
+        self.rig.ok("POST", "/api/settings", {"studio": {"speaker": "no such speaker!"}})
+        self.assertEqual(self.rig.ok("GET", "/api/settings")["studio"]["speaker"], "nova")
+
+    def test_lines_can_be_read_again_one_by_one(self):
+        self.key()
+        job = self.wait(self.rig.ok("POST", "/api/studio/voice", {"texts": ["کیک هویج تازه از تنور درآمد."]}))
+        self.assertEqual((job["kind"], job["status"], len(job["voices"]), job["voices"][0]["source"]), ("voice", "done", 1, "key"))
+        self.assertTrue(job["voices"][0]["preview"].startswith("/api/file/"))
+        for bad in ({}, {"texts": []}, {"texts": "سلام"}, {"texts": ["سلام", "☕️"]}, {"texts": [""]}):
+            status, out, _ = self.rig.req("POST", "/api/studio/voice", bad)
+            self.assertEqual(status, 400, bad)
+            self.assertIn("بنویس گوینده چه چیزی را بخواند", out["error"])
+        job = self.wait(self.rig.ok("POST", "/api/studio/voice", {"texts": ["سلام"] * 30}))
+        self.assertEqual(len(job["voices"]), 8)                            # more scenes than a reel can have are not read
+
+    def test_no_credit_is_said_once_and_the_reel_is_still_made(self):
+        self.key()
+        self.sim.pollen = 0
+        job = self.make(idea="لاتهٔ پاییزی", kind="reel", scenes=3, voice=True, pictures=False)
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(len(self.said()), 1)                              # the second scene would hear the same
+        self.assertEqual(len(job["notes"]), 1)
+        self.assertIn("اعتبار این کلید برای ساخت صدا کافی نیست", job["notes"][0])
+        self.assertEqual([v["why"] for v in job["voices"]], [job["notes"][0]] * 3)
+        self.assertEqual(len(job["plan"]["scenes"]), 3)
+
+    def test_a_refused_key_is_said_in_plain_words(self):
+        self.text_ai(TOLD)
+        self.rig.ok("POST", "/api/settings", {"studio": {"pollen": "sk_wrong"}, "ai": {"mode": "off"}})
+        job = self.wait(self.rig.ok("POST", "/api/studio/voice", {"texts": ["سلام دنیا", "خداحافظ"]}))
+        self.assertEqual(len(self.said()), 1)
+        self.assertIn("کلید سرویس صدا پذیرفته نشد", job["notes"][0])
+        self.assertEqual([bool(v["file"]) for v in job["voices"]], [False, False])
+
+    def test_a_busy_speech_service_is_asked_once_more(self):
+        self.key()
+        self.sim.script("pgen", 429, {"error": {"message": "Too many requests"}}, {"Retry-After": "0"})
+        job = self.wait(self.rig.ok("POST", "/api/studio/voice", {"texts": ["سلام دنیا"]}))
+        self.assertEqual((len(self.said()), job["voices"][0]["source"], job["notes"]), (2, "key", []))
+        self.sim.script("pgen", 503, {"error": "down"}, {"Retry-After": "0"}, times=2)
+        job = self.wait(self.rig.ok("POST", "/api/studio/voice", {"texts": ["سلام دنیا", "خداحافظ"]}))
+        self.assertIn("HTTP 503", job["voices"][0]["why"])
+        self.assertEqual(job["voices"][1]["source"], "key")                # one bad answer does not cost the other scenes
+        self.assertEqual(job["notes"], [])
+
+    def test_an_answer_that_is_not_sound_is_not_kept(self):
+        self.key()
+        self.sim.script("pgen", 200, {"message": "this is not audio"})
+        job = self.wait(self.rig.ok("POST", "/api/studio/voice", {"texts": ["سلام دنیا"]}))
+        self.assertEqual(job["voices"][0]["file"], "")
+        self.assertIn("جواب قابل‌استفاده‌ای نداد", job["voices"][0]["why"])
+
+    def test_an_own_speech_service(self):
+        self.text_ai(TOLD)
+        self.rig.ok("POST", "/api/settings", {"studio": {"url": self.rig.base + "/_sim/ai/oimg/images/generations", "key": self.sim.ai_key}})
+        self.assertIs(self.rig.ok("GET", "/api/status")["studio"]["voice"], False)       # a picture service alone does not speak
+        self.rig.ok("POST", "/api/settings", {"studio": {"tts_model": "my-tts", "speaker": "alloy"}})
+        self.assertIs(self.rig.ok("GET", "/api/status")["studio"]["voice"], True)
+        job = self.wait(self.rig.ok("POST", "/api/studio/voice", {"texts": ["سلام دنیا"]}))
+        self.assertEqual(job["voices"][0]["source"], "custom")
+        sent = self.calls("oimg", "audio/speech")
+        self.assertEqual((len(sent), sent[0][4]["model"], sent[0][4]["voice"], sent[0][4]["input"]), (1, "my-tts", "alloy", "سلام دنیا"))
+        self.assertEqual(sent[0][5]["authorization"], "Bearer " + self.sim.ai_key)
+        self.assertEqual(self.said(), [])                                  # Pollinations was not asked
+
+    def test_the_demo_has_a_stand_in_narrator(self):
+        rig = Rig(demo=True)
+        self.addCleanup(rig.close)
+        self.assertIs(rig.ok("GET", "/api/status")["studio"]["voice"], True)
+        job = rig.ok("POST", "/api/studio/make", {"idea": "معرفی کیک هویج خانگی", "kind": "reel", "scenes": 3, "voice": True, "pictures": False})
+        end = time.time() + 60
+        while job["status"] == "running" and time.time() < end:
+            time.sleep(0.05)
+            job = rig.ok("GET", "/api/studio/job/" + job["id"])
+        self.assertEqual((job["status"], [v["source"] for v in job["voices"]]), ("done", ["key"] * 3))
+        self.assertTrue(all(len(v["text"]) > 12 for v in job["voices"]), job["voices"])
+
+    def test_a_narration_clip_is_not_a_post(self):
+        self.key()
+        job = self.wait(self.rig.ok("POST", "/api/studio/voice", {"texts": ["سلام دنیا"]}))
+        for kind, why in (("reel", "ریل یک ویدیو می‌خواهد"), ("image", "پست تکی یک عکس می‌خواهد"), ("story", "این فایل صداست")):
+            status, out, _ = self.rig.req("POST", "/api/posts", {"kind": kind, "caption": "سلام", "action": "now", "media": [{"file": job["voices"][0]["file"]}]})
+            self.assertEqual(status, 400, kind)
+            self.assertIn(why, out["error"])
+
+    def test_the_key_can_be_tried_out(self):
+        status, out, _ = self.rig.req("POST", "/api/studio/key", {})
+        self.assertEqual(status, 400)
+        self.assertIn("اول کلید را بنویس", out["error"])
+        self.key()
+        self.assertEqual(self.rig.ok("POST", "/api/studio/key"), {"ok": True, "name": "insta-agent", "balance": 1.25, "audio": True})
+        self.assertEqual([c[2] for c in self.calls("pgen", "account/")], ["account/key", "account/balance"])
+        self.sim.pollen = None                                             # a key that may not see the balance: still a good key
+        self.assertEqual(self.rig.ok("POST", "/api/studio/key")["balance"], None)
+        self.sim.script("pgen", 200, {"valid": True, "name": "pictures only", "permissions": {"models": ["image", "text"]}, "pollenBudget": 3})
+        out = self.rig.ok("POST", "/api/studio/key")
+        self.assertEqual((out["audio"], out["balance"], out["name"]), (False, 3, "pictures only"))
+        self.rig.ok("POST", "/api/settings", {"studio": {"pollen": "sk_wrong"}})
+        status, out, _ = self.rig.req("POST", "/api/studio/key", {})
+        self.assertEqual(status, 400)
+        self.assertIn("این کلید را نپذیرفت", out["error"])
+        self.sim.script("pgen", 500, {"error": "boom"})
+        status, out, _ = self.rig.req("POST", "/api/studio/key", {})
+        self.assertEqual(status, 502)
+        self.assertIn("جواب روشنی نداد", out["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

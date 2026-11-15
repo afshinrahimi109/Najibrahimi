@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import http.client
 import json
+import math
 import os
 import random
 import re
@@ -374,7 +375,7 @@ DEFAULT_SETTINGS = {
     "limits": {"per_hour": 30, "cooldown_min": 30, "daily_posts": 25, "quiet_from": "", "quiet_to": ""},
     "brand": {"about": "", "tone": "صمیمی و محترمانه", "hashtags": "", "handle": ""},
     "ai": {"mode": "free", "url": "", "model": "", "key": ""},
-    "studio": {"image": "auto", "pollen": "", "url": "", "key": "", "model": ""},
+    "studio": {"image": "auto", "pollen": "", "url": "", "key": "", "model": "", "speaker": "nova", "tts_model": ""},
     "media": {"method": "auto", "public_url": "", "temp_ok": False},
     "network": {"proxy": ""},
     "telegram": {"token": "", "chat_id": ""},
@@ -485,6 +486,8 @@ class Settings:
             s["media"]["method"] = "auto"
         if s["studio"]["image"] not in IMAGE_MODES:
             s["studio"]["image"] = "auto"
+        if not re.fullmatch(r"[A-Za-z0-9_.:\-]{1,60}", s["studio"]["speaker"]):
+            s["studio"]["speaker"] = "nova"
         handle = s["brand"]["handle"].strip().lstrip("@").strip()
         if handle and not re.fullmatch(r"[A-Za-z0-9._]{1,30}", handle):
             raise UserError("نام کاربری پیج فقط حروف انگلیسی، عدد، نقطه و زیرخط دارد (مثلاً my.page).")
@@ -1026,6 +1029,23 @@ def sniff(head):
     return None
 
 
+def sniff_audio(head):
+    """(extension, mime) of a sound file from its first bytes, or None."""
+    if head[:3] == b"ID3" or (len(head) > 1 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0 and head[1] & 0x06):
+        return "mp3", "audio/mpeg"
+    if len(head) > 1 and head[0] == 0xFF and head[1] & 0xF6 == 0xF0:
+        return "aac", "audio/aac"
+    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return "wav", "audio/wav"
+    if head[:4] == b"OggS":
+        return "ogg", "audio/ogg"
+    if head[:4] == b"fLaC":
+        return "flac", "audio/flac"
+    if head[4:8] == b"ftyp":
+        return "m4a", "audio/mp4"
+    return None
+
+
 def image_size(path):
     try:
         with open(path, "rb") as fh:
@@ -1213,12 +1233,15 @@ class MediaStore:
         it is never published as it is and, like every unused file, it is removed after a day."""
         found = sniff(raw[:64])
         if not found or found[0] != "image":
-            raise UserError("این فایل عکس نیست.")
+            sound = sniff_audio(raw[:64])              # a narration clip: the panel mixes it into the reel
+            if not sound:
+                raise UserError("این فایل عکس یا صدا نیست.")
+            found = ("audio",) + sound
         fid = secrets.token_hex(12)
         final = os.path.join(self.dir, "%s.%s" % (fid, found[1]))
         with open(final, "wb") as fh:
             fh.write(raw)
-        w, h = image_size(final)
+        w, h = image_size(final) if found[0] == "image" else (0, 0)
         self.db.x("INSERT INTO files (id, ext, mime, kind, size, width, height, name, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                   (fid, found[1], found[2], "asset", len(raw), w, h, str(name or "")[:200], now()))
         return self.get(fid)
@@ -1540,6 +1563,10 @@ PATIENCE = 60                   # the longest the studio waits for a service tha
 PLAN_TIMEOUT = 120              # seconds the assistant gets for writing one post
 GRACE = 1.0                     # ...plus this much, so the service's clock has surely moved on
 PICTURE_MAX = 15 * 1024 * 1024
+SOUND_MAX = 12 * 1024 * 1024
+SAY_MAX = 400                   # characters one scene's narration may have
+VOICES = ("nova", "shimmer", "alloy", "onyx", "echo", "fable")         # the speakers of the default speech model
+NO_VOICE = "گویندهٔ هوش مصنوعی به کلید Pollinations نیاز دارد (تنظیمات ← ساخت عکس و ویدیو)."
 SCENE_LINES = ["جزئیات بیشتر در کپشن 👇", "همین حالا پیام بده", "برای دوستانت هم بفرست", "ما را دنبال کن"]
 
 
@@ -1578,6 +1605,50 @@ def no_writing(prompt):
     return re.sub(r"(?:[,.;]\s*){2,}", ", ", text).strip(" ,.;")
 
 
+_ONES = ["صفر", "یک", "دو", "سه", "چهار", "پنج", "شش", "هفت", "هشت", "نه", "ده", "یازده", "دوازده", "سیزده", "چهارده",
+         "پانزده", "شانزده", "هفده", "هجده", "نوزده"]
+_TENS = ["", "", "بیست", "سی", "چهل", "پنجاه", "شصت", "هفتاد", "هشتاد", "نود"]
+_HUNDREDS = ["", "صد", "دویست", "سیصد", "چهارصد", "پانصد", "ششصد", "هفتصد", "هشتصد", "نهصد"]
+
+
+def number_words(n):
+    """A whole number below a billion in Persian words."""
+    if n < 20:
+        return _ONES[n]
+    if n < 100:
+        return _TENS[n // 10] + (" و " + _ONES[n % 10] if n % 10 else "")
+    if n < 1000:
+        return _HUNDREDS[n // 100] + (" و " + number_words(n % 100) if n % 100 else "")
+    size, name = (10 ** 6, "میلیون") if n >= 10 ** 6 else (1000, "هزار")
+    head, rest = divmod(n, size)
+    lead = name if head == 1 and size == 1000 else number_words(head) + " " + name
+    return lead + (" و " + number_words(rest) if rest else "")
+
+
+def spoken(text):
+    """A line as a speech service should get it: numbers and signs in words, no emoji, links or hashtag signs."""
+    text = str(text or "").translate(_FA_DIGITS)
+    text = re.sub(r"https?://\S+|www\.\S+", " ", text)
+    text = re.sub(r"[#@]([^\s#@]+)", lambda m: m.group(1).replace("_", " "), text)
+    text = re.sub(r"(\d)\s*[%٪]", r"\1 درصد", text)
+    # a phone number with its area code is read digit by digit; the parts of a date one after another
+    text = re.sub(r"\b0\d{1,3}[-–]\d{3,8}(?:[-–]\d{2,4})?\b", lambda m: " ".join(_ONES[int(d)] for d in re.sub(r"\D", "", m.group(0))), text)
+    text = re.sub(r"\b(\d{1,4})[/.\-](\d{1,2})[/.\-](\d{1,4})\b", lambda m: " ".join(str(int(x)) for x in m.groups()), text)
+    text = re.sub(r"(\d)[.٫/](\d)", r"\1 ممیز \2", text)
+    text = re.sub(r"(\d):(\d)", r"\1 و \2", text)
+
+    def words(m):
+        digits = re.sub(r"\D", "", m.group(0))
+        if len(digits) > 9 or (digits[0] == "0" and len(digits) > 1):      # a phone number or a code: digit by digit
+            return " ".join(_ONES[int(d)] for d in digits[:16])
+        return number_words(int(digits))
+
+    text = re.sub(r"\d+(?:[,٬]\d{3})*", words, text)
+    # emoji and pictographs go; the zero-width non-joiner that Persian words need stays
+    text = re.sub("[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200D\u20E3]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()[:SAY_MAX]
+
+
 def loose_json(text):
     """The first JSON object inside an answer that may carry a code fence or a few words around it."""
     text = str(text or "")
@@ -1601,7 +1672,8 @@ class Studio:
     def state(self):
         c = self.conf()
         return {"image": c["image"], "pollen": bool(c["pollen"]), "custom": bool(c["url"]),
-                "free_wait": max(0, int(self.free_at - now())), "text": self.agent.ai.mode()}
+                "free_wait": max(0, int(self.free_at - now())), "text": self.agent.ai.mode(),
+                "voice": self.voice_ready(), "speaker": c["speaker"]}
 
     # ── words ──
     def question(self, idea, kind, n):
@@ -1617,8 +1689,10 @@ class Studio:
                "بدون آدم، مگر ایده بدون آدم معنا ندهد.\n"
                % (idea, ("یک ریل %d صحنه‌ای" % n) if reel else "یک پست تصویری"))
         if reel:
-            ask += ("\"scenes\": آرایهٔ دقیقاً %d صحنه؛ هر صحنه یک شیء با \"text\" (جملهٔ فارسی خیلی کوتاه برای روی تصویر، حداکثر ۷ کلمه) "
-                    "و \"image\" (توصیف انگلیسی تصویر همان صحنه، با همان قاعده‌ها). صحنهٔ اول توجه را جلب کند و صحنهٔ آخر دعوت به اقدام باشد.\n" % n)
+            ask += ("\"scenes\": آرایهٔ دقیقاً %d صحنه؛ هر صحنه یک شیء با \"text\" (جملهٔ فارسی خیلی کوتاه برای روی تصویر، حداکثر ۷ کلمه)، "
+                    "\"say\" (متنی که گوینده روی همین صحنه می‌خواند: یک یا دو جملهٔ فارسی روان و گفتاری، ۸ تا ۱۸ کلمه، بدون ایموجی؛ "
+                    "عددها را با حروف بنویس) و \"image\" (توصیف انگلیسی تصویر همان صحنه، با همان قاعده‌ها). "
+                    "صحنهٔ اول توجه را جلب کند و صحنهٔ آخر دعوت به اقدام باشد.\n" % n)
         return ai.persona() + " هر چه می‌نویسی فقط یک شیء JSON معتبر باشد.", ask
 
     def ask(self, system, question, job=None):
@@ -1686,7 +1760,8 @@ class Studio:
             scenes = []
             for i, sc in enumerate(data.get("scenes") if isinstance(data.get("scenes"), list) else []):
                 if isinstance(sc, dict) and len(scenes) < n:
-                    scenes.append({"text": s(sc.get("text"), 80) or base["scenes"][i]["text"], "image": pic(sc.get("image")) or out["image"]})
+                    text = s(sc.get("text"), 80) or base["scenes"][i]["text"]
+                    scenes.append({"text": text, "say": s(sc.get("say"), 300) or text, "image": pic(sc.get("image")) or out["image"]})
             out["scenes"] = scenes + base["scenes"][len(scenes):]
         return out
 
@@ -1702,16 +1777,16 @@ class Studio:
             lines.append(extra[(len(lines) - 1) % len(extra)] if lines else headline)
         return {"source": "offline", "why": "", "caption": "%s ✨\n\nنظر شما چیه؟ توی کامنت‌ها برامون بنویسید 👇" % idea, "hashtags": tags,
                 "headline": headline, "sub": "", "image": idea,
-                "scenes": [{"text": t, "image": idea} for t in lines[:n]] if kind == "reel" else []}
+                "scenes": [{"text": t, "say": t, "image": idea} for t in lines[:n]] if kind == "reel" else []}
 
     # ── pictures ──
-    def fetch(self, method, url, data=None, headers=None, timeout=120):
+    def fetch(self, method, url, data=None, headers=None, timeout=120, what="تصویر"):
         try:
             if not self.graph.reachable(url):
                 raise GraphError("unreachable", kind="network")
             return self.graph.http(method, url, data, headers, timeout)
         except GraphError:
-            raise PictureError("ارتباط با سرویس تصویر برقرار نشد (اینترنت یا فیلترشکن را بررسی کن).")
+            raise PictureError("ارتباط با سرویس %s برقرار نشد (اینترنت یا فیلترشکن را بررسی کن)." % what)
 
     @staticmethod
     def is_picture(raw):
@@ -1926,10 +2001,113 @@ class Studio:
             said = []
         raise PictureError(" | ".join(said[-3:]) or "هیچ سرویس تصویری در دسترس نبود.")
 
+    # ── the narrator ──
+    def voice_ready(self):
+        """Is there a speech service to read the narration? (The free services have none.)"""
+        c = self.conf()
+        return bool(c["pollen"] or (c["url"] and c["tts_model"]) or self.cfg.demo)
+
+    def speak(self, text, speaker, job=None):
+        """One narration clip. Returns (file row, name of the service)."""
+        c, say = self.conf(), spoken(text)
+        if len(say) < 2:
+            raise PictureError("متنی برای خواندن نیست.")
+        body = {"input": say, "voice": speaker, "response_format": "mp3"}
+        if c["url"] and c["tts_model"]:                # the owner's own service, OpenAI's "audio/speech"
+            base = c["url"][:-len("/images/generations")] if c["url"].endswith("/images/generations") else c["url"]
+            name, url, key = "custom", base + "/audio/speech", c["key"]
+            body["model"] = c["tts_model"]
+        elif c["pollen"] or self.cfg.demo:
+            name, url = "key", self.cfg.gen_api + "/v1/audio/speech"
+            key = c["pollen"] or (self.agent.sim.ai_key if self.agent.sim is not None else "")
+            body["model"] = c["tts_model"] or "openai/tts-1"
+        else:
+            raise PictureError(NO_VOICE, tell=True)
+        headers = {"Content-Type": "application/json"}
+        if key:
+            headers["Authorization"] = "Bearer " + key
+        status = 0
+        for attempt in (0, 1):
+            status, hdrs, raw = self.fetch("POST", url, jdump(body).encode("utf-8"), headers, 120, what="صدا")
+            if status == 200 and sniff_audio(raw[:64]) and len(raw) <= SOUND_MAX:
+                return self.agent.store.add_asset(raw, "voice:" + name), name
+            if status not in (429, 503) or attempt or job is None:
+                break
+            if job["cancel"].wait(min(20, self.refusal(hdrs, raw)[1] or 5)):
+                raise PictureError("لغو شد.")
+        if status == 401:
+            raise PictureError("کلید سرویس صدا پذیرفته نشد؛ در تنظیمات دوباره واردش کن.", tell=True)
+        if status in (402, 403):
+            raise PictureError("اعتبار این کلید برای ساخت صدا کافی نیست (یا با اعتبار رایگان اجازه ندارد).", tell=True)
+        if status == 400:
+            raise PictureError("سرویس صدا این متن یا این گوینده را نپذیرفت.")
+        raise PictureError("سرویس صدا جواب قابل‌استفاده‌ای نداد (HTTP %s)." % status)
+
+    def read(self, job, speaker):
+        """The narration of a job: one clip per scene, in order."""
+        total = len(job["voices"])
+        for i, v in enumerate(job["voices"]):
+            if job["cancel"].is_set():
+                return
+            job["step"] = "گوینده در حال خواندن است…" if total == 1 else "گوینده در حال خواندن صحنهٔ %s از %s…" % (fa(i + 1), fa(total))
+            try:
+                f, source = self.speak(v["text"], speaker, job)
+                v.update(file=f["id"], preview="/api/file/" + f["id"], source=source)
+            except PictureError as e:
+                v["why"] = e.message
+                if e.tell:                             # the key or its credit: the next scene would hear the same
+                    if e.message not in job["notes"]:
+                        job["notes"].append(e.message)
+                    for rest in job["voices"][i + 1:]:
+                        rest["why"] = e.message
+                    return
+
+    def speaker(self, value):
+        return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:\-]{1,60}", value) else self.conf()["speaker"]
+
+    def voice(self, data):
+        texts = [str(t or "").strip()[:SAY_MAX] for t in (data.get("texts") if isinstance(data.get("texts"), list) else [])][:8]
+        if not texts or any(len(spoken(t)) < 2 for t in texts):
+            raise UserError("بنویس گوینده چه چیزی را بخواند.")
+        return self.start("voice", self.do_voice, texts, self.speaker(data.get("speaker")))
+
+    def do_voice(self, job, texts, speaker):
+        job["voices"] = [{"text": t, "file": "", "preview": "", "source": "", "why": ""} for t in texts]
+        self.read(job, speaker)
+
+    def check_key(self):
+        """Is the saved Pollinations key accepted, and what does it carry?"""
+        key, gen = self.conf()["pollen"], self.cfg.gen_api
+        if not key:
+            raise UserError("اول کلید را بنویس و «ذخیره» را بزن.")
+        auth = {"Authorization": "Bearer " + key, "Accept": "application/json"}
+        try:
+            status, _, raw = self.fetch("GET", gen + "/account/key", headers=auth, timeout=30, what="Pollinations")
+        except PictureError as e:
+            raise UserError(e.message, 502)
+        data = jload(raw.decode("utf-8", "replace"), None)
+        if status in (401, 403) or (isinstance(data, dict) and data.get("valid") is False):
+            raise UserError("Pollinations این کلید را نپذیرفت. کلید با sk_ شروع می‌شود؛ کامل کپی‌اش کن.")
+        if status != 200 or not isinstance(data, dict):
+            raise UserError("Pollinations جواب روشنی نداد (HTTP %s)؛ کمی بعد دوباره امتحان کن." % status, 502)
+        models = (data.get("permissions") or {}).get("models") if isinstance(data.get("permissions"), dict) else None
+        budget = data.get("pollenBudget")
+        out = {"ok": True, "name": str(data.get("name") or "")[:60], "balance": budget if isinstance(budget, (int, float)) else None,
+               "audio": not isinstance(models, list) or "audio" in models}
+        if out["balance"] is None:                     # a key without its own budget spends the account's credit
+            try:
+                status, _, raw = self.fetch("GET", gen + "/account/balance", headers=auth, timeout=30, what="Pollinations")
+                bal = jload(raw.decode("utf-8", "replace"), None)
+                if status == 200 and isinstance(bal, dict) and isinstance(bal.get("balance"), (int, float)):
+                    out["balance"] = bal["balance"]
+            except PictureError:
+                pass
+        return out
+
     # ── jobs: making takes a while, so the panel starts a job and asks how it is going ──
     @staticmethod
     def view(job):
-        return {k: job[k] for k in ("id", "kind", "status", "step", "plan", "pictures", "notes", "error")}
+        return {k: job[k] for k in ("id", "kind", "status", "step", "plan", "pictures", "voices", "notes", "error")}
 
     def job(self, jid):
         with self.lock:
@@ -1952,7 +2130,7 @@ class Studio:
             if sum(1 for v in self.jobs.values() if v["status"] == "running") >= 2:
                 raise UserError("ایجنت همین حالا مشغول ساختن است؛ صبر کن تمام شود.", 429)
             job = {"id": secrets.token_hex(8), "kind": kind, "status": "running", "step": "", "plan": None, "pictures": [],
-                   "notes": [], "error": "", "created": now(), "cancel": threading.Event()}
+                   "voices": [], "notes": [], "error": "", "created": now(), "cancel": threading.Event()}
             self.jobs[job["id"]] = job
         threading.Thread(target=self.run, args=(job, fn) + args, name="studio", daemon=True).start()
         return self.view(job)
@@ -1975,15 +2153,23 @@ class Studio:
         kind = "reel" if data.get("kind") == "reel" else "image"
         n = clamp(data.get("scenes") or 4, 2, 6) if kind == "reel" else 1
         style = data.get("style") if data.get("style") in PICTURE_STYLES else "photo"
-        return self.start("make", self.do_make, idea, kind, n, style, data.get("pictures") is not False)
+        voice = self.speaker(data.get("speaker")) if kind == "reel" and data.get("voice") is True else ""
+        return self.start("make", self.do_make, idea, kind, n, style, data.get("pictures") is not False, voice)
 
-    def do_make(self, job, idea, kind, n, style, want):
+    def do_make(self, job, idea, kind, n, style, want, voice=""):
         job["step"] = "در حال نوشتن کپشن و چیدن صحنه‌ها…"
         plan = self.plan(idea, kind, n, job)
         plan.update(idea=idea, kind=kind, style=style)
         prompts = [sc["image"] for sc in plan["scenes"]] if kind == "reel" else [plan["image"]]
         job["pictures"] = [{"prompt": p, "file": "", "preview": "", "source": "", "why": ""} for p in prompts]
+        if voice:
+            job["voices"] = [{"text": sc["say"], "file": "", "preview": "", "source": "", "why": ""} for sc in plan["scenes"]]
         job["plan"] = plan
+        if voice and self.voice_ready():               # the narrator first: it is quick, the pictures are not
+            self.read(job, voice)
+        elif voice:
+            for v in job["voices"]:
+                v["why"] = NO_VOICE
         if not want:
             return
         # The picture services only understand English. Without a description from the assistant the picture would
@@ -2269,6 +2455,8 @@ class Publisher:
             f = self.agent.store.get(m["file"])
             if not f or not os.path.exists(self.agent.store.path(f)):
                 raise UserError("یکی از فایل‌ها دیگر روی دستگاه نیست؛ دوباره انتخابش کن.")
+            if str(f["mime"]).startswith("audio/"):    # a narration clip of the studio is not a post
+                raise UserError("این فایل صداست؛ پست عکس یا ویدیو می‌خواهد.")
             if hand:
                 continue                               # posted by hand: the Instagram app crops and converts by itself
             if f["ext"] == "webm":
@@ -3709,6 +3897,7 @@ class Sim:
         # stand-ins for the text and picture services the studio talks to
         self.ai_calls, self.ai_script, self.horde_jobs = [], {}, {}
         self.ai_key = "sk_sim_demo_key"
+        self.pollen = 1.25                             # credit of that key; None: the key may not see its balance
         self.ai_text = None                            # the text service's answer: a string, or a function of the request
         self.ai_delay = 0.0                            # seconds every picture takes
         self.free_gap, self.free_next = {"image": 0.0, "text": 0.0}, {"image": 0.0, "text": 0.0}
@@ -3824,7 +4013,10 @@ class Sim:
         idea, n = m.group(1).strip(), re.search(r"ریل (\d+) صحنه", ask)
         head = shorten(idea, 44)
         lines = [head, "همین هفته", "با بهترین کیفیت", "منتظرتان هستیم", "همین حالا پیام بده", "جزئیات در کپشن"]
-        scenes = [{"text": lines[i % len(lines)], "image": "scene %d of a short video about a small business offer, warm light" % (i + 1)}
+        says = ["%s؛ خبر خوب این هفتهٔ ماست." % head, "فقط همین هفته فرصت دارید، پس از دستش ندهید.", "مثل همیشه با بهترین کیفیت آماده شده است.",
+                "منتظر دیدن شما هستیم.", "برای سفارش همین حالا پیام بدهید.", "جزئیات بیشتر را در کپشن بخوانید."]
+        scenes = [{"text": lines[i % len(lines)], "say": says[i % len(says)],
+                   "image": "scene %d of a short video about a small business offer, warm light" % (i + 1)}
                   for i in range(int(n.group(1)) if n else 0)]
         return jdump({"caption": "%s ✨\nهمین امروز سر بزنید؛ منتظرتان هستیم 🌿" % idea, "hashtags": ["#پیشنهاد_ویژه", "#کسب_و_کار", "#اینستاگرام"],
                       "headline": head, "sub": "همین حالا پیام بده", "image": "a warm, inviting photo that shows the offer", "scenes": scenes})
@@ -3855,6 +4047,14 @@ class Sim:
                 time.sleep(self.ai_delay)
             return 200, "image/png", fake_picture(text, width, height), {"x-model-used": "sim"}
 
+        def speech(asked):
+            asked = asked if isinstance(asked, dict) else {}
+            if not str(asked.get("input") or "").strip():
+                return answer(400, {"error": {"message": "input is required", "code": "BAD_REQUEST"}})
+            if self.pollen is not None and self.pollen <= 0:
+                return answer(402, {"success": False, "error": {"message": "Insufficient pollen balance.", "code": "PAYMENT_REQUIRED"}, "status": 402})
+            return 200, "audio/wav", fake_speech(asked["input"]), {}
+
         with self.lock:
             self.ai_calls.append((service, method, tail, dict(q), body, {k.lower(): v for k, v in headers.items()}))
             if len(self.ai_calls) > 2000:
@@ -3875,12 +4075,23 @@ class Sim:
                 return answer(401, {"success": False, "error": {"message": "A valid API key is required.", "code": "UNAUTHORIZED"}, "status": 401})
             if tail.startswith("image/"):
                 return picture(tail + str(q.get("seed")), width, height)
+            if tail == "v1/audio/speech" and method == "POST":
+                return speech(body)
+            if tail == "account/key":
+                return answer(200, {"id": "k_sim", "valid": True, "type": "secret", "name": "insta-agent", "expiresAt": None, "expiresIn": None,
+                                    "permissions": {"models": None, "account": None}, "pollenBudget": None, "questPollenOnly": True})
+            if tail == "account/balance":
+                return answer(200, {"balance": self.pollen}) if self.pollen is not None else answer(403, {"error": {"code": "FORBIDDEN"}})
             if tail == "v1/chat/completions" and method == "POST":
                 said = self.ai_text(body or {}) if callable(self.ai_text) else self.ai_text
                 if said is None:
                     return answer(500, {"error": {"message": "the simulated text service has nothing to say"}})
                 return answer(200, {"choices": [{"index": 0, "message": {"role": "assistant", "content": said}, "finish_reason": "stop"}],
                                     "model": "openai/gpt-5.4-nano"})
+        if service == "oimg" and tail == "audio/speech" and method == "POST":
+            if bearer != "Bearer " + self.ai_key:
+                return answer(401, {"error": {"message": "Incorrect API key provided", "type": "invalid_request_error"}})
+            return speech(body)
         if service == "oimg" and tail == "images/generations" and method == "POST":
             if bearer != "Bearer " + self.ai_key:
                 return answer(401, {"error": {"message": "Incorrect API key provided", "type": "invalid_request_error"}})
@@ -4335,6 +4546,25 @@ def fake_picture(text, width, height):
         rows.append(0)
         rows.extend(row)
     return png_file(width, height, rows)
+
+
+def fake_speech(text, rate=16000):
+    """What the simulated speech service sends (demo and tests): a WAV with one short tone per "syllable", as long
+    as a speaker would need for the text. It is not speech; it only lets the whole path be heard and measured."""
+    text = str(text or "")
+    seconds = clamp(int(100 * (0.35 + 0.07 * len(text))), 60, 2000) / 100.0
+    seed, n = zlib.crc32(text.encode("utf-8")), int(rate * seconds)
+    step, on = int(rate * 0.19), int(rate * 0.13)
+    out = bytearray(n * 2)
+    for start in range(int(rate * 0.05), n - on, step):
+        k = start // step
+        freq = 170 + (seed >> (k % 24)) % 9 * 28
+        w = 2 * math.pi * freq / rate
+        for i in range(on):
+            env = min(1.0, i / 240.0, (on - i) / 480.0)
+            struct.pack_into("<h", out, (start + i) * 2, int(9000 * env * math.sin(w * i)))
+    head = b"RIFF" + struct.pack("<I", 36 + len(out)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+    return head + b"data" + struct.pack("<I", len(out)) + bytes(out)
 
 
 def make_icon_png(size):
@@ -4902,6 +5132,10 @@ def api_call(app, method, path, q, body):
         return agent.studio.make(body)
     if path == "studio/picture" and P:
         return agent.studio.redo(body)
+    if path == "studio/voice" and P:
+        return agent.studio.voice(body)
+    if path == "studio/key" and P:
+        return agent.studio.check_key()
     m = re.fullmatch(r"studio/job/([0-9a-f]{16})(/cancel)?", path)
     if m and m.group(2) and P:
         return agent.studio.cancel(m.group(1))
@@ -5231,7 +5465,8 @@ const ICONS = {
   alert: 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z M12 9v4 M12 17h.01',
   spark: 'M12 3l1.8 5.6L19.5 10l-5.7 1.6L12 17l-1.8-5.4L4.5 10l5.7-1.4z M19 16v4 M17 18h4', link: 'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71 M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71',
   help: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3 M12 17h.01',
-  download: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3', copy: 'M11 9h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2z M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1', calendar: 'M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M16 2v4 M8 2v4 M3 10h18'
+  download: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3', play: 'M6 3l14 9-14 9V3z',
+  mic: 'M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z M19 10v2a7 7 0 0 1-14 0v-2 M12 19v4 M8 23h8', copy: 'M11 9h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2z M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1', calendar: 'M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M16 2v4 M8 2v4 M3 10h18'
 };
 const KIND = {image: ['پست', 'image'], carousel: ['چندتایی', 'layers'], reel: ['ریل', 'film'], story: ['استوری', 'story']};
 const STATUS = {draft: ['پیش‌نویس', ''], scheduled: ['زمان‌بندی‌شده', 'info'], publishing: ['در حال انتشار', 'warn'], published: ['منتشرشده', 'ok'], failed: ['ناموفق', 'bad'], missed: ['جامانده', 'warn'], canceled: ['لغوشده', ''], due: ['وقت انتشار', 'pri']};
@@ -5817,7 +6052,8 @@ function composer(post, seed) {
    exists even when no picture service answered. */
 const FACE = '"Vazirmatn", "Vazir", Tahoma, system-ui, sans-serif';
 const LOOKS = [['#f97316', '#db2777'], ['#0ea5e9', '#4338ca'], ['#10b981', '#065f46'], ['#111827', '#4b5563'], ['#8b5cf6', '#4c1d95'], ['#fde68a', '#fca5a5'], ['#f59e0b', '#b45309'], ['#e0f2fe', '#a5b4fc']];
-const SCENE_SEC = 3.2, FADE_SEC = 0.5, REEL_FPS = 30;
+const SCENE_SEC = 3.2, FADE_SEC = 0.5, REEL_FPS = 30, AUDIO_RATE = 48000, VOICE_LEAD = 0.35, VOICE_TAIL = 0.6;
+const SPEAKERS = [['nova', 'زن (nova)'], ['shimmer', 'زن (shimmer)'], ['alloy', 'خنثی (alloy)'], ['onyx', 'مرد (onyx)'], ['echo', 'مرد (echo)'], ['fable', 'مرد (fable)']];
 const PIC_FROM = {key: 'Pollinations', free: 'Pollinations رایگان', horde: 'AI Horde', custom: 'سرویس خودت'};
 const NO_PLAN = {off: 'دستیار در تنظیمات خاموش است', limit: 'سرویس رایگان متن نوبت نداد', down: 'به سرویس متن دسترسی نبود', format: 'پاسخ سرویس متن قابل‌استفاده نبود'};
 const blank = (w, ht) => Object.assign(D.createElement('canvas'), {width: w, height: ht});
@@ -5910,12 +6146,20 @@ function paintPost(cv, m) {
   const show = m.words || !m.img;
   words(ctx, w, ht, {head: show ? m.head : '', sub: show ? m.sub : '', handle: m.handle, place, floor: 0.9, tag: place === 'bottom' || !m.img ? 0.95 : 0.955, ink, glow, big: m.img ? 104 : 128, lines: m.img ? 3 : 4});
 }
-/* one frame of a reel at second t. m: {scenes: [{img, text}], sub, handle, look} */
+/* when each scene of a reel begins: a scene with narration lasts as long as its voice */
+function reelTimes(durs) {
+  const starts = []; let t = 0;
+  for (const d of durs) { starts.push(t); t += d; }
+  return {starts, durs, total: t + 0.2};
+}
+/* one frame of a reel at second t. m: {scenes: [{img, text}], starts, durs, sub, handle, look} */
 function paintReel(cv, m, t) {
-  const ctx = cv.getContext('2d'), w = cv.width, ht = cv.height, n = m.scenes.length, at = Math.min(n - 1, Math.floor(t / SCENE_SEC));
+  const ctx = cv.getContext('2d'), w = cv.width, ht = cv.height, n = m.scenes.length;
+  let at = n - 1;
+  for (let k = 0; k < n; k++) if (t < m.starts[k] + m.durs[k]) { at = k; break; }
   ctx.imageSmoothingQuality = 'medium';
   const one = (k, alpha) => {
-    const sc = m.scenes[k], since = t - k * SCENE_SEC + FADE_SEC, p = Math.max(0, Math.min(1, since / (SCENE_SEC + FADE_SEC)));
+    const sc = m.scenes[k], since = t - m.starts[k] + FADE_SEC, p = Math.max(0, Math.min(1, since / (m.durs[k] + FADE_SEC)));
     let ink = '#fff', glow = true;
     ctx.save(); ctx.globalAlpha = alpha;
     if (sc.img) { cover(ctx, sc.img, w, ht, k % 2 ? 1.16 - 0.1 * p : 1.05 + 0.1 * p, 0.5 + (k % 2 ? 0.08 : -0.08) * (p - 0.5), 0.5); veil(ctx, w, ht, 'bottom'); }
@@ -5926,54 +6170,81 @@ function paintReel(cv, m, t) {
     ctx.restore();
   };
   one(at, 1);
-  const into = t - ((at + 1) * SCENE_SEC - FADE_SEC);
+  const into = t - (m.starts[at] + m.durs[at] - FADE_SEC);
   if (at < n - 1 && into > 0) one(at + 1, Math.min(1, into / FADE_SEC));
 }
-const reelSeconds = m => m.scenes.length * SCENE_SEC + 0.2;
 
-/* A plain MP4 (video only) out of H.264 samples. The index comes first, so the file plays while it still loads.
+/* A plain MP4 out of H.264 samples and, when there is sound, one audio track (AAC or Opus). The index comes first, so the
+   file plays while it still loads; picture and sound alternate second by second.
+   v: {samples: [{data, key, ts}], avcC, w, ht, fps, turned, space}     a: {kind, samples: [{data, dur}], desc, rate, channels} or null
    turned: the frames lie on their side, the way phone cameras store upright video; the track says "turn me back". */
-function mp4File(samples, avcC, w, ht, fps, turned, space) {
-  const be = (v, n) => { const a = new Uint8Array(n); for (let i = n - 1; i >= 0; i--) { a[i] = v % 256; v = Math.floor(v / 256); } return a; };
-  const u16 = v => be(v, 2), u32 = v => be(v, 4), txt = s => Uint8Array.from(s, c => c.charCodeAt(0)), zero = n => new Uint8Array(n);
+function mp4File(v, a) {
+  const be = (x, n) => { const o = new Uint8Array(n); for (let i = n - 1; i >= 0; i--) { o[i] = x % 256; x = Math.floor(x / 256); } return o; };
+  const u8 = x => Uint8Array.of(x), u16 = x => be(x, 2), u32 = x => be(x, 4), txt = s => Uint8Array.from(s, c => c.charCodeAt(0)), zero = n => new Uint8Array(n);
   const join = parts => { const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; } return out; };
   const box = (type, ...parts) => { const body = join(parts); return join([u32(body.length + 8), txt(type), body]); };
   const full = (type, flags, ...parts) => box(type, u32(flags), ...parts);
-  const n = samples.length, tick = 1000, ms = Math.round(n * 1000 / fps);
+  const pairs = list => { const runs = []; for (const x of list) { if (runs.length && runs[runs.length - 1][1] === x) runs[runs.length - 1][0]++; else runs.push([1, x]); } return join([u32(runs.length)].concat(runs.map(r => join([u32(r[0]), u32(r[1])])))); };
+  const chunksOf = (count, per) => { const out = []; for (let i = 0; i < count; i += per) out.push(Math.min(per, count - i)); return out; };
+  const stsc = chunks => { const r = [[1, chunks[0]]]; if (chunks.length > 1 && chunks[chunks.length - 1] !== chunks[0]) r.push([chunks.length, chunks[chunks.length - 1]]); return full('stsc', 0, u32(r.length), join(r.map(x => join([u32(x[0]), u32(x[1]), u32(1)])))); };
+  const fps = v.fps, n = v.samples.length, tick = 1000, vms = Math.round(n * 1000 / fps);
+  const an = a ? a.samples.length : 0, alen = a ? a.samples.reduce((sum, x) => sum + x.dur, 0) : 0, ams = a ? Math.round(alen * 1000 / a.rate) : 0, ms = Math.max(vms, ams);
+  const vchunks = chunksOf(n, fps), achunks = a ? chunksOf(an, Math.max(1, Math.round(a.rate / a.samples[0].dur))) : [];
   /* B-frames are shown later than they are decoded. Offsets may not be negative, so all shift and an edit list takes it back. */
-  const shown = samples.map(s => Math.round(s.ts * fps / 1e6));
+  const shown = v.samples.map(s => Math.round(s.ts * fps / 1e6));
   let lead = 0;
   shown.forEach((p, i) => { lead = Math.max(lead, i - p); });
-  const late = shown.map((p, i) => (p + lead - i) * tick), mixed = lead > 0 || late.some(v => v !== 0);
-  const runs = []; for (const v of late) { if (runs.length && runs[runs.length - 1][1] === v) runs[runs.length - 1][0]++; else runs.push([1, v]); }
-  const keys = []; samples.forEach((s, i) => { if (s.key) keys.push(i + 1); });
-  const chunks = []; for (let i = 0; i < n; i += fps) chunks.push(Math.min(fps, n - i));
-  const stsc = [[1, chunks[0]]]; if (chunks.length > 1 && chunks[chunks.length - 1] !== chunks[0]) stsc.push([chunks.length, chunks[chunks.length - 1]]);
+  const late = shown.map((p, i) => (p + lead - i) * tick), mixed = lead > 0 || late.some(x => x !== 0);
+  const keys = []; v.samples.forEach((s, i) => { if (s.key) keys.push(i + 1); });
   const flat = [u32(0x10000), u32(0), u32(0), u32(0), u32(0x10000), u32(0), u32(0), u32(0), u32(0x40000000)];
-  const side = [u32(0), u32(0x10000), u32(0), u32(0xffff0000), u32(0), u32(0), u32(ht * 0x10000), u32(0), u32(0x40000000)];
-  const colr = space && space.matrix ? box('colr', txt('nclx'), u16({bt709: 1, bt470bg: 5, smpte170m: 6}[space.primaries] || 1),
-    u16({bt709: 1, smpte170m: 6, 'iec61966-2-1': 13}[space.transfer] || 1), u16({bt709: 1, bt470bg: 5, smpte170m: 6}[space.matrix] || 1), Uint8Array.of(space.fullRange ? 0x80 : 0)) : zero(0);
-  const avc1 = box('avc1', zero(6), u16(1), zero(16), u16(w), u16(ht), u32(0x480000), u32(0x480000), u32(0), u16(1), zero(32), u16(24), u16(0xffff), box('avcC', avcC), colr);
-  const moov = offsets => box('moov',
-    full('mvhd', 0, u32(0), u32(0), u32(1000), u32(ms), u32(0x10000), u16(0x100), zero(10), ...flat, zero(24), u32(2)),
-    box('trak',
-      full('tkhd', 3, u32(0), u32(0), u32(1), u32(0), u32(ms), zero(8), u16(0), u16(0), u16(0), u16(0), ...(turned ? side : flat), u32(w * 0x10000), u32(ht * 0x10000)),
-      mixed ? box('edts', full('elst', 0, u32(1), u32(ms), u32(lead * tick), u16(1), u16(0))) : zero(0),
+  const side = [u32(0), u32(0x10000), u32(0), u32(0xffff0000), u32(0), u32(0), u32(v.ht * 0x10000), u32(0), u32(0x40000000)];
+  const space = v.space, colr = space && space.matrix ? box('colr', txt('nclx'), u16({bt709: 1, bt470bg: 5, smpte170m: 6}[space.primaries] || 1),
+    u16({bt709: 1, smpte170m: 6, 'iec61966-2-1': 13}[space.transfer] || 1), u16({bt709: 1, bt470bg: 5, smpte170m: 6}[space.matrix] || 1), u8(space.fullRange ? 0x80 : 0)) : zero(0);
+  const avc1 = box('avc1', zero(6), u16(1), zero(16), u16(v.w), u16(v.ht), u32(0x480000), u32(0x480000), u32(0), u16(1), zero(32), u16(24), u16(0xffff), box('avcC', v.avcC), colr);
+  const dinf = box('dinf', full('dref', 0, u32(1), full('url ', 1)));
+  const picture = offsets => box('trak',
+    full('tkhd', 3, u32(0), u32(0), u32(1), u32(0), u32(vms), zero(8), u16(0), u16(0), u16(0), u16(0), ...(v.turned ? side : flat), u32(v.w * 0x10000), u32(v.ht * 0x10000)),
+    mixed ? box('edts', full('elst', 0, u32(1), u32(vms), u32(lead * tick), u16(1), u16(0))) : zero(0),
+    box('mdia',
+      full('mdhd', 0, u32(0), u32(0), u32(fps * tick), u32(n * tick), u16(0x55c4), u16(0)),
+      full('hdlr', 0, u32(0), txt('vide'), zero(12), txt('VideoHandler\0')),
+      box('minf', full('vmhd', 1, zero(8)), dinf,
+        box('stbl', full('stsd', 0, u32(1), avc1),
+          full('stts', 0, u32(1), u32(n), u32(tick)),
+          mixed ? full('ctts', 0, pairs(late)) : zero(0),
+          keys.length < n ? full('stss', 0, u32(keys.length), join(keys.map(u32))) : zero(0),
+          stsc(vchunks),
+          full('stsz', 0, u32(0), u32(n), join(v.samples.map(s => u32(s.data.length)))),
+          full('stco', 0, u32(vchunks.length), join(offsets.map(u32)))))));
+  const tag = (t, ...parts) => { const body = join(parts); return join([Uint8Array.of(t, body.length), body]); };      /* an MPEG-4 descriptor; always short here */
+  const sound = offsets => {
+    const entry = [zero(6), u16(1), zero(8), u16(a.channels), u16(16), u16(0), u16(0), u32(a.rate * 65536)];
+    const skip = a.desc && a.desc.length >= 12 ? a.desc[10] + a.desc[11] * 256 : 312;                                  /* Opus: samples to drop at the start */
+    const codec = a.kind === 'aac'
+      ? box('mp4a', ...entry, full('esds', 0, tag(3, u16(0), u8(0), tag(4, u8(0x40), u8(0x15), zero(3), u32(128000), u32(96000), tag(5, a.desc)), tag(6, u8(2)))))
+      : box('Opus', ...entry, box('dOps', u8(0), u8(a.channels), u16(skip), u32(a.rate), u16(0), u8(0)));
+    const cut = a.kind === 'opus' ? skip : 0, heard = Math.round((alen - cut) * 1000 / a.rate);
+    return box('trak',
+      full('tkhd', 3, u32(0), u32(0), u32(2), u32(0), u32(heard), zero(8), u16(0), u16(1), u16(0x100), u16(0), ...flat, u32(0), u32(0)),
+      cut ? box('edts', full('elst', 0, u32(1), u32(heard), u32(cut), u16(1), u16(0))) : zero(0),         /* the encoder's run-in is not played */
       box('mdia',
-        full('mdhd', 0, u32(0), u32(0), u32(fps * tick), u32(n * tick), u16(0x55c4), u16(0)),
-        full('hdlr', 0, u32(0), txt('vide'), zero(12), txt('VideoHandler\0')),
-        box('minf', full('vmhd', 1, zero(8)), box('dinf', full('dref', 0, u32(1), full('url ', 1))),
-          box('stbl', full('stsd', 0, u32(1), avc1),
-            full('stts', 0, u32(1), u32(n), u32(tick)),
-            mixed ? full('ctts', 0, u32(runs.length), join(runs.map(r => join([u32(r[0]), u32(r[1])])))) : zero(0),
-            keys.length < n ? full('stss', 0, u32(keys.length), join(keys.map(u32))) : zero(0),
-            full('stsc', 0, u32(stsc.length), join(stsc.map(r => join([u32(r[0]), u32(r[1]), u32(1)])))),
-            full('stsz', 0, u32(0), u32(n), join(samples.map(s => u32(s.data.length)))),
-            full('stco', 0, u32(chunks.length), join(offsets.map(u32))))))));
-  const ftyp = box('ftyp', txt('isom'), u32(512), txt('isomiso2avc1mp41'));
-  const lay = start => { const out = []; let at = start, i = 0; for (const c of chunks) { out.push(at); for (let k = 0; k < c; k++) at += samples[i++].data.length; } return out; };
-  const head = ftyp.length + moov(lay(0)).length + 8, total = samples.reduce((sum, x) => sum + x.data.length, 0);
-  return new Blob([ftyp, moov(lay(head)), u32(total + 8), txt('mdat')].concat(samples.map(x => x.data)), {type: 'video/mp4'});
+        full('mdhd', 0, u32(0), u32(0), u32(a.rate), u32(alen), u16(0x55c4), u16(0)),
+        full('hdlr', 0, u32(0), txt('soun'), zero(12), txt('SoundHandler\0')),
+        box('minf', full('smhd', 0, zero(4)), dinf,
+          box('stbl', full('stsd', 0, u32(1), codec),
+            full('stts', 0, pairs(a.samples.map(x => x.dur))),
+            stsc(achunks),
+            full('stsz', 0, u32(0), u32(an), join(a.samples.map(x => u32(x.data.length)))),
+            full('stco', 0, u32(achunks.length), join(offsets.map(u32)))))));
+  };
+  const order = [];
+  for (let i = 0; i < Math.max(vchunks.length, achunks.length); i++) { if (i < vchunks.length) order.push([v.samples, vchunks[i], 0]); if (i < achunks.length) order.push([a.samples, achunks[i], 1]); }
+  const lay = start => { const offs = [[], []], next = [0, 0]; let at = start; for (const [list, count, which] of order) { offs[which].push(at); for (let k = 0; k < count; k++) at += list[next[which]++].data.length; } return offs; };
+  const moov = offs => box('moov', full('mvhd', 0, u32(0), u32(0), u32(1000), u32(ms), u32(0x10000), u16(0x100), zero(10), ...flat, zero(24), u32(a ? 3 : 2)), picture(offs[0]), a ? sound(offs[1]) : zero(0));
+  const ftyp = box('ftyp', txt('isom'), u32(512), txt('isomiso2avc1mp41')), head = ftyp.length + moov(lay(0)).length + 8;
+  const data = [], next = [0, 0]; let total = 0;
+  for (const [list, count, which] of order) for (let k = 0; k < count; k++) { const d = list[next[which]++].data; data.push(d); total += d.length; }
+  return new Blob([ftyp, moov(lay(head)), u32(total + 8), txt('mdat')].concat(data), {type: 'video/mp4'});
 }
 async function avcConfig(w, ht, fps) {
   if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') return null;
@@ -5983,6 +6254,7 @@ async function avcConfig(w, ht, fps) {
   }
   return null;
 }
+const bytesOf = d => new Uint8Array(d.buffer ? d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength) : d);
 /* Frame by frame through the device's own H.264 encoder; null when this browser has none for that size. */
 async function encodeFrames(stage, paint, seconds, fps, turned, onStep, stop) {
   const cw = turned ? stage.height : stage.width, ch = turned ? stage.width : stage.height, cfg = await avcConfig(cw, ch, fps);
@@ -5991,7 +6263,7 @@ async function encodeFrames(stage, paint, seconds, fps, turned, onStep, stop) {
   let desc = null, space = null, failed = null;
   const enc = new VideoEncoder({error: e => { failed = e; }, output: (chunk, meta) => {
     const dc = meta && meta.decoderConfig;
-    if (dc && dc.description) { desc = new Uint8Array(dc.description.buffer ? dc.description.buffer.slice(dc.description.byteOffset, dc.description.byteOffset + dc.description.byteLength) : dc.description); space = dc.colorSpace || null; }
+    if (dc && dc.description) { desc = bytesOf(dc.description); space = dc.colorSpace || null; }
     const data = new Uint8Array(chunk.byteLength);
     chunk.copyTo(data);
     samples.push({data, key: chunk.type === 'key', ts: chunk.timestamp});
@@ -6013,20 +6285,84 @@ async function encodeFrames(stage, paint, seconds, fps, turned, onStep, stop) {
     if (failed) throw failed;
   } finally { try { enc.close(); } catch (e) { /* closed already */ } }
   if (!desc || samples.length !== frames) throw new Error('the encoder returned ' + samples.length + ' of ' + frames + ' frames');
-  return mp4File(samples, desc, cw, ch, fps, turned, space);
+  return {samples, avcC: desc, w: cw, ht: ch, fps, turned, space};
+}
+
+/* ── sound: narration clips are decoded, laid on one track and encoded on the device ── */
+async function decodeSound(bytes) {                    /* any format the browser knows → one channel at AUDIO_RATE */
+  return new OfflineAudioContext(1, 1, AUDIO_RATE).decodeAudioData(bytes);
+}
+async function mixSound(clips, seconds) {              /* clips: [{buf, at}] → samples of the whole reel */
+  const oc = new OfflineAudioContext(1, Math.ceil(seconds * AUDIO_RATE), AUDIO_RATE);
+  for (const c of clips) { const src = oc.createBufferSource(); src.buffer = c.buf; src.connect(oc.destination); src.start(Math.max(0, c.at)); }
+  const pcm = (await oc.startRendering()).getChannelData(0);
+  let peak = 0;
+  for (let i = 0; i < pcm.length; i++) { const x = Math.abs(pcm[i]); if (x > peak) peak = x; }
+  const gain = peak > 0.02 ? Math.min(4, 0.85 / peak) : 1;                /* a quiet recording is brought up, a loud one is kept from clipping */
+  if (Math.abs(gain - 1) > 0.05) for (let i = 0; i < pcm.length; i++) pcm[i] *= gain;
+  return pcm;
+}
+/* AAC where the device has an encoder (phones, Windows, macOS), Opus elsewhere; null when this browser has neither */
+async function encodeSound(pcm, stop) {
+  if (typeof AudioEncoder === 'undefined' || typeof AudioData === 'undefined') return null;
+  const tries = [['aac', 'mp4a.40.2', 1, 96000], ['aac', 'mp4a.40.2', 2, 128000], ['opus', 'opus', 1, 64000]].filter(x => !S.audio || S.audio === x[0]);
+  for (const [kind, codec, channels, bitrate] of tries) {
+    const cfg = Object.assign({codec, sampleRate: AUDIO_RATE, numberOfChannels: channels, bitrate}, kind === 'aac' ? {aac: {format: 'aac'}} : {});
+    let ok = false;
+    try { ok = (await AudioEncoder.isConfigSupported(cfg)).supported; } catch (e) { /* not this one */ }
+    if (!ok) continue;
+    const samples = [], step = AUDIO_RATE / 10;
+    let desc = null, failed = null;
+    const enc = new AudioEncoder({error: e => { failed = e; }, output: (chunk, meta) => {
+      const dc = meta && meta.decoderConfig;
+      if (dc && dc.description) desc = bytesOf(dc.description);
+      const data = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(data);
+      samples.push({data, dur: Math.round((chunk.duration || 0) * AUDIO_RATE / 1e6) || (kind === 'aac' ? 1024 : 960)});
+    }});
+    try {
+      enc.configure(cfg);
+      for (let o = 0; o < pcm.length && !failed; o += step) {
+        if (stop.on) throw new Err('لغو شد.', 0, true);
+        const part = pcm.subarray(o, Math.min(pcm.length, o + step)), both = channels === 2 ? new Float32Array(part.length * 2) : part;
+        if (channels === 2) { both.set(part, 0); both.set(part, part.length); }
+        const piece = new AudioData({format: 'f32-planar', sampleRate: AUDIO_RATE, numberOfFrames: part.length, numberOfChannels: channels, timestamp: Math.round(o / AUDIO_RATE * 1e6), data: both});
+        enc.encode(piece); piece.close();
+        if (enc.encodeQueueSize > 20) await pause();
+      }
+      if (!failed) await enc.flush();
+    } catch (e) { if (e && e.silent) { try { enc.close(); } catch (x) { /* closed */ } throw e; } failed = e; }
+    try { enc.close(); } catch (e) { /* closed already */ }
+    /* AAC-LC at 48 kHz is described by two bytes; they are written here when the encoder does not hand them over */
+    if (!failed && samples.length) return {kind, samples, desc: desc || (kind === 'aac' ? Uint8Array.of(0x11, channels === 2 ? 0x90 : 0x88) : null), rate: AUDIO_RATE, channels};
+  }
+  return null;
 }
 /* The fallback: play the reel once on a canvas and let the browser record it (takes as long as the reel itself). */
-function recordLive(stage, paint, seconds, fps, onStep, stop) {
+function recordLive(stage, paint, seconds, fps, onStep, stop, pcm) {
   return new Promise((res, rej) => {
-    const kinds = ['video/mp4;codecs=avc1.640028', 'video/mp4;codecs=avc1.4d0028', 'video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
-    const type = typeof MediaRecorder === 'undefined' || !stage.captureStream ? '' : kinds.find(k => MediaRecorder.isTypeSupported(k));
-    if (!type) return rej(new Err('این مرورگر نمی‌تواند ویدیو بسازد؛ با Chrome امتحان کن.'));
+    if (typeof MediaRecorder === 'undefined' || !stage.captureStream) return rej(new Err('این مرورگر نمی‌تواند ویدیو بسازد؛ با Chrome امتحان کن.'));
     paint(0);
-    const stream = stage.captureStream(fps), rec = new MediaRecorder(stream, {mimeType: type, videoBitsPerSecond: Math.round(stage.width * stage.height * fps * 0.1)}), parts = [], t0 = performance.now();
+    const stream = stage.captureStream(fps);
+    let ac = null, voice = null;
+    if (pcm) {
+      try {
+        ac = new (window.AudioContext || window.webkitAudioContext)();
+        const buf = ac.createBuffer(1, pcm.length, AUDIO_RATE), out = ac.createMediaStreamDestination();
+        buf.copyToChannel(pcm, 0);
+        voice = ac.createBufferSource(); voice.buffer = buf; voice.connect(out);
+        stream.addTrack(out.stream.getAudioTracks()[0]);
+      } catch (e) { ac = null; voice = null; }
+    }
+    const kinds = voice ? ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4;codecs=avc1,opus', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
+      : ['video/mp4;codecs=avc1.640028', 'video/mp4;codecs=avc1.4d0028', 'video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+    const type = kinds.find(k => MediaRecorder.isTypeSupported(k));
+    if (!type) return rej(new Err('این مرورگر نمی‌تواند ویدیو بسازد؛ با Chrome امتحان کن.'));
+    const rec = new MediaRecorder(stream, {mimeType: type, videoBitsPerSecond: Math.round(stage.width * stage.height * fps * 0.1)}), parts = [], t0 = performance.now();
     let broke = null;
     rec.ondataavailable = e => { if (e.data && e.data.size) parts.push(e.data); };
     rec.onerror = () => { broke = new Err('ضبط ویدیو متوقف شد.'); };
-    rec.onstop = () => { stream.getTracks().forEach(tr => tr.stop()); if (broke) rej(broke); else res(new Blob(parts, {type: type.split(';')[0]})); };
+    rec.onstop = () => { stream.getTracks().forEach(tr => tr.stop()); if (ac) ac.close().catch(() => {}); if (broke) rej(broke); else res(new Blob(parts, {type: type.split(';')[0]})); };
     const tick = () => {
       const t = (performance.now() - t0) / 1000;
       if (stop.on || D.hidden) broke = stop.on ? new Err('لغو شد.', 0, true) : new Err('صفحه بسته شد و ضبط ناتمام ماند. دوباره بساز و تا پایان، همین صفحه را باز نگه دار.');
@@ -6035,18 +6371,24 @@ function recordLive(stage, paint, seconds, fps, onStep, stop) {
       requestAnimationFrame(tick);
     };
     rec.start();
+    if (voice) { ac.resume().catch(() => {}); voice.start(); }
     requestAnimationFrame(tick);
   });
 }
-/* Full size first; then the same lying on its side (older phones only encode wide pictures); then smaller; then recording. */
-async function renderReel(m, onStep, stop) {
-  const seconds = reelSeconds(m), ways = S.video ? [S.video] : [[1080, false], [1080, true], [720, false], [720, true], 'live'];
+/* Full size first; then the same lying on its side (older phones only encode wide pictures); then smaller; then recording.
+   clips: the narration, [{buf, at}]. The answer says how the sound went in: 'aac', 'opus', 'recorded', 'none' (it could not), '' (there was none). */
+async function renderReel(m, clips, onStep, stop) {
+  const seconds = m.total, pcm = clips && clips.length ? await mixSound(clips, seconds) : null;
+  const ways = S.video ? [S.video] : [[1080, false], [1080, true], [720, false], [720, true], 'live'];
   let last = null;
   for (const way of ways) {
     const width = way === 'live' ? 720 : way[0], stage = blank(width, width * 16 / 9), paint = t => paintReel(stage, m, t);
     try {
-      const blob = way === 'live' ? await recordLive(stage, paint, seconds, REEL_FPS, onStep, stop) : await encodeFrames(stage, paint, seconds, REEL_FPS, way[1], onStep, stop);
-      if (blob) return {blob, way: way === 'live' ? 'live' : width + (way[1] ? ' turned' : ''), seconds};
+      if (way === 'live') return {blob: await recordLive(stage, paint, seconds, REEL_FPS, onStep, stop, pcm), way: 'live', seconds, sound: pcm ? 'recorded' : ''};
+      const video = await encodeFrames(stage, paint, seconds, REEL_FPS, way[1], p => onStep(pcm ? p * 0.94 : p), stop);
+      if (!video) continue;
+      const audio = pcm ? await encodeSound(pcm, stop) : null;
+      return {blob: mp4File(video, audio), way: width + (way[1] ? ' turned' : ''), seconds, sound: audio ? audio.kind : pcm ? 'none' : ''};
     } catch (e) { if (e && e.silent) throw e; last = e; }
   }
   throw last instanceof Err ? last : new Err('ساخت ویدیو روی این دستگاه انجام نشد' + (last && last.message ? ' (' + last.message + ')' : '') + '.');
@@ -6054,58 +6396,85 @@ async function renderReel(m, onStep, stop) {
 
 function studio(init, done) {
   init = init || {};
-  const m = {kind: init.kind === 'reel' ? 'reel' : 'image', style: 'photo', scenes: 4, pics: S.st.studio.image !== 'off', look: Math.floor(Math.random() * LOOKS.length), words: true, shots: []};
+  const m = {kind: init.kind === 'reel' ? 'reel' : 'image', style: 'photo', scenes: 4, pics: S.st.studio.image !== 'off', look: Math.floor(Math.random() * LOOKS.length), words: true, shots: [],
+    narr: !!S.st.studio.voice, speaker: S.st.studio.speaker || 'nova', voice: 'none', own: null};
   const stop = {on: false}, handle = () => (S.st.connected ? S.st.account.username : S.st.handle) || '';
-  let timer = 0, anim = 0, jobId = '';
-  const quit = () => { clearTimeout(timer); cancelAnimationFrame(anim); if (jobId) { POST('/api/studio/job/' + jobId + '/cancel').catch(() => {}); jobId = ''; } };
+  let timer = 0, anim = 0, jobId = '', player = null;
+  const hush = () => { if (player) { const p = player; player = null; p.ac.close().catch(() => {}); } };
+  const quit = () => { clearTimeout(timer); cancelAnimationFrame(anim); hush(); if (jobId) { POST('/api/studio/job/' + jobId + '/cancel').catch(() => {}); jobId = ''; } };
   const s = sheet('بساز', {onclose: () => { stop.on = true; quit(); }});
   const idea = h('textarea', {class: 'in', rows: 3, placeholder: 'مثلاً: تخفیف ۲۰٪ لاتهٔ پاییزی تا آخر هفته', 'aria-label': 'ایدهٔ پست', value: init.idea || ''});
-  const demo = () => (S.st.demo ? h('div', {class: 'muted sm'}, 'حالت نمایشی: متن‌ها و تصویرها ساختگی‌اند؛ در اجرای واقعی از سرویس‌های هوش مصنوعی می‌آیند.') : null);
+  const demo = () => (S.st.demo ? h('div', {class: 'muted sm'}, 'حالت نمایشی: متن‌ها، تصویرها و صدای گوینده ساختگی‌اند؛ در اجرای واقعی از سرویس‌های هوش مصنوعی می‌آیند.') : null);
 
   const form = () => {
     quit();
     const styles = [['photo', 'عکس واقعی'], ['art', 'تصویرسازی'], ['minimal', 'مینیمال'], ['3d', 'سه‌بعدی']];
-    const off = S.st.studio.image === 'off';
+    const off = S.st.studio.image === 'off', can = !!S.st.studio.voice;
     fill(s.body, field('ایده‌ات را بنویس', idea),
       segment([['image', 'عکس'], ['reel', 'ویدیو (ریل)']], m.kind, v => { m.kind = v; form(); }),
       m.kind === 'reel' ? [h('label', {class: 'f'}, 'چند صحنه؟'), segment([[3, '۳'], [4, '۴'], [5, '۵']], m.scenes, v => { m.scenes = v; form(); })] : null,
       h('label', {class: 'f'}, 'سبک تصویر'), h('div', {class: 'chips'}, styles.map(x => h('button', {class: 'chip' + (m.style === x[0] ? ' on' : ''), 'data-style': x[0], onclick: () => { m.style = x[0]; form(); }}, x[1]))),
-      h('div', {class: 'row'}, h('div', {class: 'grow'}, h('b', null, 'تصویر با هوش مصنوعی'),
+      h('div', {class: 'row', 'data-opt': 'pics'}, h('div', {class: 'grow'}, h('b', null, 'تصویر با هوش مصنوعی'),
           h('div', {class: 'muted sm'}, off ? 'در تنظیمات خاموش است؛ طرح‌های خود برنامه استفاده می‌شود.' : S.st.studio.pollen || S.st.studio.custom ? 'با کلید خودت ساخته می‌شود.'
             : m.kind === 'reel' ? 'سرویس‌های رایگان کند و کوچک‌اند؛ برای ریل یکی دو دقیقه صبر لازم است.' : 'از سرویس رایگان می‌آید؛ چند ثانیه تا یک دقیقه طول می‌کشد.')),
-        off ? null : toggle(m.pics, async v => { m.pics = v; }, 'تصویر با هوش مصنوعی')), demo());
+        off ? null : toggle(m.pics, async v => { m.pics = v; }, 'تصویر با هوش مصنوعی')),
+      m.kind === 'reel' ? h('div', {class: 'row', 'data-opt': 'voice'}, h('div', {class: 'grow'}, h('b', null, 'گوینده (صداگذاری)'),
+          h('div', {class: 'muted sm'}, can ? 'متن هر صحنه نوشته می‌شود و گویندهٔ هوش مصنوعی آن را می‌خواند.'
+            : 'گویندهٔ هوش مصنوعی کلید Pollinations می‌خواهد (تنظیمات ← ساخت عکس و ویدیو). بدون کلید، بعد از ساخت می‌توانی صدای خودت را روی ویدیو ضبط کنی.')),
+        can ? toggle(m.narr, async v => { m.narr = v; }, 'گوینده') : null) : null, demo());
     s.setFoot(h('button', {class: 'btn pri', 'data-studio-go': '1', onclick: e => run(e.currentTarget, start)}, icon('spark'), m.kind === 'reel' ? 'ویدیو را بساز' : 'عکس را بساز'));
   };
   const working = job => {
-    const got = job.pictures.filter(p => p.file).length;
+    const got = job.pictures.filter(p => p.file).length, read = job.voices.filter(x => x.file).length;
     fill(s.body, h('div', {class: 'empty'}, h('i', {class: 'spin'}), h('b', null, job.step || 'در حال ساختن…'),
+      job.voices.length > 1 ? h('div', {class: 'muted sm'}, fa(read) + ' از ' + fa(job.voices.length) + ' صدا آماده است') : null,
       job.pictures.length > 1 ? h('div', {class: 'muted sm'}, fa(got) + ' از ' + fa(job.pictures.length) + ' تصویر آماده است') : null,
       h('div', {class: 'muted sm'}, 'همین صفحه را باز نگه دار.')),
       got ? h('div', {class: 'strip'}, job.pictures.filter(p => p.file).map(p => thumb(p.preview, 'image', 'mitem'))) : null);
-    s.setFoot(h('button', {class: 'btn', onclick: form}, icon('x'), 'لغو'));
+    s.setFoot(h('button', {class: 'btn', onclick: () => (m.plan ? result() : form())}, icon('x'), 'لغو'));
   };
   const watch = (job, then) => {
+    cancelAnimationFrame(anim); hush();
     jobId = job.id; working(job);
+    const back = () => (m.plan ? result() : form());
     const look = async () => {
       if (stop.on || jobId !== job.id) return;
-      try { job = await GET('/api/studio/job/' + job.id); } catch (e) { jobId = ''; toast(e.message, 'bad'); return form(); }
+      try { job = await GET('/api/studio/job/' + job.id); } catch (e) { jobId = ''; toast(e.message, 'bad'); return back(); }
       if (stop.on || jobId !== job.id) return;
       if (job.status === 'running') { working(job); timer = setTimeout(look, 900); return; }
       jobId = '';
-      if (job.status !== 'done') { if (job.status === 'failed') toast(job.error || 'ساخته نشد', 'bad'); return form(); }
-      try { await then(job); } catch (e) { toast((e && e.message) || 'خطا', 'bad'); form(); }
+      if (job.status !== 'done') { if (job.status === 'failed') toast(job.error || 'ساخته نشد', 'bad'); return back(); }
+      try { await then(job); } catch (e) { toast((e && e.message) || 'خطا', 'bad'); back(); }
     };
     timer = setTimeout(look, 500);
   };
+  const more = notes => { m.notes = (m.notes || []).concat(notes.filter(x => !(m.notes || []).includes(x))); };
+  /* the narration clips of a job go to their scenes; texts: what each of them was asked to say */
+  const loadVoices = (voices, idxs, texts) => Promise.all(voices.map(async (v, j) => {
+    const sh = m.shots[idxs[j]];
+    sh.vwhy = v.why || '';
+    if (!v.preview) return;
+    try {
+      const res = await fetch(v.preview, {credentials: 'same-origin'});
+      if (!res.ok) throw new Error('missing');
+      const buf = await decodeSound(await res.arrayBuffer());
+      sh.clip = {buf, dur: buf.duration, text: texts[j]};
+    } catch (e) { sh.vwhy = 'صدای این صحنه باز نشد.'; }
+  }));
   const start = async () => {
     const text = idea.value.trim();
     if (text.length < 3) { toast('ایده‌ات را در یک جمله بنویس', 'bad'); return; }
-    watch(await POST('/api/studio/make', {idea: text, kind: m.kind, scenes: m.scenes, style: m.style, pictures: m.pics}), async job => {
+    m.plan = null;
+    watch(await POST('/api/studio/make', {idea: text, kind: m.kind, scenes: m.scenes, style: m.style, pictures: m.pics, voice: m.kind === 'reel' && m.narr && !!S.st.studio.voice, speaker: m.speaker}), async job => {
       const plan = job.plan;
-      Object.assign(m, {plan, notes: job.notes, head: plan.headline, sub: plan.sub, caption: (plan.caption + '\n\n' + plan.hashtags.join(' ')).trim()});
-      m.shots = job.pictures.map((p, i) => ({prompt: p.prompt, src: p.preview, from: p.source, why: p.why, img: null, text: plan.scenes[i] ? plan.scenes[i].text : ''}));
-      await Promise.all(m.shots.map(async sh => { if (sh.src) { try { sh.img = await loadPic(sh.src); } catch (e) { sh.src = ''; sh.why = 'تصویر باز نشد.'; } } }));
+      Object.assign(m, {notes: job.notes, head: plan.headline, sub: plan.sub, caption: (plan.caption + '\n\n' + plan.hashtags.join(' ')).trim(), own: null, voice: 'none'});
+      m.shots = job.pictures.map((p, i) => ({prompt: p.prompt, src: p.preview, from: p.source, why: p.why, img: null, clip: null, vwhy: '',
+        text: plan.scenes[i] ? plan.scenes[i].text : '', say: plan.scenes[i] ? (plan.scenes[i].say || plan.scenes[i].text || '').trim() : ''}));
+      await Promise.all(m.shots.map(async sh => { if (sh.src) { try { sh.img = await loadPic(sh.src); } catch (e) { sh.src = ''; sh.why = 'تصویر باز نشد.'; } } })
+        .concat(loadVoices(job.voices, job.voices.map((x, i) => i), m.shots.map(x => x.say))));
+      if (m.shots.some(x => x.clip)) m.voice = 'ai';
       await faceReady();
+      m.plan = plan;
       result();
     });
   };
@@ -6116,10 +6485,78 @@ function studio(init, done) {
       sh.prompt = p.prompt || prompt;
       if (p.file) Object.assign(sh, {src: p.preview, from: p.source, why: '', img: await loadPic(p.preview)});
       else toast(p.why || 'تصویر ساخته نشد', 'bad');
-      m.notes = (m.notes || []).concat(job.notes.filter(x => !(m.notes || []).includes(x)));
+      more(job.notes);
       result();
     });
   });
+  /* the narrator reads the given scenes (again); then() runs when every one of them has its voice */
+  const readScenes = (idxs, then) => run(null, async () => {
+    const texts = idxs.map(i => m.shots[i].say);
+    watch(await POST('/api/studio/voice', {texts, speaker: m.speaker}), async job => {
+      await loadVoices(job.voices, idxs, texts);
+      more(job.notes);
+      const got = idxs.filter((i, j) => m.shots[i].clip && m.shots[i].clip.text === texts[j]).length;
+      if (m.shots.some(x => x.clip)) m.voice = 'ai';
+      if (got < idxs.length) toast((m.shots.find(x => x.vwhy) || {}).vwhy || 'صدا ساخته نشد', 'bad');
+      if (then && got === idxs.length) return then();
+      result();
+    });
+  });
+  const spoken = sh => (m.voice === 'ai' && sh.clip && sh.say ? sh.clip : null);
+  /* how long every scene lasts: with narration as long as its voice; with the owner's own recording, shared out by the length of the lines */
+  const reel = () => {
+    let durs;
+    if (m.voice === 'mine' && m.own) {
+      const wt = m.shots.map(x => Math.max(8, (x.say || x.text || '').length)), sum = wt.reduce((a, b) => a + b, 0), all = m.own.dur + VOICE_LEAD + VOICE_TAIL;
+      durs = wt.map(x => Math.max(1.6, all * x / sum));
+    } else durs = m.shots.map(x => (spoken(x) ? Math.max(SCENE_SEC, spoken(x).dur + VOICE_LEAD + VOICE_TAIL) : SCENE_SEC));
+    return Object.assign(reelTimes(durs), {scenes: m.shots.map(x => ({img: x.img, text: x.text})), sub: m.sub, handle: handle(), look: m.look});
+  };
+  const clipsOf = mdl => (m.voice === 'mine' && m.own ? [{buf: m.own.buf, at: VOICE_LEAD}]
+    : m.shots.map((x, i) => (spoken(x) ? {buf: x.clip.buf, at: mdl.starts[i] + VOICE_LEAD} : null)).filter(Boolean));
+  const play = async () => {
+    hush();
+    const mdl = reel(), pcm = await mixSound(clipsOf(mdl), mdl.total), ac = new (window.AudioContext || window.webkitAudioContext)();
+    const buf = ac.createBuffer(1, pcm.length, AUDIO_RATE), node = ac.createBufferSource();
+    buf.copyToChannel(pcm, 0); node.buffer = buf; node.connect(ac.destination);
+    await ac.resume();
+    node.onended = () => { if (player && player.ac === ac) hush(); };
+    node.start();
+    player = {ac, t0: ac.currentTime, total: mdl.total};
+  };
+  const recordSheet = () => {
+    hush();
+    const r = sheet('ضبط صدای خودم'), lines = m.shots.map(x => x.say || x.text).filter(Boolean);
+    const clock = h('b', null, '۰ ثانیه'), status = h('div', {class: 'muted sm'}, 'متن را یک بار مرور کن. بعد «شروع ضبط» را بزن و آرام و پیوسته بخوان؛ صحنه‌ها با صدای تو هماهنگ می‌شوند.'), audio = h('audio', {controls: true, class: 'hide'});
+    let rec = null, stream = null, parts = [], t0 = 0, tick = 0, take = null;
+    const free = () => { clearInterval(tick); if (stream) stream.getTracks().forEach(tr => tr.stop()); stream = null; };
+    r.onclose = () => { if (rec && rec.state === 'recording') { rec.onstop = null; rec.stop(); } free(); };
+    const foot = st => r.setFoot(st === 'rec' ? h('button', {class: 'btn danger', 'data-rec': 'stop', onclick: () => rec.stop()}, icon('x'), 'پایان ضبط')
+      : [h('button', {class: 'btn', 'data-rec': 'start', onclick: e => run(e.currentTarget, begin)}, icon('mic'), st === 'done' ? 'دوباره' : 'شروع ضبط'),
+        st === 'done' ? h('button', {class: 'btn pri', 'data-rec': 'use', onclick: () => { m.own = take; m.voice = 'mine'; r.close(); result(); }}, icon('check'), 'همین خوبه') : null]);
+    const begin = async () => {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') throw new Err('این مرورگر ضبط صدا ندارد؛ با Chrome امتحان کن.');
+      try { stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: true, noiseSuppression: true}}); }
+      catch (e) { throw new Err(e && e.name === 'NotAllowedError' ? 'اجازهٔ میکروفون داده نشد. در تنظیمات مرورگر به این صفحه اجازهٔ میکروفون بده.' : 'میکروفون در دسترس نیست.'); }
+      parts = []; rec = new MediaRecorder(stream);
+      rec.ondataavailable = e => { if (e.data && e.data.size) parts.push(e.data); };
+      rec.onstop = async () => {
+        free();
+        try {
+          const blob = new Blob(parts, {type: rec.mimeType || 'audio/webm'}), buf = await decodeSound(await blob.arrayBuffer());
+          if (buf.duration < 1) throw new Error('too short');
+          take = {buf, dur: buf.duration};
+          audio.src = URL.createObjectURL(blob); audio.classList.remove('hide');
+          fill(status, 'ضبط شد: ' + fa(Math.round(buf.duration)) + ' ثانیه. گوش بده؛ اگر خوب بود «همین خوبه» را بزن.'); foot('done');
+        } catch (e) { fill(status, 'این ضبط خوانده نشد یا خیلی کوتاه بود؛ دوباره امتحان کن.'); foot('idle'); }
+      };
+      rec.start(); t0 = performance.now(); audio.classList.add('hide'); foot('rec');
+      fill(status, 'در حال ضبط… متن پایین را بخوان و در پایان «پایان ضبط» را بزن.');
+      tick = setInterval(() => { const sec = (performance.now() - t0) / 1000; fill(clock, fa(Math.floor(sec)) + ' ثانیه'); if (sec > 90 && rec.state === 'recording') rec.stop(); }, 250);
+    };
+    add(r.body, status, h('div', {class: 'card col'}, lines.map((l, i) => h('div', {class: 'line', dir: 'auto'}, fa(i + 1) + '. ' + l))), h('div', {class: 'row'}, icon('clock'), clock), audio);
+    foot('idle');
+  };
   const facts = () => {
     const drawn = m.shots.filter(x => x.img).length, why = (m.shots.find(x => !x.img && x.why) || {}).why;
     return [m.plan.source === 'offline' ? h('div', {class: 'sm amber'}, 'متن‌ها الگوی آماده‌اند (' + (NO_PLAN[m.plan.why] || 'دستیار جواب نداد') + '). می‌توانی خودت عوضشان کنی.') : null,
@@ -6135,22 +6572,50 @@ function studio(init, done) {
       h('div', {class: 'col'}, h('div', {class: 'muted sm'}, 'بنویس تصویر چه چیزی را نشان بدهد. فارسی هم می‌شود (دستیار به انگلیسی برمی‌گرداند)، ولی انگلیسی سریع‌تر و دقیق‌تر است.'), ta,
         h('button', {class: 'btn', 'data-redo': i, onclick: () => redo(i, ta.value.trim())}, icon('refresh'), 'تصویر تازه بساز')));
   };
+  /* what the narrator says on scene i; a changed line is read again when the video is made */
+  const sayField = i => {
+    const sh = m.shots[i], el = h('textarea', {class: 'in', rows: 2, dir: 'auto', 'aria-label': 'متن گوینده ' + (i + 1), value: sh.say || ''});
+    const stale = h('div', {class: 'sm amber hide'}, 'متن عوض شد؛ موقع ساخت ویدیو دوباره خوانده می‌شود.');
+    el.addEventListener('input', () => { sh.say = el.value.trim(); stale.classList.toggle('hide', !(sh.say && (!sh.clip || sh.clip.text !== sh.say))); });
+    return [h('label', {class: 'f'}, 'متن گوینده، صحنهٔ ' + fa(i + 1) + (spoken(sh) ? ' (' + fa(Math.round(sh.clip.dur * 10) / 10) + ' ثانیه)' : '')), el, stale,
+      sh.vwhy && !sh.clip ? h('div', {class: 'sm down'}, sh.vwhy) : null];
+  };
+  const voiceCard = () => {
+    const can = !!S.st.studio.voice, total = fa(Math.round(reel().total)) + ' ثانیه', all = m.shots.map((x, i) => i);
+    const who = h('select', {class: 'in', 'aria-label': 'گوینده'}, SPEAKERS.concat(SPEAKERS.some(x => x[0] === m.speaker) ? [] : [[m.speaker, m.speaker]]).map(x => h('option', {value: x[0]}, x[1])));
+    who.value = m.speaker;
+    who.addEventListener('change', () => { m.speaker = who.value; readScenes(all.filter(i => m.shots[i].say)); });
+    return h('div', {class: 'card col', 'data-voice': m.voice}, h('div', {class: 'row'}, h('b', {class: 'grow'}, 'صدا'),
+        m.voice !== 'none' ? h('button', {class: 'btn sm', 'data-voice-do': 'play', onclick: e => run(e.currentTarget, play)}, icon('play'), 'پخش با صدا') : null),
+      h('div', {class: 'muted sm'}, m.voice === 'ai' ? 'گویندهٔ هوش مصنوعی متن هر صحنه را می‌خواند؛ ویدیو ' + total + ' می‌شود.' : m.voice === 'mine' ? 'صدای خودت روی ویدیو می‌نشیند؛ ویدیو ' + total + ' می‌شود.'
+        : 'ویدیو بی‌صداست. ' + (can ? 'گوینده را روشن کن یا صدای خودت را ضبط کن.' : 'گویندهٔ هوش مصنوعی کلید Pollinations می‌خواهد (تنظیمات ← ساخت عکس و ویدیو)؛ بدون کلید می‌توانی صدای خودت را ضبط کنی.')),
+      m.voice === 'ai' ? [field('گوینده', who), m.shots.map((sh, i) => sayField(i)), S.st.demo ? h('div', {class: 'muted sm'}, 'حالت نمایشی: به‌جای صدای گوینده بوق می‌شنوی.') : null] : null,
+      h('div', {class: 'row wrap'},
+        can && m.voice !== 'ai' ? h('button', {class: 'btn sm', 'data-voice-do': 'ai', onclick: () => readScenes(all.filter(i => m.shots[i].say))}, icon('spark'), 'گویندهٔ هوش مصنوعی') : null,
+        h('button', {class: 'btn sm', 'data-voice-do': 'record', onclick: recordSheet}, icon('mic'), m.own ? 'ضبط دوباره' : 'ضبط صدای خودم'),
+        m.voice !== 'mine' && m.own ? h('button', {class: 'btn sm', 'data-voice-do': 'mine', onclick: () => { hush(); m.voice = 'mine'; result(); }}, 'صدای ضبط‌شدهٔ خودم') : null,
+        m.voice !== 'none' ? h('button', {class: 'btn sm', 'data-voice-do': 'off', onclick: () => { hush(); m.voice = 'none'; result(); }}, 'بی‌صدا') : null));
+  };
   const result = () => {
-    cancelAnimationFrame(anim);
+    cancelAnimationFrame(anim); hush();
     const text = (label, key, obj) => { const el = h('input', {class: 'in', 'aria-label': label, value: obj[key] || ''}); el.addEventListener('input', () => { obj[key] = el.value; paint(); }); return field(label, el); };
     const stage = m.kind === 'reel' ? blank(540, 960) : blank(1080, 1350), t0 = performance.now();
     stage.className = 'stage' + (m.kind === 'reel' ? ' tall' : '');
-    const reel = () => ({scenes: m.shots.map(x => ({img: x.img, text: x.text})), sub: m.sub, handle: handle(), look: m.look});
     const paint = () => { if (m.kind === 'image') paintPost(stage, {img: m.shots[0].img, head: m.head, sub: m.sub, handle: handle(), look: m.look, words: m.words}); };
-    const loop = () => { if (!stage.isConnected) return; paintReel(stage, reel(), ((performance.now() - t0) / 1000) % reelSeconds(reel())); anim = requestAnimationFrame(loop); };
+    const loop = () => {
+      if (!stage.isConnected) return;
+      const mdl = reel();
+      paintReel(stage, mdl, player ? Math.min(mdl.total, player.ac.currentTime - player.t0) : ((performance.now() - t0) / 1000) % mdl.total);
+      anim = requestAnimationFrame(loop);
+    };
     const next = h('button', {class: 'btn sm', 'data-look': '1', onclick: () => { m.look++; paint(); }}, icon('refresh'), m.kind === 'reel' || m.shots[0].img ? 'چیدمان دیگر' : 'رنگ دیگر');
     fill(s.body, stage, facts(),
       m.kind === 'image' ? [text('نوشتهٔ روی تصویر', 'head', m), text('خط دوم (اختیاری)', 'sub', m),
           h('div', {class: 'row'}, m.shots[0].img ? [h('span', {class: 'grow'}, 'نوشته روی تصویر باشد'), toggle(m.words, async v => { m.words = v; paint(); }, 'نوشته روی تصویر')] : h('span', {class: 'grow'}), next), describe(0)]
-        : [m.shots.map((sh, i) => text('نوشتهٔ صحنهٔ ' + fa(i + 1), 'text', sh)), text('خط آخر (اختیاری)', 'sub', m), h('div', {class: 'row'}, h('span', {class: 'grow muted sm'}, 'ویدیو بی‌صداست؛ آهنگ را موقع انتشار در اینستاگرام اضافه کن.'), next),
+        : [voiceCard(), m.shots.map((sh, i) => text('نوشتهٔ صحنهٔ ' + fa(i + 1), 'text', sh)), text('خط آخر (اختیاری)', 'sub', m), h('div', {class: 'row'}, h('span', {class: 'grow muted sm'}, 'آهنگ زمینه را موقع انتشار در اینستاگرام اضافه کن.'), next),
           m.shots.map((sh, i) => describe(i))],
       h('label', {class: 'f'}, 'کپشن (در مرحلهٔ بعد می‌توانی عوضش کنی)'), h('div', {class: 'card pre sm', dir: 'auto', 'data-caption': '1'}, m.caption));
-    s.setFoot(h('button', {class: 'btn', onclick: form}, 'از نو'), h('button', {class: 'btn pri', 'data-studio-done': '1', onclick: e => run(e.currentTarget, m.kind === 'reel' ? () => film(reel()) : finish)}, icon('check'), m.kind === 'reel' ? 'ساخت ویدیو' : 'ادامه'));
+    s.setFoot(h('button', {class: 'btn', onclick: form}, 'از نو'), h('button', {class: 'btn pri', 'data-studio-done': '1', onclick: e => run(e.currentTarget, m.kind === 'reel' ? film : finish)}, icon('check'), m.kind === 'reel' ? 'ساخت ویدیو' : 'ادامه'));
     if (m.kind === 'reel') loop(); else paint();
   };
   const finish = async () => {
@@ -6160,19 +6625,23 @@ function studio(init, done) {
     s.close();
     done({kind: 'image', caption: m.caption, media: [{file: up.id, type: up.type, preview: up.preview}]});
   };
-  const film = async model => {
-    cancelAnimationFrame(anim);
-    const bar = h('i'), pct = h('b', null, '۰٪'), halt = {on: false};
+  const film = async () => {
+    cancelAnimationFrame(anim); hush();
+    const stale = m.voice === 'ai' ? m.shots.map((x, i) => i).filter(i => m.shots[i].say && (!m.shots[i].clip || m.shots[i].clip.text !== m.shots[i].say)) : [];
+    if (stale.length) return readScenes(stale, film);                   /* lines that were changed are read first */
+    const model = reel(), sound = clipsOf(model), bar = h('i'), pct = h('b', null, '۰٪'), halt = {on: false};
     fill(s.body, h('div', {class: 'empty'}, h('i', {class: 'spin'}), h('div', null, 'در حال ساخت ویدیو… ', pct), h('div', {class: 'bar grow'}, bar), h('div', {class: 'muted sm'}, 'همین صفحه را باز و روشن نگه دار.')));
     s.setFoot(h('button', {class: 'btn', onclick: () => { halt.on = true; }}, icon('x'), 'لغو'));
     let made;
-    try { made = await renderReel(model, p => { bar.style.width = Math.round(p * 100) + '%'; fill(pct, fa(Math.round(p * 100)) + '٪'); }, {get on() { return halt.on || stop.on; }}); }
+    try { made = await renderReel(model, sound, p => { bar.style.width = Math.round(p * 100) + '%'; fill(pct, fa(Math.round(p * 100)) + '٪'); }, {get on() { return halt.on || stop.on; }}); }
     catch (e) { if (!stop.on) result(); if (e && e.silent) return; throw e; }
     fill(pct, '۱۰۰٪');
     const mp4 = made.blob.type === 'video/mp4', up = await api('POST', '/api/upload?name=studio.' + (mp4 ? 'mp4' : 'webm'), made.blob, true);
-    S.made = {way: made.way, type: made.blob.type, size: made.blob.size, seconds: made.seconds, file: up.id};
+    S.made = {way: made.way, type: made.blob.type, size: made.blob.size, seconds: made.seconds, file: up.id, sound: made.sound, voice: m.voice};
     s.close();
     if (!mp4) toast('این مرورگر ویدیو را به شکل WebM ساخت و اینستاگرام شاید آن را نپذیرد؛ با Chrome دوباره بساز.', 'bad');
+    else if (made.sound === 'none') toast('این مرورگر نتوانست صدا را روی ویدیو بگذارد و ویدیو بی‌صدا ساخته شد؛ با Chrome امتحان کن.', 'bad');
+    else if (made.sound === 'opus') toast('صدا با قالب Opus روی ویدیو نشست، چون این مرورگر AAC نمی‌سازد. اگر اینستاگرام صدا را پخش نکرد، ویدیو را با Chrome گوشی بساز.', 'bad');
     done({kind: 'reel', caption: m.caption, media: [{file: up.id, type: up.type, preview: up.preview}]});
   };
   form();
@@ -6385,6 +6854,16 @@ async function settingsSheet() {
   const pollen = inp('', {class: 'in ltr', type: 'password', autocomplete: 'off', 'aria-label': 'کلید Pollinations', placeholder: set.studio.pollen_set ? '•••••• (ذخیره شده)' : 'sk_…'});
   const picUrl = inp(set.studio.url, {class: 'in ltr', placeholder: 'https://…/v1'}), picModel = inp(set.studio.model, {class: 'in ltr', placeholder: 'gpt-image-1'});
   const picKey = inp('', {class: 'in ltr', type: 'password', autocomplete: 'off', placeholder: set.studio.key_set ? '•••••• (ذخیره شده)' : 'کلید API'});
+  const speaker = sel(set.studio.speaker, SPEAKERS.concat(SPEAKERS.some(x => x[0] === set.studio.speaker) ? [] : [[set.studio.speaker, set.studio.speaker]]));
+  speaker.setAttribute('aria-label', 'گوینده');
+  const ttsModel = inp(set.studio.tts_model, {class: 'in ltr', placeholder: 'tts-1', 'aria-label': 'نام مدل صدا'});
+  const testKey = async () => {                        /* a key that was just typed is saved first, then Pollinations is asked about it */
+    if (pollen.value.trim()) { await saveSettings({studio: {pollen: pollen.value}}, false); pollen.value = ''; pollen.placeholder = '•••••• (ذخیره شده)'; }
+    const r = await POST('/api/studio/key'), credit = r.balance == null ? '' : ' اعتبار: ' + fa(Math.round(r.balance * 100) / 100) + ' پولن.';
+    if (!r.audio) toast('کلید پذیرفته شد، ولی اجازهٔ ساخت صدا ندارد. موقع ساختن کلید، دسترسی صدا (audio) را هم روشن کن.' + credit, 'bad');
+    else if (r.balance != null && r.balance <= 0) toast('کلید پذیرفته شد، ولی اعتباری ندارد.' + credit, 'bad');
+    else toast('کلید پذیرفته شد ✓' + credit);
+  };
   const state = (on, text) => h('div', {class: 'row sm'}, h('i', {class: 'dot ' + (on ? '' : 'off')}), h('span', {class: 'grow'}, text));
   add(s.body,
     box('brand', 'home', 'معرفی پیج (برای کپشن‌ها و پاسخ‌ها)', [field('پیج دربارهٔ چیست؟', about), field('لحن نوشتن', tone), field('هشتگ‌های همیشگی پیج', tags),
@@ -6392,10 +6871,13 @@ async function settingsSheet() {
       () => ({brand: {about: about.value, tone: tone.value, hashtags: tags.value, handle: handle.value}})),
     box('studio', 'image', 'ساخت عکس و ویدیو', [h('p', {class: 'muted sm'}, 'ایجنت تصویر را از سرویس‌های هوش مصنوعی می‌گیرد و عکس نهایی و ویدیو را روی همین دستگاه می‌سازد. بدون ثبت‌نام از دو سرویس رایگان استفاده می‌کند: Pollinations (هر ۴۵ ثانیه یک تصویر، با نشان کوچک خودش در گوشه) و AI Horde (تصویر کوچک‌تر، گاهی با صف). اگر هیچ‌کدام جواب ندهند، طرح خود برنامه کشیده می‌شود.'),
         field('سرویس تصویر', picMode),
-        field('کلید Pollinations (اختیاری)', pollen, 'با کلید خودت (از enter.pollinations.ai) تصویرها بزرگ‌تر، بدون انتظار و بدون نشان می‌شوند و متن‌ها را هم مدل بهتری می‌نویسد.'),
-        h('details', {class: 'box'}, h('summary', null, icon('link'), 'سرویس تصویر خودم (سازگار با OpenAI)'), h('div', {class: 'col'}, field('نشانی', picUrl), field('نام مدل', picModel), field('کلید', picKey)))],
-      () => ({studio: {image: picMode.value, pollen: pollen.value, url: picUrl.value, model: picModel.value, key: picKey.value}}),
-      set.studio.pollen_set ? h('button', {class: 'btn danger', onclick: e => run(e.currentTarget, async () => { await saveSettings({studio: {pollen_clear: true}}, 'کلید برداشته شد'); pollen.placeholder = 'sk_…'; e.target.remove(); })}, 'حذف کلید') : null),
+        field('کلید Pollinations (اختیاری)', pollen, 'با کلید خودت (از enter.pollinations.ai) تصویرها بزرگ‌تر، بدون انتظار و بدون نشان می‌شوند، متن‌ها را مدل بهتری می‌نویسد و گویندهٔ هوش مصنوعی برای ویدیو روشن می‌شود. سرویس رایگانِ بدون کلید، صدا ندارد.'),
+        field('گوینده', speaker, 'صدایی که متن ویدیو را می‌خواند. در خود «بساز» هم می‌توانی عوضش کنی و گوش بدهی.'),
+        h('details', {class: 'box'}, h('summary', null, icon('link'), 'سرویس خودم (سازگار با OpenAI)'), h('div', {class: 'col'}, field('نشانی', picUrl), field('نام مدل تصویر', picModel), field('کلید', picKey),
+          field('نام مدل صدا (اختیاری)', ttsModel, 'اگر سرویس خودت گوینده هم دارد (audio/speech)، نام مدلش را بنویس. خالی یعنی گویندهٔ Pollinations.')))],
+      () => ({studio: {image: picMode.value, pollen: pollen.value, url: picUrl.value, model: picModel.value, key: picKey.value, speaker: speaker.value, tts_model: ttsModel.value}}),
+      [h('button', {class: 'btn', 'data-key-test': '1', onclick: e => run(e.currentTarget, testKey)}, 'آزمایش کلید'),
+        set.studio.pollen_set ? h('button', {class: 'btn danger', onclick: e => run(e.currentTarget, async () => { await saveSettings({studio: {pollen_clear: true}}, 'کلید برداشته شد'); pollen.placeholder = 'sk_…'; e.target.remove(); })}, 'حذف کلید') : null]),
     box('ai', 'spark', 'هوش مصنوعی (متن)', [field('سرویس', aiMode, 'در حالت رایگان، متن کامنت/موضوع برای نوشتن پاسخ به یک سرویس عمومی فرستاده می‌شود و هر ۴۵ ثانیه یک پاسخ می‌دهد (با کلید Pollinations در بخش «ساخت عکس و ویدیو» این محدودیت نیست).'), field('نشانی سرویس خودم', aiUrl), field('نام مدل', aiModel), field('کلید', aiKey)],
       () => ({ai: {mode: aiMode.value, url: aiUrl.value, model: aiModel.value, key: aiKey.value}})),
     box('media', 'upload', 'انتشار از گالری (لینک عمومی)', [h('p', {class: 'muted sm'}, 'اینستاگرام فایل را خودش از یک نشانی اینترنتی برمی‌دارد. برای عکس و ویدیویی که از گالری انتخاب می‌کنی، ایجنت باید چند دقیقه یک لینک عمومی برایش بسازد:'),
@@ -6427,7 +6909,8 @@ function helpSheet() {
   add(s.body,
     sec('ساختن پست از روی یک ایده', 'در «بساز» ایده‌ات را بنویس: ایجنت کپشن و هشتگ می‌نویسد، تصویر را از سرویس هوش مصنوعی می‌گیرد و عکس نهایی یا ریل را روی همین دستگاه می‌سازد.',
       'سرویس‌های رایگان تصویر کند و کوچک‌اند و گاهی جواب نمی‌دهند؛ آن وقت ایجنت طرح خودش را می‌کشد. با کلید Pollinations (در تنظیمات) نتیجه بهتر و سریع‌تر است.',
-      'ریل از چند تصویر با حرکت و نوشته ساخته می‌شود و صدا ندارد؛ آهنگ را موقع انتشار در اینستاگرام اضافه کن. فیلم‌سازی کامل با هوش مصنوعی فقط در سرویس‌های پولی هست.'),
+      'ریل از چند تصویر با حرکت و نوشته ساخته می‌شود. با کلید Pollinations گویندهٔ هوش مصنوعی متن هر صحنه را می‌خواند؛ بدون کلید می‌توانی صدای خودت را روی ویدیو ضبط کنی. آهنگ زمینه را موقع انتشار در اینستاگرام اضافه کن.',
+      'فیلمی که خودِ هوش مصنوعی از صفر بسازد (آدم و صحنهٔ متحرک) فقط در سرویس‌های پولی هست و در این ایجنت نیست.'),
     sec('انتشار با خودت (بدون اتصال پیج)', 'پست آماده را باز کن: «ارسال به اینستاگرام» فایل را به اپ می‌دهد و کپشن را کپی می‌کند؛ آنجا بچسبانش. اگر این دکمه نبود، «ذخیره» و «کپی کپشن» را بزن.',
       'برای هر پست می‌توانی یادآوری بگذاری؛ سر وقت در پنل (و در تلگرام، اگر وصلش کرده باشی) خبر می‌دهد. بعد از انتشار «منتشر کردم» را بزن.'),
     sec('ایجنت چه کارهایی می‌کند؟', 'با اتصال پیج: پست، پست چندتایی، ریل و استوری را همین حالا یا در زمان دلخواه منتشر می‌کند.', 'کامنت‌ها و دایرکت‌ها را در یک صندوق نشان می‌دهد و می‌توانی از همین‌جا جواب بدهی، مخفی یا حذف کنی.',

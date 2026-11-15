@@ -1,9 +1,12 @@
 """Checks the files the studio made during `serve.py byhand.mjs hand`: are the reels MP4 files that a normal
-player decodes from the first frame to the last, upright and of the right length?
+player decodes from the first frame to the last, upright and of the right length? And the narrated ones: is there
+a sound track that decodes, lasts as long as the picture, and has speech where the scenes are?
 
     pip install imageio-ffmpeg        (brings an ffmpeg; one on the PATH is used as well)
     python check_made.py [folder]     (default: ./shots)
 """
+import array
+import json
 import os
 import re
 import shutil
@@ -35,6 +38,63 @@ def say(ok, title, text):
     if os.environ.get("GITHUB_ACTIONS"):
         print("::%s title=%s::%s" % ("notice" if ok else "error", title, text))
     return ok
+
+
+def heard(exe, path):
+    """The sound of a file as the decoder gives it: (seconds, loudest sample, stretches of sound, what the decoder complained about)."""
+    run = subprocess.run([exe, "-hide_banner", "-v", "error", "-i", path, "-map", "0:a:0", "-f", "s16le", "-ac", "1", "-ar", "48000", "-"],
+                         stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+    pcm = array.array("h")
+    pcm.frombytes(run.stdout[:len(run.stdout) // 2 * 2])
+    if sys.byteorder == "big":
+        pcm.byteswap()
+    step, loud = 2400, []                               # 50 ms windows
+    for i in range(0, len(pcm) - step + 1, step):
+        loud.append(max(abs(x) for x in pcm[i:i + step]) > 1200)
+    stretches, quiet = 0, 99
+    for on in loud:                                    # sound after at least 0.4 s of quiet begins a new stretch
+        if on:
+            stretches += quiet >= 8
+            quiet = 0
+        else:
+            quiet += 1
+    return len(pcm) / 48000.0, max([abs(x) for x in pcm] or [0]), stretches, run.stderr.decode("utf-8", "replace").strip()
+
+
+def narrated(exe, folder):
+    """The reels with sound; what the panel said about each is in made.json."""
+    listing = os.path.join(folder, "made.json")
+    if not os.path.exists(listing):
+        return say(False, "made.json", "the narrated reels were not made")
+    with open(listing, encoding="utf-8") as fh:
+        made = json.load(fh)
+    good = len(made) >= 3
+    for name, m in sorted(made.items()):
+        path = os.path.join(folder, name)
+        if not os.path.exists(path):
+            good &= say(False, name, "the file was not made")
+            continue
+        info = subprocess.run([exe, "-hide_banner", "-i", path], stderr=subprocess.PIPE, stdout=subprocess.PIPE, universal_newlines=True).stderr
+        video, audio = re.search(r"Video: (\w+)[^\n]*?, (\d+x\d+)", info), re.search(r"Audio: (\w+)[^\n]*?(\d+) Hz, (\w+)", info)
+        errors = subprocess.run([exe, "-hide_banner", "-v", "error", "-i", path, "-map", "0:v:0", "-f", "null", "-"],
+                                stderr=subprocess.PIPE, stdout=subprocess.PIPE, universal_newlines=True).stderr.strip()
+        shown = subprocess.run([exe, "-hide_banner", "-i", path, "-map", "0:v:0", "-vf", "showinfo", "-f", "null", "-"],
+                               stderr=subprocess.PIPE, stdout=subprocess.PIPE, universal_newlines=True).stderr
+        frames = len(re.findall(r"\] n: *\d+ ", shown))
+        seconds, peak, stretches, complaint = heard(exe, path) if audio else (0, 0, 0, "no sound track")
+        loose = bool(m.get("loose"))                   # recorded by the browser while it played: lengths are near, not exact
+        ok = (bool(video) and video.group(1) == "h264" and video.group(2) == "%dx%d" % (m["w"], m["h"]) and bool(audio)
+              and audio.group(1) in ("aac", "opus") and audio.group(2) == "48000" and not complaint and peak > 3000
+              and abs(seconds - m["seconds"]) < (1.0 if loose else 0.08)
+              and (loose or (not errors and frames == int(round(m["seconds"] * 30))))
+              and ("speech" not in m or stretches == m["speech"])
+              and (loose or audio.group(1) == m["sound"]))
+        good &= say(ok, name, "%s %s, %d frames; sound: %s %s Hz %s, %.2f s (the reel: %.2f s), loudest %d of 32767, %d stretches of sound%s%s" % (
+            video.group(1) if video else "?", video.group(2) if video else "?", frames, audio.group(1) if audio else "none",
+            audio.group(2) if audio else "?", audio.group(3) if audio else "?", seconds, m["seconds"], peak, stretches,
+            ("; decoder said: " + (complaint or errors)[:300]) if (complaint or (errors and not loose)) else "",
+            "; made by: " + str(m.get("voice"))))
+    return good
 
 
 def main():
@@ -70,6 +130,7 @@ def main():
         good &= say(ok, name, "%s %s, stored %s, shown %s, %d frames, %.2f s, %d bytes, index first: %s%s" % (
             codec.group(1) if codec else "?", codec.group(2) if codec else "?", stored if (", %s" % stored) in info else "?",
             ",".join(sorted(sizes)) or "?", count, seconds, os.path.getsize(path), first, ("; decoder said: " + errors[:300]) if errors else ""))
+    good &= narrated(exe, folder)
     for name in sorted(os.listdir(folder)):
         if name.startswith("made-reel-live."):
             path = os.path.join(folder, name)

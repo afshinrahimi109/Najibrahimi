@@ -1,6 +1,6 @@
 // No page connected: the owner chooses to post by hand, lets the studio make a picture and a reel from an idea,
 // and takes file and caption out of the panel.     Run with:  python3 serve.py byhand.mjs hand
-import {start, BASE, out, sleep} from './lib.mjs';
+import {start, BASE, AI_KEY, out, sleep} from './lib.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 const t = await start();
@@ -15,6 +15,13 @@ const stageInk = () => page.evaluate(() => {          // a rough fingerprint of 
   for (let i = 0; i < d.length; i += 4 * 997) { sum = (sum * 31 + d[i] + d[i + 1] * 3 + d[i + 2] * 7) % 1000000007; seen.add(d[i] >> 4 << 8 | d[i + 1] >> 4 << 4 | d[i + 2] >> 4); }
   return {sum, colours: seen.size, w: cv.width, h: cv.height};
 });
+const sounds = {};                                    // file name → what the panel says about the reel it made (read by check_made.py)
+const voiceCalls = [];                                // what the narrator was asked to read, call by call
+page.on('request', r => { if (r.method() === 'POST' && r.url().endsWith('/api/studio/voice')) voiceCalls.push(JSON.parse(r.postData())); });
+const speechSeconds = text => Math.min(20, Math.max(0.6, Math.floor(100 * (0.35 + 0.07 * text.length)) / 100));     // the simulator's speaker
+const reelSeconds = says => says.reduce((sum, x) => sum + Math.max(3.2, speechSeconds(x) + 0.95), 0) + 0.2;
+const voiceCard = () => t.inTop(s => { const c = s.querySelector('[data-voice]'); return c && {mode: c.dataset.voice, text: c.textContent, ai: !!c.querySelector('[data-voice-do="ai"]'), play: !!c.querySelector('[data-voice-do="play"]'),
+  says: [...c.querySelectorAll('textarea[aria-label^="متن گوینده"]')].map(e => e.value), speaker: (c.querySelector('select[aria-label="گوینده"]') || {}).value}; });
 const saveFile = async (id, name) => {
   const b64 = await page.evaluate(async id => { const b = await (await fetch('/api/file/' + id)).arrayBuffer(); let s = ''; const u = new Uint8Array(b); for (let i = 0; i < u.length; i += 32768) s += String.fromCharCode.apply(null, u.subarray(i, i + 32768)); return btoa(s); }, id);
   fs.writeFileSync(path.join(out, name), Buffer.from(b64, 'base64'));
@@ -184,7 +191,127 @@ try {
   t.check('recording is the last resort', live.m.way === 'live' && live.m.size > 50000 && live.probe[0] === 720 && live.probe[1] === 1280, live);
   await page.evaluate(() => { S.video = null; });
 
-  // 8. settings of the studio; nothing hostile ran
+  // 8. no key, so no AI narrator: the owner's own voice is recorded and laid on the reel
+  const drawnReel = async (ideaText, scenes) => {
+    await page.click('#fab'); await sleep(400);
+    await page.click('.sheet [data-add="ai"]'); await sleep(400);
+    await t.type('textarea[aria-label="ایدهٔ پست"]', ideaText);
+    await t.inTop(s => { s.querySelector('button[data-seg="reel"]').click(); }); await sleep(200);
+    await t.inTop((s, n) => { s.querySelector('button[data-seg="' + n + '"]').click(); }, scenes); await sleep(200);
+    await t.inTop(s => { s.querySelector('[data-opt="pics"] .sw').click(); }); await sleep(300);
+  };
+  const filmed = async name => {
+    await page.click('.sheet [data-studio-done]');
+    await page.waitForFunction(() => !document.querySelector('.sheet canvas.stage') && document.querySelector('.sheet .mitem .tag'), {timeout: 300000});
+    const m = await page.evaluate(() => S.made);
+    const file = name + '.' + (m.type === 'video/mp4' ? 'mp4' : 'webm');
+    await saveFile(m.file, file);
+    return {m, file};
+  };
+  await page.evaluate(() => { S.video = [720, false]; });
+  await drawnReel('ساعت کاری تازه', 3);
+  const noKey = await t.inTop(s => { const r = s.querySelector('[data-opt="voice"]'); return {text: r.textContent, sw: !!r.querySelector('.sw')}; });
+  t.check('the form says that the AI narrator needs a key', noKey.text.includes('کلید Pollinations') && noKey.text.includes('صدای خودت') && !noKey.sw, noKey);
+  await t.shot('100-form-no-key');
+  await page.click('.sheet [data-studio-go]');
+  await page.waitForSelector('.sheet canvas.stage.tall', {timeout: 60000});
+  await sleep(300);
+  const silent = await voiceCard();
+  t.check('without a key the reel is silent and offers the microphone', silent.mode === 'none' && !silent.ai && !silent.play && silent.text.includes('ضبط صدای خودم'), silent);
+  await page.click('.sheet [data-voice-do="record"]');
+  await page.waitForSelector('.sheet [data-rec="start"]', {timeout: 8000});
+  const script = await t.inTop(s => [...s.querySelectorAll('.line')].map(e => e.textContent));
+  t.check('the recorder shows what to read, scene by scene', script.length === 3 && script.every(x => x.length > 5), script);
+  await t.shot('101-record');
+  await page.click('.sheet [data-rec="start"]');
+  await page.waitForSelector('.sheet [data-rec="stop"]', {timeout: 15000});
+  await sleep(4300);
+  await page.click('.sheet [data-rec="stop"]');
+  await page.waitForSelector('.sheet [data-rec="use"]', {timeout: 20000});
+  await t.shot('102-recorded');
+  await page.click('.sheet [data-rec="use"]');
+  await page.waitForFunction(() => { const c = document.querySelector('.sheet [data-voice]'); return c && c.dataset.voice === 'mine'; }, {timeout: 8000});
+  const mine = await voiceCard();
+  t.check('the recording becomes the sound of the reel', mine.play && mine.text.includes('صدای خودت'), mine);
+  await t.shot('103-own-voice');
+  const own = await filmed('made-reel-mine');
+  t.check('the reel carries the recorded voice and lasts as long as it', own.m.voice === 'mine' && ['aac', 'opus'].includes(own.m.sound) && own.m.seconds > 4.8 && own.m.seconds < 7.5 && own.m.type === 'video/mp4', own.m);
+  sounds[own.file] = Object.assign({w: 720, h: 1280}, own.m);
+  await t.closeSheet();
+  await page.evaluate(() => { S.video = null; });
+
+  // 9. a Pollinations key switches the AI narrator on; the key is tried out from the settings
+  await t.tab('agent');
+  await page.click('#open-settings');
+  await page.waitForSelector('.sheet details[data-sec="studio"]', {timeout: 8000});
+  await page.evaluate(() => document.querySelector('.sheet details[data-sec="studio"] summary').click());
+  await sleep(300);
+  await t.type('input[aria-label="کلید Pollinations"]', 'sk_wrong_key');
+  await page.click('.sheet [data-key-test]');
+  await page.waitForFunction(() => document.querySelector('#toasts').textContent.includes('این کلید را نپذیرفت'), {timeout: 15000});
+  t.check('a wrong key is called wrong', true);
+  await t.type('input[aria-label="کلید Pollinations"]', AI_KEY);
+  await page.click('.sheet [data-key-test]');
+  await page.waitForFunction(() => document.querySelector('#toasts').textContent.includes('کلید پذیرفته شد ✓'), {timeout: 15000});
+  const told = await page.$eval('#toasts', e => e.textContent);
+  t.check('a good key is accepted and its credit is shown', told.includes('۱٫۲۵'), told);
+  await t.shot('104-key-tested');
+  await t.inTop(s => { s.querySelector('select[aria-label="گوینده"]').value = 'onyx'; s.querySelector('details[data-sec="studio"] .btn.pri').click(); });
+  await sleep(800);
+  const st1 = await t.api('/api/status');
+  t.check('the narrator is ready, with the chosen speaker', st1.studio.voice === true && st1.studio.speaker === 'onyx' && st1.studio.pollen === true, st1.studio);
+  await t.closeSheet();
+
+  // 10. a narrated reel: the narrator reads every scene, each scene lasts as long as its voice
+  await t.tab('home');
+  await t.type('textarea[aria-label="ایده"]', 'معرفی کیک هویج خانگی');
+  await page.click('[data-make="reel"]');
+  await page.waitForSelector('.sheet canvas.stage.tall', {timeout: 180000});
+  await sleep(1000);
+  const told1 = await voiceCard();
+  t.check('every scene has its narration', told1.mode === 'ai' && told1.says.length === 4 && told1.says.every(x => x.length > 12) && told1.speaker === 'onyx' && told1.play, told1);
+  t.check('all pictures are there as well', (await page.$eval('.sheet [data-pics]', e => e.dataset.pics)) === '4');
+  await t.shot('105-narrated');
+  await t.inTop(s => { s.querySelector('[data-voice]').scrollIntoView(); });
+  await t.shot('105b-narration-lines');
+  await page.click('.sheet [data-voice-do="play"]');
+  await sleep(1500);
+  t.check('the preview plays with its sound', (await page.$eval('#toasts', e => e.textContent)).indexOf('خطا') < 0);
+  const line = 'کیک هویج ما هر روز صبح تازه پخته می‌شود و بوی دارچینش تا سر کوچه می‌رود.';
+  await t.type('textarea[aria-label="متن گوینده 2"]', line);
+  const stale = await t.inTop(s => [...s.querySelectorAll('[data-voice] .amber')].filter(e => !e.classList.contains('hide')).length);
+  t.check('a changed line is marked for reading again', stale === 1, stale);
+  const before = voiceCalls.length;
+  const told2 = await filmed('made-reel-voice');
+  const says = told1.says.slice(); says[1] = line;
+  t.check('only the changed line was read again', voiceCalls.length === before + 1 && JSON.stringify(voiceCalls[before].texts) === JSON.stringify([line]) && voiceCalls[before].speaker === 'onyx', voiceCalls.slice(before));
+  t.check('the narrated reel is a full-size MP4 with a sound track', told2.m.type === 'video/mp4' && told2.m.way === '1080' && told2.m.voice === 'ai' && ['aac', 'opus'].includes(told2.m.sound), told2.m);
+  t.check('it lasts as long as the narration needs', Math.abs(told2.m.seconds - reelSeconds(says)) < 0.12, [told2.m.seconds, reelSeconds(says)]);
+  sounds[told2.file] = Object.assign({w: 1080, h: 1920, speech: 4}, told2.m);
+  await page.click('.sheet [data-go]');
+  await page.waitForSelector('.sheet video.big', {timeout: 15000});
+  await page.waitForFunction(() => { const v = document.querySelector('.sheet video.big'); return v && v.readyState >= 1; }, {timeout: 20000});
+  const heard = await page.$eval('.sheet video.big', v => [v.videoWidth, v.videoHeight, Math.round(v.duration * 10) / 10, v.mozHasAudio, v.webkitAudioDecodedByteCount, (v.audioTracks || []).length]);
+  t.check('the browser plays it at the right length', heard[0] === 1080 && heard[1] === 1920 && Math.abs(heard[2] - told2.m.seconds) < 0.2, heard);
+  await t.shot('106-narrated-ready');
+  await t.closeSheet();
+
+  // 11. the last resort (recording the canvas) carries the narration too
+  await page.evaluate(() => { S.video = 'live'; });
+  await drawnReel('ساعت کاری تازه', 3);
+  const withKey = await t.inTop(s => { const r = s.querySelector('[data-opt="voice"]'); return {text: r.textContent, on: r.querySelector('.sw').getAttribute('aria-checked')}; });
+  t.check('with a key the narrator is on by default', withKey.on === 'true' && withKey.text.includes('می‌خواند'), withKey);
+  await page.click('.sheet [data-studio-go]');
+  await page.waitForSelector('.sheet canvas.stage.tall', {timeout: 60000});
+  await sleep(300);
+  const rec = await filmed('made-reel-live-voice');
+  t.check('the recorded reel has its sound', rec.m.way === 'live' && rec.m.sound === 'recorded' && rec.m.voice === 'ai', rec.m);
+  sounds[rec.file] = Object.assign({w: 720, h: 1280, loose: true}, rec.m);
+  await t.closeSheet();
+  await page.evaluate(() => { S.video = null; });
+  fs.writeFileSync(path.join(out, 'made.json'), JSON.stringify(sounds, null, 1));
+
+  // 12. settings of the studio; nothing hostile ran
   await t.tab('agent');
   await page.click('#open-settings');
   await page.waitForSelector('.sheet details[data-sec="studio"]', {timeout: 8000});
