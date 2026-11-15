@@ -104,10 +104,6 @@ jobs:
           python-version: "3.14"
       - name: Pillow (only to make small preview pictures of the results)
         run: python -m pip install --quiet pillow
-      - name: Does the free text service answer sooner when asked to think less
-        if: always()
-        working-directory: insta-agent/tests
-        run: python live_check.py probe
       - name: A reel from one idea (words, then a picture per scene)
         if: always()
         working-directory: insta-agent/tests

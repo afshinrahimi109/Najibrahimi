@@ -217,7 +217,8 @@ class StudioTests(Base):
         self.assertEqual((plan["headline"], plan["sub"]), ("لاتهٔ پاییزی با ۲۰٪ تخفیف", "فقط تا آخر هفته"))
         self.assertEqual([s["text"] for s in plan["scenes"]], ["صبح با لاتهٔ تازه", "۲۰٪ تخفیف", "تا آخر هفته منتظرتیم"])
         asked = self.calls("ptxt")[0][4]
-        self.assertEqual(asked["model"], "openai-fast")
+        self.assertEqual((asked["model"], asked["reasoning_effort"]), ("openai-fast", "low"))
+        self.assertNotIn("max_tokens", asked)                              # the free model's thinking counts as output
         self.assertIn("ریل 3 صحنه‌ای", asked["messages"][-1]["content"])
         self.assertIn("«تخفیف ۲۰ درصدی لاتهٔ پاییزی تا آخر هفته»", asked["messages"][-1]["content"])
         # each scene got its own picture, described in English, in the reel's shape

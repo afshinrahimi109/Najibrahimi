@@ -45,7 +45,7 @@ import zlib
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 DEFAULT_PORT = 8787
 API_VERSIONS = ["v26.0", "v27.0", "v25.0", ""]
 KINDS = ("image", "carousel", "reel", "story")
@@ -1336,8 +1336,9 @@ class AI:
             payload["temperature"] = 0.8
         if kind == "free":
             # The free model thinks aloud before it answers and that thinking counts as output: a limit on the
-            # length would cut the answer itself off. The seed keeps a shared cache from repeating an old answer.
-            payload["seed"] = random.randint(1, 2 ** 31 - 1)
+            # length would cut the answer itself off, and asked to think less it answers in half the time.
+            # The seed keeps a shared cache from repeating an old answer.
+            payload.update(seed=random.randint(1, 2 ** 31 - 1), reasoning_effort="low")
         else:
             payload["max_tokens"] = max_tokens
         try:
@@ -1570,16 +1571,18 @@ class Studio:
     def question(self, idea, kind, n):
         """(what the assistant is, what it is asked) for one post."""
         ai, reel = self.agent.ai, kind == "reel"
-        ask = ("ایده: «%s»\nبرای %s اینستاگرام فقط یک شیء JSON معتبر بده (بدون هیچ توضیح یا متن دیگری) با این کلیدها:\n"
+        ask = ("ایده: «%s»\nبرای %s اینستاگرام فقط یک شیء JSON معتبر بده (بدون هیچ توضیح یا متن دیگری) با این کلیدها. "
+               "فارسی را ساده، روزمره و درست بنویس و فقط چیزی را بگو که در ایده هست.\n"
                "\"caption\": کپشن فارسی ۲ تا ۴ جمله با یکی دو ایموجی؛ بدون هشتگ.\n"
                "\"hashtags\": آرایهٔ ۳ تا ۵ هشتگ دقیق و مرتبط.\n"
                "\"headline\": تیتر فارسی خیلی کوتاه برای نوشتن روی تصویر (حداکثر ۶ کلمه).\n"
                "\"sub\": یک جملهٔ کوتاه تکمیلی یا دعوت به اقدام (حداکثر ۸ کلمه) یا رشتهٔ خالی.\n"
-               "\"image\": توصیف انگلیسی دقیق یک تصویر برای مدل تصویرساز (سوژه، محیط، نور، زاویه)، بدون هیچ نوشته‌ای در تصویر.\n"
+               "\"image\": توصیف انگلیسی دقیق یک تصویر برای مدل تصویرساز (سوژه، محیط، نور، زاویه)؛ بدون هیچ نوشته‌ای در تصویر و "
+               "بدون آدم، مگر ایده بدون آدم معنا ندهد.\n"
                % (idea, ("یک ریل %d صحنه‌ای" % n) if reel else "یک پست تصویری"))
         if reel:
             ask += ("\"scenes\": آرایهٔ دقیقاً %d صحنه؛ هر صحنه یک شیء با \"text\" (جملهٔ فارسی خیلی کوتاه برای روی تصویر، حداکثر ۷ کلمه) "
-                    "و \"image\" (توصیف انگلیسی تصویر همان صحنه). صحنهٔ اول توجه را جلب کند و صحنهٔ آخر دعوت به اقدام باشد.\n" % n)
+                    "و \"image\" (توصیف انگلیسی تصویر همان صحنه، با همان قاعده‌ها). صحنهٔ اول توجه را جلب کند و صحنهٔ آخر دعوت به اقدام باشد.\n" % n)
         return ai.persona() + " هر چه می‌نویسی فقط یک شیء JSON معتبر باشد.", ask
 
     def plan(self, idea, kind, n, job=None):
@@ -5420,7 +5423,8 @@ VIEWS.home = async () => {
     h('div', {class: 'card col'}, h('div', {class: 'chips'}, h('span', {class: 'pill info'}, icon('clock'), fa(c.scheduled) + ' در صف'), h('span', {class: 'pill'}, icon('edit'), fa(c.drafts) + ' پیش‌نویس'),
         h('span', {class: 'pill ok'}, icon('check'), fa(c.published_today) + ' انتشار امروز'), st.quota ? h('span', {class: 'pill'}, 'سقف اینستاگرام: ' + fa(st.quota.used) + ' از ' + fa(st.quota.total)) : null),
       st.media.ready ? null : h('div', {class: 'sm down'}, 'برای انتشار از گالری هنوز «لینک عمومی» تنظیم نشده است (ایجنت ← تنظیمات).'),
-      h('button', {class: 'btn pri', onclick: () => composer()}, icon('plus'), 'پست جدید')));
+      h('div', {class: 'row'}, h('button', {class: 'btn pri grow', onclick: () => composer()}, icon('plus'), 'پست جدید'),
+        h('button', {class: 'btn grow', 'data-studio': '1', onclick: () => studio({}, r => composer(null, r))}, icon('spark'), 'بساز از ایده'))));
   const pill = (on, t) => h('span', {class: 'pill ' + (on ? 'ok' : '')}, t + ': ' + (on ? 'روشن' : 'خاموش'));
   out.push(h('h3', null, 'ایجنت امروز'), h('div', {class: 'card col'}, h('div', {class: 'chips'}, h('span', {class: 'pill'}, icon('zap'), fa(c.auto_today) + ' کار خودکار'),
       pill(au.comment_reply, 'پاسخ کامنت'), pill(au.spam_hide, 'ضد اسپم'), pill(au.dm_reply, 'پاسخ دایرکت')),

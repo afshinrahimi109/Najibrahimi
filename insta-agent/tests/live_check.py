@@ -81,23 +81,5 @@ def check_picture():
     run(a, {"idea": "ساعت کاری تازهٔ کافه: هر روز ۸ صبح تا ۱۱ شب", "kind": "image", "style": "art"}, "second picture")
 
 
-def check_probe():
-    """Does the free text service think less (and answer sooner) when asked to?"""
-    import random
-    a = agent()
-    system, ask = a.studio.question("تخفیف ۲۰ درصدی لاتهٔ پاییزی تا آخر هفته", "reel", 3)
-    body = {"model": "openai-fast", "messages": [{"role": "system", "content": system}, {"role": "user", "content": ask}],
-            "temperature": 0.8, "seed": random.randint(1, 2 ** 31 - 1), "reasoning_effort": "low"}
-    t0 = time.time()
-    try:
-        status, headers, raw = a.graph.http("POST", "https://text.pollinations.ai/openai", json.dumps(body).encode("utf-8"), {"Content-Type": "application/json"}, 150)
-        text = raw.decode("utf-8", "replace")
-    except ia.GraphError as e:
-        status, headers, text = 0, {}, str(e)
-    note("notice" if status == 200 else "error", "POST /openai with reasoning_effort low", "status=%s seconds=%.1f chars=%d tokens=%s body=%s" % (
-        status, time.time() - t0, len(text), headers.get("x-usage-completion-text-tokens"), text[:1200]))
-    time.sleep(50)
-
-
 if __name__ == "__main__":
-    {"reel": check_reel, "picture": check_picture, "probe": check_probe}[sys.argv[1] if len(sys.argv) > 1 else "reel"]()
+    {"reel": check_reel, "picture": check_picture}[sys.argv[1] if len(sys.argv) > 1 else "reel"]()
