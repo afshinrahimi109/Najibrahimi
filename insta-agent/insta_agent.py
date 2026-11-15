@@ -6928,7 +6928,8 @@ function studio(init, done) {
   const quit = () => { clearTimeout(timer); cancelAnimationFrame(anim); hush(); if (jobId) { POST('/api/studio/job/' + jobId + '/cancel').catch(() => {}); jobId = ''; } };
   const s = sheet('بساز', {onclose: () => { stop.on = true; quit(); devQuit(); }});
   const idea = h('textarea', {class: 'in', rows: 3, placeholder: 'مثلاً: تخفیف ۲۰٪ لاتهٔ پاییزی تا آخر هفته', 'aria-label': 'ایدهٔ پست', value: init.idea || ''});
-  const demo = () => (S.st.demo ? h('div', {class: 'muted sm'}, 'حالت نمایشی: متن‌ها و تصویرها ساختگی‌اند؛ در اجرای واقعی از سرویس‌های هوش مصنوعی می‌آیند.') : null);
+  const demo = () => (S.st.demo ? h('div', {class: 'muted sm'}, (m.speaker === DEVICE && packed() ? 'حالت نمایشی: متن‌ها و تصویرها ساختگی‌اند (صدای گوینده واقعی است)'
+    : 'حالت نمایشی: متن‌ها، تصویرها و صدای گوینده ساختگی‌اند') + '؛ در اجرای واقعی از سرویس‌های هوش مصنوعی می‌آیند.') : null);
 
   const form = () => {
     quit();

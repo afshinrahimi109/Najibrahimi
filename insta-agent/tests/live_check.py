@@ -112,7 +112,7 @@ def check_voice():
 def check_pack():
     """The narrator on the device: does every address the agent knows still hand out the very files it expects?
     Each address is asked by itself, for all the files it should bring; every file is checked against its SHA-256."""
-    a, works = agent(), {}
+    a, works, lines = agent(), {}, []
     for base, archive, inside, names in ia.VOICE_SOURCES:
         pack = ia.VoicePack(a)
         pack.dir = tempfile.mkdtemp(prefix="ia-pack-")
@@ -124,23 +124,20 @@ def check_pack():
         ok = view["state"] == "ready"
         for n in names:
             works[n] = works.get(n, 0) + (1 if ok else 0)
-        note("notice" if ok else "warning", "narrator files from " + urlhost(base), "%s: %s, %.1f MB in %.0f s (%s) %s" % (
-            base, "every file is the original" if ok else "FAILED", mb, time.time() - t0, ", ".join(names), view["why"]))
+        lines.append("%s %s: %.1f MB in %.0f s %s" % ("OK    " if ok else "FAILED", "/".join(base.split("/")[2:5]), mb, time.time() - t0, view["why"]))
+        print(lines[-1], flush=True)
         shutil.rmtree(pack.dir, ignore_errors=True)
     first = {}
     for base, archive, inside, names in ia.VOICE_SOURCES:                # what a phone fetches when every first address answers
         if not any(n in first for n in names):
             for n in names:
                 first[n] = archive / float(len(names)) if archive else ia.VOICE_FILES[n][0]
-    note("notice" if all(works.get(n) for n in ia.VOICE_FILES) else "error", "narrator files",
-         "addresses that work, per file: %s; a phone fetches %.1f MB, the files take %.1f MB" % (
-             json.dumps(works), sum(first.values()) / 1e6, sum(v[0] for v in ia.VOICE_FILES.values()) / 1e6))
-    if not all(works.get(n) for n in ia.VOICE_FILES):
+    good = all(works.get(n) for n in ia.VOICE_FILES)
+    note("notice" if good and all("OK" in x[:2] for x in lines) else "warning" if good else "error", "narrator files, address by address",
+         "%s\naddresses that work, per file: %s\na phone fetches %.1f MB; on disk the files take %.1f MB" % (
+             "\n".join(lines), json.dumps(works), sum(first.values()) / 1e6, sum(v[0] for v in ia.VOICE_FILES.values()) / 1e6))
+    if not good:
         sys.exit(1)
-
-
-def urlhost(url):
-    return url.split("/")[2]
 
 
 if __name__ == "__main__":

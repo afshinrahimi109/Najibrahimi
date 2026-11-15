@@ -15,6 +15,8 @@ import json
 import os
 import re
 import sys
+import time
+import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
@@ -39,20 +41,38 @@ def note(ok, title, text):
     return ok
 
 
+def recogniser():
+    """The best Whisper model that can be had here; (model, its name). A model that cannot be fetched is not the
+    narrator's fault, so the next smaller one is tried."""
+    from faster_whisper import WhisperModel
+    wanted = [os.environ["WHISPER_MODEL"]] if os.environ.get("WHISPER_MODEL") else ["large-v3", "large-v3-turbo", "medium", "small"]
+    for name in wanted:
+        t0 = time.time()
+        try:
+            return WhisperModel(name, device="cpu", compute_type="int8"), name
+        except Exception as e:
+            print("::notice title=recogniser model %s::could not be loaded after %.0f s: %s" % (name, time.time() - t0, str(e)[:600].replace("\n", " ")))
+    return None, ""
+
+
 def main():
     folder = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "shots")
     with open(os.path.join(folder, "made-real.json"), encoding="utf-8") as fh:
         made = json.load(fh)
-    from faster_whisper import WhisperModel
-    model = WhisperModel(os.environ.get("WHISPER_MODEL", "large-v3"), device="cpu", compute_type="int8")
+    model, model_name = recogniser()
+    if model is None:
+        print("::warning title=speech recogniser::no model could be loaded, so nobody listened to the narrator in this run")
+        return 0
     good = True
     for name, m in sorted(made.items()):
         wav = os.path.join(folder, name + ".wav")
         if not os.path.exists(wav):
             good &= note(False, name, "no sound file; run check_made.py --real first")
             continue
+        t0 = time.time()
         segments, _ = model.transcribe(wav, language="fa", beam_size=5)
         parts = [(s.start, s.end, s.text.strip()) for s in segments]
+        took = time.time() - t0
         heard, asked = " ".join(p[2] for p in parts), " ".join(m["says"])
         a, b = plain(asked), plain(heard)
         score = difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
@@ -61,11 +81,15 @@ def main():
             want = plain(line)
             blocks = difflib.SequenceMatcher(None, want, b, autojunk=False).get_matching_blocks()
             lines.append(sum(x.size for x in blocks) / float(max(1, len(want))))
-        good &= note(score >= 0.6, "what the recogniser heard in " + name, "%d%% of the letters match (line by line: %s)\nasked: %s\nheard: %s\n%s" % (
-            round(score * 100), ", ".join("%d%%" % round(x * 100) for x in lines), asked, heard,
+        good &= note(score >= 0.6, "what the recogniser heard in " + name, "%d%% of the letters match (line by line: %s); Whisper %s, %.0f s\nasked: %s\nheard: %s\n%s" % (
+            round(score * 100), ", ".join("%d%%" % round(x * 100) for x in lines), model_name, took, asked, heard,
             "\n".join("%5.1f–%5.1f s  %s" % p for p in parts)))
     return 0 if good else 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception:
+        note(False, "speech recogniser", traceback.format_exc()[-3500:])
+        sys.exit(1)
