@@ -91,10 +91,35 @@ class HandTests(Base):
         notes = [n for n in self.rig.ok("GET", "/api/log")["items"] if n["kind"] == "due"]
         self.assertEqual((len(notes), notes[0]["level"]), (1, "alert"))
         self.assertIn("«لاتهٔ پاییزی رسید»", notes[0]["text"])
-        self.assertEqual(len(self.sim.telegram), 1)
-        self.assertIn("وقت انتشار", self.sim.telegram[0]["text"])
+        # Telegram got the file itself, then the caption alone (one tap copies it), then the reminder
+        sent = self.sim.telegram_files
+        self.assertEqual([(m["method"], m["field"], m["chat_id"], m["head"][:3]) for m in sent], [("sendDocument", "document", "42", b"\xff\xd8\xff")])
+        self.assertEqual(sent[0]["filename"], "insta-%d.jpg" % p["id"])
+        self.assertEqual([m["text"] for m in self.sim.telegram][0], "لاتهٔ پاییزی رسید\nخط دوم")
+        self.assertIn("وقت انتشار", self.sim.telegram[1]["text"])
+        self.assertIn("در تلگرام برایت فرستادم", self.sim.telegram[1]["text"])
         self.rig.tick(3)                                                   # told once, not on every round
-        self.assertEqual(len(self.sim.telegram), 1)
+        self.assertEqual((len(self.sim.telegram), len(self.sim.telegram_files)), (2, 1))
+
+    def test_file_and_caption_to_the_owners_telegram(self):
+        _, p, _ = self.post("draft", kind="reel", caption="ریل تازه #کافه")
+        status, out, _ = self.rig.post("/api/posts/%d/telegram" % p["id"])
+        self.assertEqual(status, 400)
+        self.assertIn("ربات خودت را وصل کن", out["error"])
+        self.assertFalse(self.rig.ok("GET", "/api/status")["telegram"])
+        self.rig.ok("POST", "/api/settings", {"telegram": {"token": "1:abc", "chat_id": "42"}})
+        self.assertTrue(self.rig.ok("GET", "/api/status")["telegram"])
+        self.assertEqual(self.rig.ok("POST", "/api/posts/%d/telegram" % p["id"]), {"ok": True, "files": 1})
+        video = self.sim.telegram_files[0]
+        self.assertEqual((video["method"], video["field"], video["supports_streaming"], video["filename"]), ("sendVideo", "video", "true", "insta-%d.mp4" % p["id"]))
+        self.assertEqual(video["head"][4:8], b"ftyp")
+        self.assertEqual(self.sim.telegram[-1]["text"], "ریل تازه #کافه")
+        _, webm, _ = self.post("draft", kind="reel", data=WEBM, caption="")
+        self.rig.ok("POST", "/api/posts/%d/telegram" % webm["id"])
+        self.assertEqual(self.sim.telegram_files[-1]["method"], "sendDocument")      # Telegram would not play it as a video
+        self.assertEqual(len(self.sim.telegram), 1)                         # no caption, no empty message
+        _, empty, _ = self.post("draft", data=False, caption="")
+        self.assertEqual(self.rig.post("/api/posts/%d/telegram" % empty["id"])[0], 400)
 
     def test_a_reminder_waits_for_the_agent_however_late(self):
         _, p, _ = self.post("schedule", scheduled_at=time.time() + 3600)

@@ -81,5 +81,36 @@ def check_picture():
     run(a, {"idea": "ساعت کاری تازهٔ کافه: هر روز ۸ صبح تا ۱۱ شب", "kind": "image", "style": "art"}, "second picture")
 
 
+def check_probe():
+    """How long does the free text service take for the studio's real question, asked in different ways?"""
+    import random
+    import urllib.parse
+    a = agent()
+    system, ask = a.studio.question("تخفیف ۲۰ درصدی لاتهٔ پاییزی تا آخر هفته", "reel", 3)
+    seed = random.randint(1, 2 ** 31 - 1)
+    msgs = [{"role": "system", "content": system}, {"role": "user", "content": ask}]
+
+    def go(title, method, url, body=None, timeout=150):
+        t0 = time.time()
+        try:
+            status, headers, raw = a.graph.http(method, url, json.dumps(body).encode("utf-8") if body is not None else None,
+                                                {"Content-Type": "application/json"} if body is not None else {}, timeout)
+            text = raw.decode("utf-8", "replace")
+        except ia.GraphError as e:
+            status, headers, text = 0, {}, str(e)
+        took = time.time() - t0
+        note("notice" if status == 200 else "error", title, "status=%s seconds=%.1f chars=%d url_chars=%d headers=%s body=%s" % (
+            status, took, len(text), len(url), {k: v for k, v in headers.items() if k.startswith(("x-", "retry", "content-type"))}, text[:1500]))
+        time.sleep(50)
+
+    base = "https://text.pollinations.ai/"
+    q = urllib.parse.urlencode({"model": "openai-fast", "system": system, "private": "true", "seed": seed})
+    go("GET with system", "GET", base + urllib.parse.quote(ask, safe="") + "?" + q)
+    go("POST /openai as the studio asks", "POST", base + "openai", {"model": "openai-fast", "messages": msgs, "max_tokens": 1100, "temperature": 0.8, "seed": seed + 1})
+    go("POST /openai with nothing extra", "POST", base + "openai", {"model": "openai-fast", "messages": msgs, "seed": seed + 2})
+    go("POST /openai asked for JSON", "POST", base + "openai", {"model": "openai-fast", "messages": msgs, "seed": seed + 3, "response_format": {"type": "json_object"}})
+    go("GET with json=true", "GET", base + urllib.parse.quote(ask, safe="") + "?" + urllib.parse.urlencode({"model": "openai-fast", "system": system, "private": "true", "seed": seed + 4, "json": "true"}))
+
+
 if __name__ == "__main__":
-    {"reel": check_reel, "picture": check_picture}[sys.argv[1] if len(sys.argv) > 1 else "reel"]()
+    {"reel": check_reel, "picture": check_picture, "probe": check_probe}[sys.argv[1] if len(sys.argv) > 1 else "reel"]()

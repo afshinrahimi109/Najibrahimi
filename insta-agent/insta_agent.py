@@ -1562,10 +1562,9 @@ class Studio:
                 "free_wait": max(0, int(self.free_at - now())), "text": self.agent.ai.mode()}
 
     # ── words ──
-    def plan(self, idea, kind, n, job=None):
-        """Caption, hashtags, headline and one picture description per scene: from the assistant, or from templates."""
-        ai, text, why = self.agent.ai, "", ""
-        reel = kind == "reel"
+    def question(self, idea, kind, n):
+        """(what the assistant is, what it is asked) for one post."""
+        ai, reel = self.agent.ai, kind == "reel"
         ask = ("ایده: «%s»\nبرای %s اینستاگرام فقط یک شیء JSON معتبر بده (بدون هیچ توضیح یا متن دیگری) با این کلیدها:\n"
                "\"caption\": کپشن فارسی ۲ تا ۴ جمله با یکی دو ایموجی؛ بدون هشتگ.\n"
                "\"hashtags\": آرایهٔ ۳ تا ۵ هشتگ دقیق و مرتبط.\n"
@@ -1576,9 +1575,16 @@ class Studio:
         if reel:
             ask += ("\"scenes\": آرایهٔ دقیقاً %d صحنه؛ هر صحنه یک شیء با \"text\" (جملهٔ فارسی خیلی کوتاه برای روی تصویر، حداکثر ۷ کلمه) "
                     "و \"image\" (توصیف انگلیسی تصویر همان صحنه). صحنهٔ اول توجه را جلب کند و صحنهٔ آخر دعوت به اقدام باشد.\n" % n)
+        return ai.persona() + " هر چه می‌نویسی فقط یک شیء JSON معتبر باشد.", ask
+
+    def plan(self, idea, kind, n, job=None):
+        """Caption, hashtags, headline and one picture description per scene: from the assistant, or from templates."""
+        ai, text, why = self.agent.ai, "", ""
+        reel = kind == "reel"
+        system, ask = self.question(idea, kind, n)
         for attempt in (0, 1):
             try:
-                text = ai.ask(ai.persona() + " هر چه می‌نویسی فقط یک شیء JSON معتبر باشد.", ask, max_tokens=1100)
+                text = ai.ask(system, ask, max_tokens=1100)
                 break
             except AIDown as e:
                 wait = e.wait
@@ -2373,6 +2379,25 @@ class Publisher:
         self.db.x("UPDATE posts SET attempts=?, next_try_at=?, error=?, progress=? WHERE id=?",
                   (n, now() + delay, why, "تلاش دوباره تا %s دقیقهٔ دیگر" % fa(max(1, int(round(delay / 60.0)))), r["id"]))
 
+    def to_telegram(self, pid):
+        """A post's files, then its caption as a message of its own (one tap copies it), to the owner's Telegram chat:
+        from there the owner passes them on to the Instagram app."""
+        r, agent = self.raw(pid), self.agent
+        if not agent.has_telegram():
+            raise UserError("اول در «تنظیمات ← اعلان در تلگرام» ربات خودت را وصل کن.")
+        files = []
+        for m in jload(r["media"], []):
+            f = agent.store.get(m["file"]) if m.get("file") else None
+            if f and os.path.exists(agent.store.path(f)):
+                files.append(f)
+        if not files and not r["caption"]:
+            raise UserError("این پست نه فایل دارد نه کپشن.")
+        for i, f in enumerate(files):
+            agent.telegram_file(f, "insta-%d%s.%s" % (pid, ("-%d" % (i + 1)) if len(files) > 1 else "", f["ext"]))
+        if r["caption"]:
+            agent.telegram(r["caption"])
+        return {"ok": True, "files": len(files)}
+
     def tick_hand(self):
         """Posting by hand: at its time a post only becomes "due" and the owner is told (panel and Telegram)."""
         t = now()
@@ -2382,9 +2407,17 @@ class Publisher:
                 if not r or r["status"] != "scheduled" or r["scheduled_at"] > t:
                     continue                           # changed from the panel a moment ago
                 self.db.x("UPDATE posts SET status='due', manual=0, error='', progress='', updated_at=? WHERE id=?", (t, r["id"]))
-            first = (r["caption"] or "").strip().split("\n")[0][:60]
-            self.agent.note("وقت انتشار %s رسید%s. پنل را باز کن، فایل را ذخیره و کپشن را کپی کن و در اینستاگرام بگذار."
-                            % (KIND_FA[r["kind"]], (": «%s»" % first) if first else ""), "alert", "due")
+            first, sent = (r["caption"] or "").strip().split("\n")[0][:60], False
+            if self.agent.has_telegram():              # the file and the caption travel ahead of the reminder itself
+                try:
+                    self.to_telegram(r["id"])
+                    sent = True
+                except UserError as e:
+                    log("telegram:", e.message)
+            self.agent.note("وقت انتشار %s رسید%s. %s" % (
+                KIND_FA[r["kind"]], (": «%s»" % first) if first else "",
+                "فایل و کپشن را در تلگرام برایت فرستادم؛ از همان‌جا به اینستاگرام بده." if sent
+                else "پنل را باز کن، فایل را ذخیره و کپشن را کپی کن و در اینستاگرام بگذار."), "alert", "due")
 
     def tick(self):
         t = now()
@@ -3416,6 +3449,36 @@ class Agent:
             raise UserError("تلگرام پیام را نپذیرفت؛ توکن ربات و شناسهٔ چت را بررسی کن.")
         return True
 
+    def has_telegram(self):
+        t = self.settings.all()["telegram"]
+        return bool(t["token"] and t["chat_id"])
+
+    def telegram_file(self, f, name):
+        """Sends one of the agent's files to the owner's own chat. A picture goes as a document, so that Telegram does
+        not shrink it; a video stays playable."""
+        t = self.settings.all()["telegram"]
+        if not (t["token"] and t["chat_id"]):
+            return False
+        if f["size"] > 50 * 1024 * 1024:
+            raise UserError("این فایل برای ربات تلگرام بزرگ است (بیش از ۵۰ مگابایت)؛ «ذخیره در گوشی» را بزن.")
+        method, field = ("sendVideo", "video") if f["kind"] == "video" and f["ext"] in ("mp4", "mov") else ("sendDocument", "document")
+        boundary = "----ia" + secrets.token_hex(12)
+        with open(self.store.path(f), "rb") as fh:
+            blob = fh.read()
+        parts = [("--%s\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n%s\r\n" % (boundary, t["chat_id"])).encode("utf-8")]
+        if method == "sendVideo":
+            parts.append(("--%s\r\nContent-Disposition: form-data; name=\"supports_streaming\"\r\n\r\ntrue\r\n" % boundary).encode("utf-8"))
+        parts += [("--%s\r\nContent-Disposition: form-data; name=\"%s\"; filename=\"%s\"\r\nContent-Type: %s\r\n\r\n"
+                   % (boundary, field, name, f["mime"])).encode("utf-8"), blob, ("\r\n--%s--\r\n" % boundary).encode("utf-8")]
+        url = "%s/bot%s/%s" % (self.cfg.telegram_api, t["token"], method)
+        try:
+            status, _, body = self.graph.http("POST", url, b"".join(parts), {"Content-Type": "multipart/form-data; boundary=" + boundary}, 300)
+        except GraphError:
+            raise UserError("به تلگرام وصل نشد (اینترنت یا پروکسی را بررسی کن).")
+        if status != 200 or not (jload(body.decode("utf-8", "replace"), {}) or {}).get("ok"):
+            raise UserError("تلگرام فایل را نپذیرفت؛ توکن ربات و شناسهٔ چت را بررسی کن.")
+        return True
+
     def acted(self, kind, target, ukey, actor, rule_id, detail):
         self.db.x("INSERT INTO actions (ts, kind, target, ukey, actor, rule_id, detail) VALUES (?,?,?,?,?,?,?)",
                   (now(), kind, str(target), ukey, actor, int(rule_id or 0), str(detail)[:300]))
@@ -3520,7 +3583,7 @@ class Agent:
             "next_post": self.publisher.view(nxt) if nxt else None, "quota": self.db.get("quota"),
             "daily_cap": s["limits"]["daily_posts"], "media": self.store.methods(), "ai": self.ai.mode(),
             "dm_blocked": self.db.get("dm.blocked") or "", "busy": self.graph.busy() or t < self.cool_until,
-            "studio": self.studio.state(),
+            "studio": self.studio.state(), "telegram": self.has_telegram(),
         }
 
 
@@ -3551,7 +3614,7 @@ class Sim:
                      "biography": "قهوهٔ تازه، هر روز ☕️ | سفارش: دایرکت", "website": "https://example.com"}
         self.seq = 1000
         self.media, self.stories, self.comments, self.convs, self.containers = [], [], {}, {}, {}
-        self.calls, self.faults, self.fetched, self.telegram = [], [], [], []
+        self.calls, self.faults, self.fetched, self.telegram, self.telegram_files = [], [], [], [], []
         self.unknown_fields, self.bad_versions = set(), set()
         self.config_issue, self.versions = "", set()
         self.flat_messages = False                     # True: chats only give message ids; each message is read on its own
@@ -4500,6 +4563,22 @@ def make_handler(app, media_only=False):
             if rest.startswith("ai/"):
                 status, ctype, blob, extra = sim.ai(method, rest[3:], q, raw, self.headers)
                 return self.send_bytes(status, blob, ctype, dict(extra, **{"Cache-Control": "no-store"}))
+            ctype = self.headers.get("Content-Type") or ""
+            if rest.startswith("tg/") and ctype.startswith("multipart/form-data"):
+                got = {"method": rest.rsplit("/", 1)[-1]}
+                for part in raw.split(b"--" + ctype.split("boundary=", 1)[-1].encode("ascii")):
+                    head, sep, data = part.partition(b"\r\n\r\n")
+                    name = re.search(br'name="([^"]*)"', head)
+                    if not sep or not name:
+                        continue
+                    data = data[:-2] if data.endswith(b"\r\n") else data
+                    fname = re.search(br'filename="([^"]*)"', head)
+                    if fname:
+                        got.update(field=name.group(1).decode(), filename=fname.group(1).decode(), size=len(data), head=data[:16])
+                    else:
+                        got[name.group(1).decode()] = data.decode("utf-8", "replace")
+                sim.telegram_files.append(got)
+                return self.send_json(200, {"ok": True})
             form = dict(urllib.parse.parse_qsl(raw.decode("utf-8", "replace"))) if raw else {}
             if rest.startswith("tg/"):
                 sim.telegram.append(form)
@@ -4617,11 +4696,12 @@ def api_call(app, method, path, q, body):
         if P:
             return pub.save(body)
         return {"items": pub.list(q.get("group") or "all")}
-    m = re.fullmatch(r"posts/(\d+)(?:/(publish|cancel|duplicate|done))?", path)
+    m = re.fullmatch(r"posts/(\d+)(?:/(publish|cancel|duplicate|done|telegram))?", path)
     if m:
         pid, action = int(m.group(1)), m.group(2)
         if action and P:
-            return getattr(pub, {"publish": "publish_now", "cancel": "cancel", "duplicate": "duplicate", "done": "done_by_hand"}[action])(pid)
+            return getattr(pub, {"publish": "publish_now", "cancel": "cancel", "duplicate": "duplicate", "done": "done_by_hand",
+                                 "telegram": "to_telegram"}[action])(pid)
         if not action and G:
             return pub.get(pid)
         if not action and P:
@@ -5444,6 +5524,7 @@ function handKit(p, again) {
     h('div', {class: 'row'}, files.length ? btn('ذخیره در گوشی', 'upload', save, 'grow', 'save') : null,
       links.map(m => h('a', {class: 'btn grow', href: m.url, target: '_blank', rel: 'noopener'}, icon('external'), 'باز کردن فایل')),
       p.caption ? btn('کپی کپشن', 'layers', async () => { await copyText(p.caption); toast('کپشن کپی شد ✓'); }, 'grow', 'copy') : null),
+    S.st.telegram && (files.length || p.caption) ? btn('بفرست به تلگرام خودم', 'send', async () => { await POST('/api/posts/' + p.id + '/telegram'); toast('فایل و کپشن در تلگرام توست ✓'); }, 'block', 'telegram') : null,
     btn('منتشر کردم', 'check', async () => { await POST('/api/posts/' + p.id + '/done'); toast('ثبت شد ✓'); await again(); }, 'block', 'done'));
 }
 function postSheet(id) {
@@ -6238,7 +6319,7 @@ async function settingsSheet() {
         h('div', {class: 'row sm'}, h('i', {class: 'dot ' + (tempOk ? '' : 'off')}), h('span', {class: 'grow'}, 'میزبان موقت: فایل یک ساعت روی سرویس عمومی litterbox.catbox.moe گذاشته می‌شود (بدون نصب چیزی).'), toggle(tempOk, async v => { tempOk = v; }, 'میزبان موقت')),
         state(m.public, 'نشانی عمومی خودم: اگر ایجنت روی سرور یا پشت دامنهٔ خودت است.'), field('روش', method), field('نشانی عمومی (اختیاری)', pub)],
       () => ({media: {method: method.value, public_url: pub.value, temp_ok: tempOk}})),
-    box('telegram', 'send', 'اعلان در تلگرام', [h('p', {class: 'muted sm'}, 'با @BotFather یک ربات بساز، توکنش را اینجا بگذار و شناسهٔ عددی خودت را (مثلاً از @userinfobot) بنویس. هشدارها و گزارش روزانه برایت فرستاده می‌شود.'), field('توکن ربات', tgToken), field('شناسهٔ چت', tgChat)],
+    box('telegram', 'send', 'اعلان در تلگرام', [h('p', {class: 'muted sm'}, 'با @BotFather یک ربات بساز، توکنش را اینجا بگذار و شناسهٔ عددی خودت را (مثلاً از @userinfobot) بنویس. هشدارها و گزارش روزانه برایت فرستاده می‌شود؛ در انتشار دستی، سر وقتِ هر یادآوری فایل و کپشن هم به همین گفتگو می‌آید.'), field('توکن ربات', tgToken), field('شناسهٔ چت', tgChat)],
       () => ({telegram: {token: tgToken.value, chat_id: tgChat.value}}), h('button', {class: 'btn', onclick: e => run(e.currentTarget, async () => { await POST('/api/telegram/test'); toast('پیام آزمایشی فرستاده شد ✓'); })}, 'آزمایش')),
     box('network', 'link', 'پروکسی (فیلترشکن)', [h('p', {class: 'muted sm'}, 'اگر اینستاگرام فقط با فیلترشکن باز می‌شود، نشانی پروکسی HTTP آن را بنویس. خالی یعنی اتصال مستقیم.'), field('پروکسی HTTP', proxy)], () => ({network: {proxy: proxy.value}})));
 }
