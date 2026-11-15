@@ -1608,6 +1608,8 @@ VOICE_SOURCES = [
     ("https://raw.githubusercontent.com/unesjalai/farsi-tts-api/84bb6a6609db57aff1420ba886b75fc368c6430a/models/fa_IR-amir-medium.onnx", 0, "", ("voice.onnx",)),
 ]
 VOICE_MIME = {"js": "text/javascript; charset=utf-8", "wasm": "application/wasm"}
+VOICE_RATE = 22050              # samples per second of the voice
+VOICE_SCALES = (0.667, 1.0, 0.8)                       # liveliness of the sound, slowness (1 = as recorded), freedom of the rhythm
 # The worker the panel starts. It is the only code of the agent that touches the downloaded files, and its own
 # Content-Security-Policy lets it talk to this agent alone.
 VOICE_WORKER_JS = r"""'use strict';
@@ -1669,16 +1671,16 @@ async function read(id, texts) {
     for (var i = 0; i < ids.length; i++) {
       self.postMessage({id: id, kind: 'step', i: i});
       var got = await session.run({input: new ort.Tensor('int64', wide(ids[i]), [1, ids[i].length]),
-        input_lengths: new ort.Tensor('int64', wide([ids[i].length]), [1]), scales: new ort.Tensor('float32', Float32Array.from([0.667, 1, 0.8]), [3])});
+        input_lengths: new ort.Tensor('int64', wide([ids[i].length]), [1]), scales: new ort.Tensor('float32', Float32Array.from(__SCALES__), [3])});
       var pcm = new Float32Array(got.output.data);
-      self.postMessage({id: id, kind: 'clip', i: i, rate: 22050, pcm: pcm}, [pcm.buffer]);
+      self.postMessage({id: id, kind: 'clip', i: i, rate: __RATE__, pcm: pcm}, [pcm.buffer]);
     }
     self.postMessage({id: id, kind: 'done'});
   } catch (e) { self.postMessage({id: id, kind: 'error', error: String((e && e.message) || e)}); }
   clearInterval(beat);
 }
 self.onmessage = function (ev) { line = line.then(function () { return read(ev.data.id, ev.data.texts); }); };
-"""
+""".replace("__SCALES__", json.dumps(list(VOICE_SCALES))).replace("__RATE__", str(VOICE_RATE))
 SCENE_LINES = ["جزئیات بیشتر در کپشن 👇", "همین حالا پیام بده", "برای دوستانت هم بفرست", "ما را دنبال کن"]
 SCENE_SAYS = {"جزئیات بیشتر در کپشن 👇": "جزئیات بیشتر را در کپشن بخوانید.", "همین حالا پیام بده": "همین حالا به ما پیام بدهید.",
               "برای دوستانت هم بفرست": "این ویدیو را برای دوستانتان هم بفرستید.", "ما را دنبال کن": "ما را دنبال کنید تا خبرهای بعدی را از دست ندهید."}
@@ -7143,7 +7145,8 @@ function studio(init, done) {
         : m.voice === 'mine' ? 'صدای خودت روی ویدیو می‌نشیند؛ ویدیو ' + total + ' می‌شود.'
         : 'ویدیو بی‌صداست. ' + (can ? 'گوینده را روشن کن یا صدای خودت را ضبط کن.' : dev ? 'گویندهٔ فارسی را دانلود کن یا صدای خودت را ضبط کن.' : 'این گوینده کلید Pollinations می‌خواهد (تنظیمات ← ساخت عکس و ویدیو)؛ بدون کلید می‌توانی صدای خودت را ضبط کنی.')),
       m.voice === 'ai' || S.st.studio.voice ? field('گوینده', who) : null,
-      m.voice === 'ai' ? [m.shots.map((sh, i) => sayField(i)), S.st.demo && !dev ? h('div', {class: 'muted sm'}, 'حالت نمایشی: این گوینده به‌جای صدا بوق می‌زند.') : null] : null,
+      m.voice === 'ai' ? [m.shots.map((sh, i) => sayField(i)), S.st.demo && !dev ? h('div', {class: 'muted sm'}, 'حالت نمایشی: این گوینده به‌جای صدا بوق می‌زند.') : null,
+        dev ? h('div', {class: 'muted sm'}, 'اگر گوینده واژه‌ای را بد خواند، متن همان صحنه را عوض کن (کسره هم می‌شود گذاشت: «کوچکِ») و دوباره «پخش با صدا» را بزن.') : null] : null,
       m.voice !== 'ai' && !can && dev ? packBox(() => readScenes(all.filter(i => m.shots[i].say))) : null,   /* once it is there it reads at once */
       h('div', {class: 'row wrap'},
         can && m.voice !== 'ai' ? h('button', {class: 'btn sm', 'data-voice-do': 'ai', onclick: () => readScenes(all.filter(i => m.shots[i].say))}, icon('spark'), dev ? 'گویندهٔ فارسی' : 'گویندهٔ هوش مصنوعی') : null,

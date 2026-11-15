@@ -82,7 +82,8 @@ def main():
         for label, knobs in SETTINGS.items():
             conf = SynthesisConfig(normalize_audio=False) if knobs is None else SynthesisConfig(
                 noise_scale=knobs[0], length_scale=knobs[1], noise_w_scale=knobs[2], normalize_audio=False)
-            scores, words, seconds, heard_all, t0 = [], [], 0.0, [], time.time()
+            # all lines in one piece of sound with pauses between them: the recogniser takes half a minute per piece, however short
+            t0, pieces, seconds = time.time(), [], 0.0
             for line in LINES:
                 wav = os.path.join(folder, "line.wav")
                 with wave.open(wav, "wb") as fh:
@@ -92,23 +93,34 @@ def main():
                 pcm = numpy.frombuffer(raw, dtype="<i2").astype("float32") / 32768.0
                 seconds += len(pcm) / float(rate)
                 at = numpy.linspace(0, len(pcm), int(len(pcm) * 16000 / rate), endpoint=False)      # to the recogniser's 16 kHz
-                segments, _ = model.transcribe(numpy.interp(at, numpy.arange(len(pcm)), pcm).astype("float32"), language="fa", beam_size=5)
-                heard = " ".join(s.text.strip() for s in segments)
-                heard_all.append(heard)
-                a, b = listen.plain(line), listen.plain(heard)
-                scores.append(difflib.SequenceMatcher(None, a, b, autojunk=False).ratio())
-                want, got = [listen.plain(w) for w in line.split()], set(listen.plain(w) for w in heard.split())
-                want = [w for w in want if w]
-                words.append(sum(1 for w in want if w in got) / float(max(1, len(want))))
-            row = {"voice": name, "settings": label, "letters": round(100 * sum(scores) / len(scores), 1), "words": round(100 * sum(words) / len(words), 1),
-                   "worst": round(100 * min(scores)), "seconds": round(seconds, 1), "took": round(time.time() - t0)}
+                pieces += [numpy.interp(at, numpy.arange(len(pcm)), pcm).astype("float32"), numpy.zeros(int(16000 * 0.8), dtype="float32")]
+            segments, _ = model.transcribe(numpy.concatenate(pieces), language="fa", beam_size=5)
+            heard = " ".join(seg.text.strip() for seg in segments)
+            b_all = listen.plain(heard)
+            score = difflib.SequenceMatcher(None, listen.plain(" ".join(LINES)), b_all, autojunk=False).ratio()
+            got, per_line, found, total = set(listen.plain(w) for w in heard.split()), [], 0, 0
+            for line in LINES:
+                want = listen.plain(line)
+                blocks = difflib.SequenceMatcher(None, want, b_all, autojunk=False).get_matching_blocks()
+                per_line.append(sum(x.size for x in blocks) / float(max(1, len(want))))
+                wanted = [w for w in (listen.plain(w) for w in line.split()) if w]
+                found += sum(1 for w in wanted if w in got)
+                total += len(wanted)
+            row = {"voice": name, "settings": label, "letters": round(100 * score, 1), "words": round(100.0 * found / max(1, total), 1),
+                   "worst": round(100 * min(per_line)), "seconds": round(seconds, 1), "took": round(time.time() - t0),
+                   "heard": heard + "\n(line by line: %s)" % ", ".join("%d%%" % round(100 * x) for x in per_line)}
             table.append(row)
-            say("notice", "voice lab %s, %s" % (name, label), "%s\n%s" % (json.dumps(row, ensure_ascii=False), "\n".join(
-                "%3d%%  %s  ←  %s" % (round(100 * s), h, line) for s, h, line in zip(scores, heard_all, LINES))))
+            print("%s, %s: %s\n%s" % (name, label, json.dumps({k: v for k, v in row.items() if k != "heard"}, ensure_ascii=False), row["heard"]), flush=True)
     table.sort(key=lambda r: (-r["letters"], -r["words"]))
+    # GitHub keeps ten notes per step: the result first, then what was heard from the best setting of each voice
     say("notice", "voice lab result (recogniser: Whisper %s)" % model_name, "\n".join(
         "%-13s %-40s letters %5.1f%%  whole words %5.1f%%  worst line %3d%%  %5.1f s of speech" % (
             r["voice"], r["settings"], r["letters"], r["words"], r["worst"], r["seconds"]) for r in table) + "\n\n" + "\n".join(facts))
+    seen = set()
+    for r in table:
+        if r["voice"] not in seen:
+            seen.add(r["voice"])
+            say("notice", "voice lab %s at its best (%s)" % (r["voice"], r["settings"]), r["heard"])
     return 0
 
 
