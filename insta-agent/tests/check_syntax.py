@@ -3,7 +3,8 @@
     python check_syntax.py
 
 - compiles the Python file;
-- pulls the panel's JavaScript out of UI_HTML and lets node check its syntax (skipped when node is missing);
+- pulls the panel's JavaScript out of UI_HTML and lets node check its syntax (skipped when node is missing),
+  and does the same for the narrator's worker and the simulator's stand-in scripts;
 - runs pyflakes when it is installed (pip install pyflakes).
 """
 import os
@@ -50,6 +51,23 @@ def main():
             bad = 1
         else:
             print("JS syntax: OK (%d lines)" % sum(s.count("\n") for s in scripts))
+        sys.path.insert(0, os.path.dirname(TARGET))
+        import insta_agent as ia
+        more = {"worker": ia.VOICE_WORKER_JS}
+        more.update({n: b.decode("utf-8") for n, b in ia.SIM_VOICE_FILES.items() if n.endswith(".js")})
+        for name, code in sorted(more.items()):
+            with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as fh:
+                fh.write(code)
+                path = fh.name
+            try:
+                res = subprocess.run([node, "--check", path], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+            finally:
+                os.remove(path)
+            if res.returncode:
+                print("JS syntax of %s: FAILED\n%s" % (name, res.stdout[-2000:]))
+                bad = 1
+        if not bad:
+            print("JS syntax of the narrator's worker and stand-ins: OK")
     flakes = [sys.executable, "-m", "pyflakes"]
     try:
         import pyflakes                                  # noqa: F401

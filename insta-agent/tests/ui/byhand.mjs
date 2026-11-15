@@ -1,6 +1,6 @@
 // No page connected: the owner chooses to post by hand, lets the studio make a picture and a reel from an idea,
 // and takes file and caption out of the panel.     Run with:  python3 serve.py byhand.mjs hand
-import {start, BASE, AI_KEY, out, sleep} from './lib.mjs';
+import {start, BASE, AI_KEY, ASSETS, out, sleep} from './lib.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 const t = await start();
@@ -21,7 +21,9 @@ page.on('request', r => { if (r.method() === 'POST' && r.url().endsWith('/api/st
 const speechSeconds = text => Math.min(20, Math.max(0.6, Math.floor(100 * (0.35 + 0.07 * text.length)) / 100));     // the simulator's speaker
 const reelSeconds = says => says.reduce((sum, x) => sum + Math.max(3.2, speechSeconds(x) + 0.95), 0) + 0.2;
 const voiceCard = () => t.inTop(s => { const c = s.querySelector('[data-voice]'); return c && {mode: c.dataset.voice, text: c.textContent, ai: !!c.querySelector('[data-voice-do="ai"]'), play: !!c.querySelector('[data-voice-do="play"]'),
-  says: [...c.querySelectorAll('textarea[aria-label^="متن گوینده"]')].map(e => e.value), speaker: (c.querySelector('select[aria-label="گوینده"]') || {}).value}; });
+  says: [...c.querySelectorAll('textarea[aria-label^="متن گوینده"]')].map(e => e.value), speaker: (c.querySelector('select[aria-label="گوینده"]') || {}).value,
+  pack: (c.querySelector('[data-pack]') || {dataset: {}}).dataset.pack || '', get: !!c.querySelector('[data-pack-do="get"]'),
+  secs: [...c.querySelectorAll('label.f')].map(e => (e.textContent.match(/\(([۰-۹٫]+) ثانیه\)/) || [])[1]).filter(Boolean).map(x => parseFloat(x.replace(/[۰-۹]/g, d => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d)).replace('٫', '.')))}; });
 const saveFile = async (id, name) => {
   const b64 = await page.evaluate(async id => { const b = await (await fetch('/api/file/' + id)).arrayBuffer(); let s = ''; const u = new Uint8Array(b); for (let i = 0; i < u.length; i += 32768) s += String.fromCharCode.apply(null, u.subarray(i, i + 32768)); return btoa(s); }, id);
   fs.writeFileSync(path.join(out, name), Buffer.from(b64, 'base64'));
@@ -50,6 +52,9 @@ try {
   t.check('the header says who posts', (await page.$eval('#top', e => e.textContent)).includes('انتشار با خودت'));
   const st0 = await t.api('/api/status');
   t.check('status: not connected, by hand', st0.connected === false && st0.manual === true);
+  t.check('without a key the narrator would be the one on the device, which is not there yet', st0.studio.voice === false && st0.studio.speaker === 'device' && st0.studio.pack.state === 'none', st0.studio);
+  const hint = await page.$eval('[data-home-voice]', e => ({text: e.textContent, get: !!e.querySelector('[data-pack-do="get"]')}));
+  t.check('the home screen offers the free Persian narrator', hint.get && hint.text.includes('ویدیو با صدای گوینده') && hint.text.includes('۸۵ مگابایت') && hint.text.includes('بدون کلید'), hint);
   await sleep(600);
   await t.shot('91-home');
 
@@ -211,13 +216,14 @@ try {
   await page.evaluate(() => { S.video = [720, false]; });
   await drawnReel('ساعت کاری تازه', 3);
   const noKey = await t.inTop(s => { const r = s.querySelector('[data-opt="voice"]'); return {text: r.textContent, sw: !!r.querySelector('.sw')}; });
-  t.check('the form says that the AI narrator needs a key', noKey.text.includes('کلید Pollinations') && noKey.text.includes('صدای خودت') && !noKey.sw, noKey);
+  t.check('the form says the narrator has to be downloaded first', noKey.text.includes('گویندهٔ فارسی هنوز روی این دستگاه نیست') && noKey.text.includes('صدای خودت') && !noKey.sw, noKey);
+  t.check('and offers the download right there', await t.inTop(s => !!s.querySelector('[data-pack-do="get"]')));
   await t.shot('100-form-no-key');
   await page.click('.sheet [data-studio-go]');
   await page.waitForSelector('.sheet canvas.stage.tall', {timeout: 60000});
   await sleep(300);
   const silent = await voiceCard();
-  t.check('without a key the reel is silent and offers the microphone', silent.mode === 'none' && !silent.ai && !silent.play && silent.text.includes('ضبط صدای خودم'), silent);
+  t.check('without the narrator the reel is silent and offers the microphone', silent.mode === 'none' && !silent.ai && !silent.play && silent.text.includes('ضبط صدای خودم') && silent.get && silent.pack === 'none', silent);
   await page.click('.sheet [data-voice-do="record"]');
   await page.waitForSelector('.sheet [data-rec="start"]', {timeout: 8000});
   const script = await t.inTop(s => [...s.querySelectorAll('.line')].map(e => e.textContent));
@@ -238,7 +244,40 @@ try {
   t.check('the reel carries the recorded voice and lasts as long as it', own.m.voice === 'mine' && ['aac', 'opus'].includes(own.m.sound) && own.m.seconds > 4.8 && own.m.seconds < 7.5 && own.m.type === 'video/mp4', own.m);
   sounds[own.file] = Object.assign({w: 720, h: 1280}, own.m);
   await t.closeSheet();
+
+  // 8b. the free narrator: downloaded once (here: small stand-ins from the simulator), it reads every scene on the device
+  await drawnReel('ساعت کاری تازه: هر روز ۸ تا ۲۳', 3);
+  await page.click('.sheet [data-studio-go]');
+  await page.waitForSelector('.sheet canvas.stage.tall', {timeout: 60000});
+  await sleep(300);
+  await page.click('.sheet [data-voice] [data-pack-do="get"]');
+  await page.waitForFunction(() => { const c = document.querySelector('.sheet [data-voice]'); return c && c.dataset.voice === 'ai'; }, {timeout: 60000});
+  await sleep(400);
+  const dev = await voiceCard();
+  t.check('once it is downloaded the narrator reads every scene at once', dev.speaker === 'device' && dev.says.length === 3 && dev.secs.length === 3 && dev.secs.every(x => x > 0.5 && x < 30) && dev.play && !dev.get, dev);
+  const pk = await t.api('/api/studio/pack');
+  t.check('the narrator is on the device now', pk.state === 'ready' && pk.pct === 100, pk);
+  const read1 = voiceCalls.slice(-1)[0];
+  t.check('the lines were read on the device, by the chosen narrator', read1 && read1.speaker === 'device' && read1.texts.length === 3, read1);
+  await t.shot('103b-device-narrator');
+  await page.click('.sheet [data-voice-do="play"]');
+  await sleep(1200);
+  const devLine = 'هر روز از ساعت ۸ صبح تا ۱۱ شب باز هستیم.';
+  await t.type('textarea[aria-label="متن گوینده 3"]', devLine);
+  const devBefore = voiceCalls.length;
+  const devMade = await filmed('made-reel-device');
+  const dev2 = voiceCalls.slice(devBefore);
+  t.check('a changed line is read again by the device, alone', dev2.length === 1 && JSON.stringify(dev2[0].texts) === JSON.stringify([devLine]) && dev2[0].speaker === 'device', dev2);
+  const spoken = 'هر روز از ساعت هشت صبح تا یازده شب باز هستیم.', devSecs = [dev.secs[0], dev.secs[1], 0.3 + 0.03 * (2 * spoken.length + 3)];
+  const devWant = devSecs.reduce((sum, x) => sum + Math.max(3.2, x + 0.95), 0) + 0.2;
+  t.check('the reel carries that narration and lasts as long as it needs', devMade.m.voice === 'ai' && ['aac', 'opus'].includes(devMade.m.sound) && devMade.m.type === 'video/mp4' && Math.abs(devMade.m.seconds - devWant) < 0.3, [devMade.m, devWant, devSecs]);
+  sounds[devMade.file] = Object.assign({w: 720, h: 1280, speech: 3}, devMade.m);
+  await t.closeSheet();
   await page.evaluate(() => { S.video = null; });
+  await t.tab('home');
+  await sleep(500);
+  const homeNow = await page.evaluate(() => ({hint: !!document.querySelector('[data-home-voice]'), text: document.querySelector('#view .card').textContent}));
+  t.check('the home screen now makes videos with a narrator', !homeNow.hint && homeNow.text.includes('با صدای گوینده'), homeNow);
 
   // 9. a Pollinations key switches the AI narrator on; the key is tried out from the settings
   await t.tab('agent');
@@ -309,6 +348,35 @@ try {
   sounds[rec.file] = Object.assign({w: 720, h: 1280, loose: true}, rec.m);
   await t.closeSheet();
   await page.evaluate(() => { S.video = null; });
+
+  // 11b. Phones encode the sound as AAC; this browser has no AAC encoder. So AAC made by ffmpeg (serve.py prepares it)
+  //      is put through the panel's own MP4 writer, and check_made.py lets a player decode the result.
+  const tone = path.join(ASSETS, 'tone.aac');
+  if (fs.existsSync(tone)) {
+    const adts = fs.readFileSync(tone), frames = [];
+    for (let at = 0; at + 7 <= adts.length;) {
+      if (adts[at] !== 0xff || (adts[at + 1] & 0xf6) !== 0xf0) throw new Error('tone.aac: no ADTS frame at byte ' + at);
+      const len = ((adts[at + 3] & 3) << 11) | (adts[at + 4] << 3) | (adts[at + 5] >> 5), head = (adts[at + 1] & 1) ? 7 : 9;
+      frames.push(adts.subarray(at + head, at + len).toString('base64'));
+      at += len;
+    }
+    const kind = (adts[2] >> 6) + 1, freq = (adts[2] >> 2) & 15, chans = ((adts[2] & 1) << 2) | (adts[3] >> 6);
+    const rate = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000][freq];
+    const aac = await page.evaluate(async (frames, asc, chans, rate) => {
+      const bytes = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+      const seconds = frames.length * 1024 / rate, stage = blank(720, 1280);
+      const m = Object.assign(reelTimes([seconds - 0.2]), {scenes: [{img: null, text: 'AAC'}], sub: '', handle: '', look: 2});
+      const video = await encodeFrames(stage, t => paintReel(stage, m, t), seconds, REEL_FPS, false, () => {}, {on: false});
+      const blob = mp4File(video, {kind: 'aac', channels: chans, rate, desc: Uint8Array.from(asc), samples: frames.map(f => ({data: bytes(f), dur: 1024}))});
+      const u = new Uint8Array(await blob.arrayBuffer());
+      let str = '';
+      for (let i = 0; i < u.length; i += 32768) str += String.fromCharCode.apply(null, u.subarray(i, i + 32768));
+      return {b64: btoa(str), seconds, type: blob.type, pictures: video.samples.length};
+    }, frames, [(kind << 3) | (freq >> 1), ((freq & 1) << 7) | (chans << 3)], chans, rate);
+    fs.writeFileSync(path.join(out, 'made-reel-aac.mp4'), Buffer.from(aac.b64, 'base64'));
+    t.check('AAC sound goes through the panel\'s own MP4 writer', kind === 2 && rate === 48000 && chans === 1 && frames.length > 100 && aac.type === 'video/mp4' && aac.pictures === Math.round(aac.seconds * 30), [kind, rate, chans, frames.length, aac.seconds, aac.pictures]);
+    sounds['made-reel-aac.mp4'] = {w: 720, h: 1280, speech: 3, seconds: aac.seconds, sound: 'aac', voice: 'ffmpeg\'s AAC through the panel\'s writer'};
+  } else console.log('SKIP  the AAC writer check: no ffmpeg here, so there is no tone.aac (pip install imageio-ffmpeg)');
   fs.writeFileSync(path.join(out, 'made.json'), JSON.stringify(sounds, null, 1));
 
   // 12. settings of the studio; nothing hostile ran
@@ -318,6 +386,12 @@ try {
   await page.evaluate(() => document.querySelector('.sheet details[data-sec="studio"] summary').click());
   await sleep(300);
   await t.shot('99b-settings-studio');
+  const inSet = await t.inTop(s => { const c = s.querySelector('[data-sec="pack"]'); return {text: c.textContent, remove: !!c.querySelector('[data-pack-do="remove"]'),
+    names: [...s.querySelector('select[aria-label="گوینده"]').options].map(o => o.value)}; });
+  t.check('the settings show the narrator on the device and list every speaker', inSet.remove && inSet.text.includes('نصب است') && inSet.names[0] === '' && inSet.names[1] === 'device' && inSet.names.includes('onyx'), inSet);
+  await page.click('.sheet [data-sec="pack"] [data-pack-do="remove"]');
+  await page.waitForSelector('.sheet [data-sec="pack"] [data-pack-do="get"]', {timeout: 15000});
+  t.check('it can be removed again', (await t.api('/api/studio/pack')).state === 'none');
   await page.evaluate(() => { const d = document.querySelector('.sheet details[data-sec="studio"]'); d.querySelector('select').value = 'off'; d.querySelector('input[aria-label="کلید Pollinations"]').value = 'sk_test_123'; d.querySelector('.btn.pri').click(); });
   await sleep(800);
   const set = await t.api('/api/settings');

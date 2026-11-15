@@ -20,6 +20,7 @@ import copy
 import hashlib
 import hmac
 import http.client
+import io
 import json
 import math
 import os
@@ -35,6 +36,7 @@ import ssl
 import struct
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 import traceback
@@ -248,6 +250,7 @@ class Config:
         self.gen_api = (env.get("AGENT_GEN_URL") or "https://gen.pollinations.ai").rstrip("/")
         self.horde_api = (env.get("AGENT_HORDE_URL") or "https://aihorde.net/api/v2").rstrip("/")
         self.free_gap = float(env.get("AGENT_FREE_GAP") or (8 if self.demo else FREE_GAP))
+        self.voice_mirror = (env.get("AGENT_VOICE_MIRROR") or "").strip()      # an own copy of the narrator's files, tried first
         self.api_version = env.get("IG_API_VERSION") or API_VERSIONS[0]
         self.ig_graph = (env.get("IG_GRAPH_URL") or "https://graph.instagram.com").rstrip("/")
         self.fb_graph = (env.get("FB_GRAPH_URL") or "https://graph.facebook.com").rstrip("/")
@@ -375,7 +378,7 @@ DEFAULT_SETTINGS = {
     "limits": {"per_hour": 30, "cooldown_min": 30, "daily_posts": 25, "quiet_from": "", "quiet_to": ""},
     "brand": {"about": "", "tone": "صمیمی و محترمانه", "hashtags": "", "handle": ""},
     "ai": {"mode": "free", "url": "", "model": "", "key": ""},
-    "studio": {"image": "auto", "pollen": "", "url": "", "key": "", "model": "", "speaker": "nova", "tts_model": ""},
+    "studio": {"image": "auto", "pollen": "", "url": "", "key": "", "model": "", "speaker": "", "tts_model": ""},
     "media": {"method": "auto", "public_url": "", "temp_ok": False},
     "network": {"proxy": ""},
     "telegram": {"token": "", "chat_id": ""},
@@ -486,8 +489,8 @@ class Settings:
             s["media"]["method"] = "auto"
         if s["studio"]["image"] not in IMAGE_MODES:
             s["studio"]["image"] = "auto"
-        if not re.fullmatch(r"[A-Za-z0-9_.:\-]{1,60}", s["studio"]["speaker"]):
-            s["studio"]["speaker"] = "nova"
+        if not re.fullmatch(r"[A-Za-z0-9_.:\-]{0,60}", s["studio"]["speaker"]):
+            s["studio"]["speaker"] = ""                # no choice: the narrator on the device, or the service's first voice
         handle = s["brand"]["handle"].strip().lstrip("@").strip()
         if handle and not re.fullmatch(r"[A-Za-z0-9._]{1,30}", handle):
             raise UserError("نام کاربری پیج فقط حروف انگلیسی، عدد، نقطه و زیرخط دارد (مثلاً my.page).")
@@ -1567,6 +1570,110 @@ SOUND_MAX = 12 * 1024 * 1024
 SAY_MAX = 400                   # characters one scene's narration may have
 VOICES = ("nova", "shimmer", "alloy", "onyx", "echo", "fable")         # the speakers of the default speech model
 NO_VOICE = "گویندهٔ هوش مصنوعی به کلید Pollinations نیاز دارد (تنظیمات ← ساخت عکس و ویدیو)."
+
+# ── the narrator that lives on the owner's own device ──
+# A Persian voice that needs no key and no service: the Piper voice "amir" (trained on CC0 recordings), Piper's
+# phonemizer (espeak-ng built for the browser) and the ONNX Runtime for the web. None of it is part of this file.
+# When the owner asks for it the agent fetches the six files once (about 85 MB over the network, 93 MB on disk),
+# checks every one against the SHA-256 written here, and from then on the panel runs them in a worker on the
+# device itself: no text leaves the phone and nothing is paid.
+DEVICE = "device"               # the name of that speaker, next to the names of a speech service's voices
+VOICE_FILES = {                 # name: (bytes, SHA-256)
+    "ort.wasm.min.js": (142930, "90533a3fd7006df7f897c0d63c468996da5c8e430e39964d92ebe586c4996614"),
+    "ort-wasm-simd.wasm": (10595041, "f533b5f21790563d7556c611c3835ac65848ee326da2689aac54ed7d9cc8c6a4"),
+    "piper_phonemize.js": (120714, "fef0c2fc442d24fdef5c7c7cc37d5da2314407640fe11ab1bfe347c723dff19b"),
+    "piper_phonemize.wasm": (635212, "b777cd107a91d2bcc6a1ea46f2c26a662a7407394fe84589198aeaa83dd7a9d6"),
+    "piper_phonemize.data": (18077249, "29f1025eb23a5b5c192cd14a6efbce4509402ff265405072ee6f7d1a09b78f8c"),
+    "voice.onnx": (63531379, "fb815380d969ea372b0b21b0de14421f58fe481047e153e69685d079b6e1a9d1"),
+}
+VOICE_FETCH_MB = 85             # what the owner is told the download costs
+_PHON = ("piper_phonemize.js", "piper_phonemize.wasm", "piper_phonemize.data")
+_ORT = ("ort.wasm.min.js", "ort-wasm-simd.wasm")
+_AMIR = "/rhasspy/piper-voices/resolve/6b9cfaacb4fb2e02a9621227e3c1a48bec9710c3/fa/fa_IR/amir/medium/fa_IR-amir-medium.onnx"
+# Where the files come from, tried in this order until every file is there: (address, bytes of the archive or 0,
+# folder inside the archive, the files it brings). An address ending in "/" has each file under its own name;
+# any other address is the one file itself.
+VOICE_SOURCES = [
+    ("https://registry.npmjs.org/@diffusionstudio/piper-wasm/-/piper-wasm-1.0.0.tgz", 9204429, "package/build/", _PHON),
+    ("https://cdn.jsdelivr.net/npm/@diffusionstudio/piper-wasm@1.0.0/build/", 0, "", _PHON),
+    ("https://unpkg.com/@diffusionstudio/piper-wasm@1.0.0/build/", 0, "", _PHON),
+    ("https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/", 0, "", _ORT),
+    ("https://unpkg.com/onnxruntime-web@1.18.0/dist/", 0, "", _ORT),
+    ("https://cdnjs.cloudflare.com/ajax/libs/onnxruntime-web/1.18.0/", 0, "", _ORT),
+    ("https://registry.npmjs.org/onnxruntime-web/-/onnxruntime-web-1.18.0.tgz", 36155916, "package/dist/", _ORT),
+    ("https://huggingface.co" + _AMIR, 0, "", ("voice.onnx",)),
+    ("https://hf-mirror.com" + _AMIR, 0, "", ("voice.onnx",)),
+]
+VOICE_MIME = {"js": "text/javascript; charset=utf-8", "wasm": "application/wasm"}
+# The worker the panel starts. It is the only code of the agent that touches the downloaded files, and its own
+# Content-Security-Policy lets it talk to this agent alone.
+VOICE_WORKER_JS = r"""'use strict';
+/* The narrator on the device: text in, sound out. Runs apart from the page, which stays responsive meanwhile. */
+importScripts('ort.wasm.min.js', 'piper_phonemize.js');
+ort.env.wasm.numThreads = 1;
+ort.env.wasm.wasmPaths = new URL('.', self.location.href).href;
+var session = null, line = Promise.resolve();
+function phonemes(texts) {                             /* for every text the sounds the voice has to make, as numbers */
+  return new Promise(function (resolve, reject) {
+    var out = [], err = [], over = false;
+    function finish() {
+      if (over) return;
+      over = true;
+      if (out.length === texts.length) resolve(out); else reject(new Error('phonemizer: ' + (err.join(' | ').slice(0, 300) || 'no answer')));
+    }
+    createPiperPhonemize({
+      print: function (text) {
+        try { var o = JSON.parse(text); if (o && o.phoneme_ids && o.phoneme_ids.length) out.push(o.phoneme_ids); else err.push(String(text)); }
+        catch (e) { err.push(String(text)); }
+        if (out.length === texts.length) finish();
+      },
+      printErr: function (text) { err.push(String(text)); },
+      locateFile: function (name) { return name; }
+    }).then(function (mod) {
+      try { mod.callMain(['-l', 'fa', '--input', JSON.stringify(texts.map(function (t) { return {text: t}; })), '--espeak_data', '/espeak-ng-data']); }
+      catch (e) { err.push(String(e)); }
+      setTimeout(finish, 2000);
+    }, reject);
+  });
+}
+function wide(list) { return BigInt64Array.from(list, function (x) { return BigInt(x); }); }
+async function voice(tell) {                           /* the voice itself: by far the largest file, so its progress is told */
+  var res = await fetch('voice.onnx');
+  if (!res.ok) throw new Error('voice file: HTTP ' + res.status);
+  var total = +res.headers.get('Content-Length') || 0;
+  if (!res.body || !res.body.getReader) return new Uint8Array(await res.arrayBuffer());
+  var parts = [], got = 0, reader = res.body.getReader();
+  for (;;) {
+    var part = await reader.read();
+    if (part.done) break;
+    parts.push(part.value);
+    got += part.value.length;
+    if (total) tell(Math.min(99, Math.floor(got * 100 / total)));
+  }
+  var all = new Uint8Array(got), at = 0;
+  parts.forEach(function (x) { all.set(x, at); at += x.length; });
+  return all;
+}
+async function read(id, texts) {
+  var pct = 0, beat = setInterval(function () { self.postMessage({id: id, kind: 'step', i: -1, pct: pct}); }, 3000);
+  try {
+    self.postMessage({id: id, kind: 'step', i: -1, pct: 0});
+    var ids = await phonemes(texts);
+    if (!session) session = await ort.InferenceSession.create(await voice(function (p) { pct = p; }), {executionProviders: ['wasm']});
+    clearInterval(beat);
+    for (var i = 0; i < ids.length; i++) {
+      self.postMessage({id: id, kind: 'step', i: i});
+      var got = await session.run({input: new ort.Tensor('int64', wide(ids[i]), [1, ids[i].length]),
+        input_lengths: new ort.Tensor('int64', wide([ids[i].length]), [1]), scales: new ort.Tensor('float32', Float32Array.from([0.667, 1, 0.8]), [3])});
+      var pcm = new Float32Array(got.output.data);
+      self.postMessage({id: id, kind: 'clip', i: i, rate: 22050, pcm: pcm}, [pcm.buffer]);
+    }
+    self.postMessage({id: id, kind: 'done'});
+  } catch (e) { self.postMessage({id: id, kind: 'error', error: String((e && e.message) || e)}); }
+  clearInterval(beat);
+}
+self.onmessage = function (ev) { line = line.then(function () { return read(ev.data.id, ev.data.texts); }); };
+"""
 SCENE_LINES = ["جزئیات بیشتر در کپشن 👇", "همین حالا پیام بده", "برای دوستانت هم بفرست", "ما را دنبال کن"]
 
 
@@ -1673,7 +1780,7 @@ class Studio:
         c = self.conf()
         return {"image": c["image"], "pollen": bool(c["pollen"]), "custom": bool(c["url"]),
                 "free_wait": max(0, int(self.free_at - now())), "text": self.agent.ai.mode(),
-                "voice": self.voice_ready(), "speaker": c["speaker"]}
+                "voice": self.voice_ready(), "speaker": self.speaker(None), "pack": self.agent.pack.view()}
 
     # ── words ──
     def question(self, idea, kind, n):
@@ -2063,7 +2170,21 @@ class Studio:
                     return
 
     def speaker(self, value):
-        return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:\-]{1,60}", value) else self.conf()["speaker"]
+        """Who reads: the name the panel sent, else the saved one, else whoever is there. Without a speech service
+        that is the narrator on the device; in the demo too once it is installed, because the demo's service only beeps."""
+        for name in (value, self.conf()["speaker"]):
+            if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_.:\-]{1,60}", name):
+                return name
+        if not self.voice_ready() or (self.cfg.demo and self.agent.pack.ready()):
+            return DEVICE
+        return VOICES[0]
+
+    def lines(self, texts, speaker):
+        """One entry per line to read. For the narrator on the device the panel does the reading itself; it gets
+        the line the way it should be pronounced (numbers and signs in words)."""
+        if speaker == DEVICE:
+            return [{"text": t, "say": spoken(t), "file": "", "preview": "", "source": DEVICE, "why": ""} for t in texts]
+        return [{"text": t, "file": "", "preview": "", "source": "", "why": ""} for t in texts]
 
     def voice(self, data):
         texts = [str(t or "").strip()[:SAY_MAX] for t in (data.get("texts") if isinstance(data.get("texts"), list) else [])][:8]
@@ -2072,8 +2193,9 @@ class Studio:
         return self.start("voice", self.do_voice, texts, self.speaker(data.get("speaker")))
 
     def do_voice(self, job, texts, speaker):
-        job["voices"] = [{"text": t, "file": "", "preview": "", "source": "", "why": ""} for t in texts]
-        self.read(job, speaker)
+        job["voices"] = self.lines(texts, speaker)
+        if speaker != DEVICE:
+            self.read(job, speaker)
 
     def check_key(self):
         """Is the saved Pollinations key accepted, and what does it carry?"""
@@ -2163,9 +2285,11 @@ class Studio:
         prompts = [sc["image"] for sc in plan["scenes"]] if kind == "reel" else [plan["image"]]
         job["pictures"] = [{"prompt": p, "file": "", "preview": "", "source": "", "why": ""} for p in prompts]
         if voice:
-            job["voices"] = [{"text": sc["say"], "file": "", "preview": "", "source": "", "why": ""} for sc in plan["scenes"]]
+            job["voices"] = self.lines([sc["say"] for sc in plan["scenes"]], voice)
         job["plan"] = plan
-        if voice and self.voice_ready():               # the narrator first: it is quick, the pictures are not
+        if voice == DEVICE:
+            pass                                       # read on the device, by the panel, once the job is done
+        elif voice and self.voice_ready():             # the narrator first: it is quick, the pictures are not
             self.read(job, voice)
         elif voice:
             for v in job["voices"]:
@@ -2266,6 +2390,217 @@ DEFAULT_RULES = [
     {"scope": "dm", "name": "ساعت کاری و آدرس", "keywords": ["ساعت کاری", "تا ساعت چند", "آدرس", "کجایید", "لوکیشن"],
      "mode": "any", "replies": ["سلام 🌹 ممنون از پیام‌تون. ساعت کاری و آدرس در بیوی پیج هست؛ اگر سؤال دیگه‌ای بود در خدمتیم."]},
 ]
+
+
+class PackError(Exception):
+    def __init__(self, message):
+        super().__init__(message)
+        self.message = message
+
+
+class VoicePack:
+    """The files of the narrator on the device (see VOICE_FILES): fetched once on request, checked, handed to the panel."""
+
+    def __init__(self, agent):
+        self.agent, self.cfg = agent, agent.cfg
+        self.dir = os.path.join(agent.cfg.data_dir, "voice")
+        self.files, self.sources = dict(VOICE_FILES), list(VOICE_SOURCES)
+        self.lock, self.stop = threading.Lock(), threading.Event()
+        self.busy, self.why, self.part, self.thread = False, "", 0, None
+        self.sure = set()                              # files whose content was checked since the agent started
+
+    def have(self, name):
+        try:
+            return os.path.getsize(os.path.join(self.dir, name)) == self.files[name][0]
+        except OSError:
+            return False
+
+    def ready(self):
+        return not self.busy and all(self.have(n) for n in self.files)
+
+    def view(self):
+        total = sum(v[0] for v in self.files.values())
+        done = sum(self.files[n][0] for n in self.files if self.have(n))
+        state = "loading" if self.busy else "ready" if done == total else "failed" if self.why else "none"
+        return {"state": state, "pct": 100 if state == "ready" else min(99, int((done + self.part) * 100 // max(1, total))),
+                "why": self.why if state == "failed" else "", "mb": int(round(total / 1e6)), "fetch_mb": VOICE_FETCH_MB}
+
+    def path(self, name):
+        return os.path.join(self.dir, name) if name in self.files and self.ready() else None
+
+    def start(self):
+        with self.lock:
+            if not self.busy and not all(self.have(n) and n in self.sure for n in self.files):
+                self.busy, self.why, self.part = True, "", 0
+                self.stop.clear()
+                self.thread = threading.Thread(target=self.run, name="voice-pack", daemon=True)
+                self.thread.start()
+        return self.view()
+
+    def cancel(self):
+        self.stop.set()
+        return self.view()
+
+    def remove(self):
+        self.stop.set()
+        t = self.thread
+        if t is not None and t.is_alive():
+            t.join(20)
+        with self.lock:
+            if self.busy:
+                raise UserError("دانلود هنوز در حال توقف است؛ چند ثانیهٔ دیگر دوباره بزن.", 409)
+            for name in (os.listdir(self.dir) if os.path.isdir(self.dir) else []):
+                if name in self.files or name.endswith((".part", ".new")):
+                    try:
+                        os.remove(os.path.join(self.dir, name))
+                    except OSError:
+                        pass
+            self.sure.clear()
+            self.why, self.part = "", 0
+        return self.view()
+
+    # ── fetching ──
+    def run(self):
+        why = ""
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+            for name in self.files:                    # what is already there (left from before, or copied by hand) is checked, not trusted
+                if self.have(name) and name not in self.sure:
+                    try:
+                        self.accept(os.path.join(self.dir, name), name)
+                    except PackError:
+                        pass
+            missing = sum(self.files[n][0] for n in self.files if not self.have(n))
+            if shutil.disk_usage(self.dir).free < missing + 64 * 1024 * 1024:
+                raise PackError("حافظهٔ دستگاه برای گوینده جا ندارد (حدود %s مگابایت لازم است)." % fa(int(missing / 1e6) + 64))
+            mirror = [(self.cfg.voice_mirror.rstrip("/") + "/", 0, "", tuple(self.files))] if self.cfg.voice_mirror else []
+            for base, archive, inside, names in mirror + self.sources:
+                need = [n for n in names if not self.have(n)]
+                if not need or self.stop.is_set():
+                    continue
+                try:
+                    self.bring(base, archive, inside, need)
+                except PackError as e:
+                    why = e.message
+                    log("voice pack:", base, "→", e.message)
+                self.part = 0
+        except PackError as e:
+            why = e.message
+        except Exception:
+            log("voice pack:", traceback.format_exc())
+            why = "خطای داخلی برنامه؛ جزئیات در ترمینال نوشته شد."
+        with self.lock:
+            self.part, self.busy = 0, False
+            done = all(self.have(n) for n in self.files)
+            self.why = "" if done or self.stop.is_set() else (why or "فایل‌های گوینده کامل نشد.")
+        if done:
+            log("voice pack: the narrator is on this device now (%d MB)" % round(sum(v[0] for v in self.files.values()) / 1e6))
+
+    def bring(self, base, archive, inside, need):
+        weight = sum(self.files[n][0] for n in need)
+
+        def moved(frac, before=0, share=weight):
+            self.part = before + int(frac * share)
+
+        if archive:                                    # one archive carries them all
+            tmp = self.download(base, archive, moved)
+            try:
+                with tarfile.open(tmp, "r:gz") as tar:
+                    for name in need:
+                        member = tar.extractfile(inside + name)
+                        if member is None:
+                            raise KeyError(name)
+                        new = os.path.join(self.dir, name + ".new")
+                        with member, open(new, "wb") as fh:
+                            shutil.copyfileobj(member, fh, 1 << 16)
+                        self.accept(new, name)
+            except (tarfile.TarError, KeyError, EOFError, OSError, zlib.error):
+                raise PackError("بستهٔ دانلودشده باز نشد.")
+            finally:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+            return
+        before = 0
+        for name in need:
+            size = self.files[name][0]
+            tmp = self.download(base + name if base.endswith("/") else base, size, lambda f, b=before, sz=size: moved(f, b, sz))
+            self.accept(tmp, name)
+            before += size
+
+    def accept(self, path, name):
+        """Keeps the file only if it is, byte for byte, the one this agent was written for."""
+        size, sha = self.files[name]
+        digest, got = hashlib.sha256(), 0
+        try:
+            with open(path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    digest.update(chunk)
+                    got += len(chunk)
+        except OSError:
+            got = -1
+        if got != size or digest.hexdigest() != sha:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            raise PackError("فایل «%s» با نسخهٔ اصلی یکی نبود و کنار گذاشته شد." % name)
+        final = os.path.join(self.dir, name)
+        if path != final:
+            os.replace(path, final)
+        self.sure.add(name)
+
+    def download(self, url, size, progress):
+        """Fetches one address into a .part file and returns its path. A broken connection is picked up where it
+        stopped; six tries in a row that bring nothing end it."""
+        part = os.path.join(self.dir, hashlib.sha1(url.encode("utf-8")).hexdigest()[:16] + ".part")
+        idle, last = 0, "سرور جواب نداد"
+        while idle < 6:
+            if self.stop.is_set():
+                raise PackError("لغو شد.")
+            have = os.path.getsize(part) if os.path.exists(part) else 0
+            if have == size:
+                return part
+            if have > size:
+                os.remove(part)
+                have = 0
+            headers = {"Accept-Encoding": "identity"}
+            if have:
+                headers["Range"] = "bytes=%d-" % have
+            got = 0
+            try:
+                with self.agent.graph.opener().open(urllib.request.Request(url, headers=headers), timeout=45) as res:
+                    if have and res.status != 206:     # the server starts from the beginning
+                        have = 0
+                    with open(part, "ab" if have else "wb") as fh:
+                        while have + got <= size:
+                            if self.stop.is_set():
+                                raise PackError("لغو شد.")
+                            chunk = res.read(1 << 16)
+                            if not chunk:
+                                break
+                            fh.write(chunk)
+                            got += len(chunk)
+                            progress(min(1.0, (have + got) / float(size)))
+                if have + got == size:
+                    return part
+                if have + got > size:
+                    os.remove(part)
+                    raise PackError("اندازهٔ فایل روی سرور با نسخهٔ اصلی یکی نبود.")
+                last = "ارتباط وسط دانلود قطع شد"
+            except urllib.error.HTTPError as e:
+                if e.code == 416:                      # the rest that was asked for does not exist: start over
+                    os.remove(part)
+                elif e.code not in (408, 425, 429, 500, 502, 503, 504):
+                    raise PackError("سرور فایل را نداد (HTTP %d)." % e.code)
+                last = "سرور فایل را نداد (HTTP %d)" % e.code
+            except (urllib.error.URLError, socket.timeout, ssl.SSLError, http.client.HTTPException, OSError) as e:
+                last = "به سرور دانلود دسترسی نبود (%s)" % (str(getattr(e, "reason", e))[:80] or e.__class__.__name__)
+            idle = 0 if got else idle + 1
+            if self.stop.wait(min(15, 1 + 3 * idle) if not self.cfg.sim else 0.05):
+                raise PackError("لغو شد.")
+        raise PackError(last + ". اینترنت (و فیلترشکن) را بررسی کن و دوباره بزن؛ دانلود از همان‌جا ادامه پیدا می‌کند.")
 
 
 class Rules:
@@ -3504,6 +3839,7 @@ class Agent:
         self.ai = AI(cfg, self.settings, self.graph, self.ig)
         self.rules = Rules(self.db)
         self.publisher, self.inbox, self.direct, self.analytics = Publisher(self), Inbox(self), Direct(self), Analytics(self)
+        self.pack = VoicePack(self)
         self.studio = Studio(self)
         self.sim = None
         self.wake, self.stop_flag = threading.Event(), threading.Event()
@@ -3898,6 +4234,8 @@ class Sim:
         self.ai_calls, self.ai_script, self.horde_jobs = [], {}, {}
         self.ai_key = "sk_sim_demo_key"
         self.pollen = 1.25                             # credit of that key; None: the key may not see its balance
+        self.voice_cut = 0                             # > 0: the next download of a narrator file breaks off after that many bytes
+        self.pack_files = dict(SIM_VOICE_FILES)
         self.ai_text = None                            # the text service's answer: a string, or a function of the request
         self.ai_delay = 0.0                            # seconds every picture takes
         self.free_gap, self.free_next = {"image": 0.0, "text": 0.0}, {"image": 0.0, "text": 0.0}
@@ -4021,6 +4359,23 @@ class Sim:
         return jdump({"caption": "%s ✨\nهمین امروز سر بزنید؛ منتظرتان هستیم 🌿" % idea, "hashtags": ["#پیشنهاد_ویژه", "#کسب_و_کار", "#اینستاگرام"],
                       "headline": head, "sub": "همین حالا پیام بده", "image": "a warm, inviting photo that shows the offer", "scenes": scenes})
 
+    def pack_tgz(self):
+        """The phonemizer's three files the way npm ships them: one .tgz."""
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            for name in _PHON:
+                info = tarfile.TarInfo("package/build/" + name)
+                info.size = len(self.pack_files[name])
+                tar.addfile(info, io.BytesIO(self.pack_files[name]))
+        return buf.getvalue()
+
+    def pack_setup(self, pack, base):
+        """Points the agent's narrator pack at these stand-ins: same steps, a few kilobytes instead of 85 MB."""
+        tgz = self.pack_tgz()
+        pack.files = {n: (len(b), hashlib.sha256(b).hexdigest()) for n, b in self.pack_files.items()}
+        pack.sources = [(base + "/pack.tgz", len(tgz), "package/build/", _PHON), (base + "/", 0, "", _PHON),
+                        (base + "/", 0, "", _ORT), (base + "/", 0, "", ("voice.onnx",))]
+
     def script(self, service, status, obj=None, headers=None, times=1):
         """The next call(s) to one of the AI stand-ins ("pimg", "pgen", "horde", "oimg", "ptxt") get this answer."""
         self.ai_script.setdefault(service, []).extend([(status, obj if obj is not None else {}, headers or {})] * times)
@@ -4108,6 +4463,22 @@ class Sim:
             if method == "POST" and tail == "openai":
                 return answer(200, {"choices": [{"index": 0, "message": {"role": "assistant", "content": said}, "finish_reason": "stop"}]})
             return 200, "text/plain; charset=utf-8", str(said).encode("utf-8"), {}
+        if service == "voice":                         # where the narrator's files are "downloaded" from
+            blob = self.pack_tgz() if tail == "pack.tgz" else self.pack_files.get(tail)
+            if blob is None:
+                return answer(404, {"error": "no such file"})
+            extra, status = {"Accept-Ranges": "bytes"}, 200
+            rng = re.fullmatch(r"bytes=(\d+)-", headers.get("Range") or "")
+            if rng:
+                start = int(rng.group(1))
+                if start >= len(blob):
+                    return answer(416, {"error": "range"}, {"Content-Range": "bytes */%d" % len(blob)})
+                extra["Content-Range"] = "bytes %d-%d/%d" % (start, len(blob) - 1, len(blob))
+                blob, status = blob[start:], 206
+            with self.lock:
+                if self.voice_cut and len(blob) > self.voice_cut:
+                    extra["X-Sim-Cut"], self.voice_cut = str(self.voice_cut), 0
+            return status, "application/octet-stream", blob, extra
         if service == "horde":
             if headers.get("apikey") != "0000000000":
                 return answer(401, {"message": "No user matching sent API Key. Have you remembered to register at https://aihorde.net/register ?", "rc": "InvalidAPIKey"})
@@ -4513,6 +4884,49 @@ MANIFEST = {"name": "ایجنت اینستاگرام", "short_name": "ایجنت
                       {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png"}]}
 
 
+# What the simulator hands out in place of the narrator's files (tests and the browser checks). They have the same
+# names and the same shape as the real ones, so the agent's worker runs unchanged; what comes out is a tone as
+# long as the line, not speech.
+SIM_VOICE_FILES = {
+    "ort.wasm.min.js": b"""/* stand-in for the ONNX runtime: a tone as long as the sounds it is given */
+self.ort = {env: {wasm: {}},
+  Tensor: function (type, data, dims) { this.type = type; this.data = data; this.dims = dims; },
+  InferenceSession: {create: async function (model) {
+    if (!model || model.length < 8) throw new Error('no voice model');
+    var bin = await fetch(self.ort.env.wasm.wasmPaths + 'ort-wasm-simd.wasm');
+    if (!bin.ok) throw new Error('runtime: HTTP ' + bin.status);
+    return {inputNames: ['input', 'input_lengths', 'scales'], run: async function (feeds) {
+      var n = feeds.input.data.length, rate = 22050, len = Math.round(rate * (0.3 + 0.03 * n)), out = new Float32Array(len);
+      if (Number(feeds.input_lengths.data[0]) !== n || feeds.scales.data.length !== 3) throw new Error('bad input');
+      for (var i = 0; i < len; i++) {
+        var t = i / rate, edge = Math.min(1, t * 25, (len - i) / rate * 25);
+        out[i] = 0.45 * edge * Math.sin(2 * Math.PI * 330 * t) * (Math.floor(t * 5) % 2 ? 0.35 : 1);
+      }
+      return {output: {data: out, dims: [1, 1, len]}};
+    }};
+  }}};
+""",
+    "ort-wasm-simd.wasm": b"\x00asm\x01\x00\x00\x00" + b"stand-in runtime " * 40,
+    "piper_phonemize.js": b"""/* stand-in for the phonemizer: two numbers per letter */
+self.createPiperPhonemize = async function (opts) {
+  var data = await fetch(opts.locateFile('piper_phonemize.data')), code = await fetch(opts.locateFile('piper_phonemize.wasm'));
+  if (!data.ok || !code.ok) throw new Error('phonemizer files: HTTP ' + data.status + ' ' + code.status);
+  return {callMain: function (args) {
+    JSON.parse(args[args.indexOf('--input') + 1]).forEach(function (item) {
+      var ids = [1];
+      for (var i = 0; i < item.text.length; i++) ids.push(0, 10 + item.text.charCodeAt(i) % 100);
+      ids.push(0, 2);
+      opts.print(JSON.stringify({phoneme_ids: ids, text: item.text}));
+    });
+  }};
+};
+""",
+    "piper_phonemize.wasm": b"\x00asm\x01\x00\x00\x00" + b"stand-in phonemizer " * 30,
+    "piper_phonemize.data": b"stand-in espeak data\n" * 400,
+    "voice.onnx": b"stand-in voice model\n" * 3000,
+}
+
+
 def png_file(width, height, rows):
     """A PNG out of raw RGB rows (each row starts with a zero byte), so that no image library is needed."""
     def chunk(tag, data):
@@ -4761,7 +5175,7 @@ def make_handler(app, media_only=False):
             name = host[:host.rfind(":")] if ":" in host and not host.endswith("]") else host
             return name in ("127.0.0.1", "localhost", "[::1]")
 
-        def send_file(self, path, mime):
+        def send_file(self, path, mime, cache="private, max-age=3600"):
             try:
                 size = os.path.getsize(path)
             except OSError:
@@ -4787,7 +5201,7 @@ def make_handler(app, media_only=False):
             self.send_header("Content-Length", str(length))
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Cache-Control", "private, max-age=3600")
+            self.send_header("Cache-Control", cache)
             if status == 206:
                 self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
             self.end_headers()
@@ -4858,7 +5272,7 @@ def make_handler(app, media_only=False):
             nonce = secrets.token_urlsafe(16)
             html = UI_HTML.replace("__NONCE__", nonce).replace("__VERSION__", VERSION)
             csp = ("default-src 'self'; script-src 'nonce-%s'; style-src 'nonce-%s'; img-src 'self' https: data: blob:; "
-                   "media-src 'self' https: blob:; connect-src 'self'; base-uri 'none'; form-action 'self'; object-src 'none'"
+                   "media-src 'self' https: blob:; connect-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'self'; object-src 'none'"
                    % (nonce, nonce)) + ("" if cfg.embed_ok else "; frame-ancestors 'none'")
             return self.send_bytes(200, html.encode("utf-8"), "text/html; charset=utf-8",
                                    {"Content-Security-Policy": csp, "Cache-Control": "no-store"})
@@ -4874,6 +5288,16 @@ def make_handler(app, media_only=False):
             raw = self.read_body(8 * 1024 * 1024) if method == "POST" else b""
             if rest.startswith("ai/"):
                 status, ctype, blob, extra = sim.ai(method, rest[3:], q, raw, self.headers)
+                cut = int(extra.pop("X-Sim-Cut", 0))
+                if cut:                                # a connection that breaks in the middle of a download
+                    self.send_response(status)
+                    self.send_header("Content-Type", ctype)
+                    self.send_header("Content-Length", str(len(blob)))
+                    self.end_headers()
+                    self.wfile.write(blob[:cut])
+                    self.wfile.flush()
+                    self.close_connection = True
+                    return None
                 return self.send_bytes(status, blob, ctype, dict(extra, **{"Cache-Control": "no-store"}))
             ctype = self.headers.get("Content-Type") or ""
             if rest.startswith("tg/") and ctype.startswith("multipart/form-data"):
@@ -4937,6 +5361,16 @@ def make_handler(app, media_only=False):
                 if not f:
                     return self.send_text(404, "not found")
                 return self.send_file(agent.store.path(f), f["mime"])
+            m = re.fullmatch(r"voice/([a-z0-9_.\-]{1,40})", path)
+            if m and method in ("GET", "HEAD"):        # the narrator on the device: the worker, and the files it runs
+                if m.group(1) == "worker.js":
+                    return self.send_bytes(200, VOICE_WORKER_JS.encode("utf-8"), VOICE_MIME["js"], {
+                        "Cache-Control": "no-store",
+                        "Content-Security-Policy": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'"})
+                found = agent.pack.path(m.group(1))
+                if not found:
+                    return self.send_text(404, "not found")
+                return self.send_file(found, VOICE_MIME.get(m.group(1).rsplit(".", 1)[-1], "application/octet-stream"), "private, max-age=31536000, immutable")
             out = api_call(app, method, path, q, body)
             return self.send_json(200, out)
 
@@ -5136,6 +5570,12 @@ def api_call(app, method, path, q, body):
         return agent.studio.voice(body)
     if path == "studio/key" and P:
         return agent.studio.check_key()
+    if path == "studio/pack":
+        if G:
+            return agent.pack.view()
+        return agent.pack.start() if P else agent.pack.remove() if D else None
+    if path == "studio/pack/cancel" and P:
+        return agent.pack.cancel()
     m = re.fullmatch(r"studio/job/([0-9a-f]{16})(/cancel)?", path)
     if m and m.group(2) and P:
         return agent.studio.cancel(m.group(1))
@@ -5192,6 +5632,8 @@ class App:
             base = "http://127.0.0.1:%d/_sim" % self.port
             cfg.ig_graph, cfg.fb_graph, cfg.telegram_api = base + "/ig", base + "/fb", base + "/tg"
             cfg.image_api, cfg.gen_api, cfg.horde_api = base + "/ai/pimg", base + "/ai/pgen", base + "/ai/horde"
+            if not cfg.demo:                           # the demo keeps the real narrator: there it can really be heard
+                self.agent.sim.pack_setup(self.agent.pack, base + "/ai/voice")
         for srv in (self.httpd, self.media_httpd):     # the servers answer first: the simulator is reached over HTTP
             threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True).start()
         if cfg.demo:
@@ -5694,10 +6136,12 @@ async function homeByHand() {
   const c = S.st.counts, idea = h('textarea', {class: 'in', rows: 2, placeholder: 'مثلاً: تخفیف ۲۰٪ لاتهٔ پاییزی تا آخر هفته', 'aria-label': 'ایده', value: S.typed.idea || ''});
   idea.addEventListener('input', () => { S.typed.idea = idea.value; });
   const make = kind => studio({idea: idea.value, kind}, r => { delete S.typed.idea; composer(null, r); });
+  const narrator = S.st.studio.speaker === DEVICE ? packed() : !!S.st.studio.voice;
   const out = [h('div', {class: 'card col'}, h('h2', null, 'چه چیزی بسازم؟'),
-    h('p', {class: 'muted sm'}, 'ایده‌ات را در یک جمله بنویس؛ ایجنت تصویر یا ویدیوی کوتاه، کپشن و هشتگ را آماده می‌کند.'), idea,
+    h('p', {class: 'muted sm'}, 'ایده‌ات را در یک جمله بنویس؛ ایجنت عکس یا ویدیوی کوتاه' + (narrator ? ' (با صدای گوینده)' : '') + '، کپشن و هشتگ را آماده می‌کند.'), idea,
     h('div', {class: 'row'}, h('button', {class: 'btn pri grow', 'data-make': 'image', onclick: () => make('image')}, icon('image'), 'عکس بساز'),
-      h('button', {class: 'btn pri grow', 'data-make': 'reel', onclick: () => make('reel')}, icon('film'), 'ویدیو بساز')))];
+      h('button', {class: 'btn pri grow', 'data-make': 'reel', onclick: () => make('reel')}, icon('film'), 'ویدیو بساز')),
+    narrator ? null : h('div', {class: 'col', 'data-home-voice': '1'}, h('b', {class: 'sm'}, 'ویدیو با صدای گوینده'), packBox(() => render(false))))];
   const [queue, log] = await Promise.all([GET('/api/posts?group=queue'), GET('/api/log?limit=4')]);
   const due = queue.items.filter(p => p.status === 'due'), soon = queue.items.filter(p => p.status === 'scheduled');
   if (due.length) out.push(h('h3', null, 'وقت انتشار این‌ها رسیده'), due.map(postCard));
@@ -6053,6 +6497,7 @@ function composer(post, seed) {
 const FACE = '"Vazirmatn", "Vazir", Tahoma, system-ui, sans-serif';
 const LOOKS = [['#f97316', '#db2777'], ['#0ea5e9', '#4338ca'], ['#10b981', '#065f46'], ['#111827', '#4b5563'], ['#8b5cf6', '#4c1d95'], ['#fde68a', '#fca5a5'], ['#f59e0b', '#b45309'], ['#e0f2fe', '#a5b4fc']];
 const SCENE_SEC = 3.2, FADE_SEC = 0.5, REEL_FPS = 30, AUDIO_RATE = 48000, VOICE_LEAD = 0.35, VOICE_TAIL = 0.6;
+const DEVICE = 'device', DEVICE_NAME = 'امیر — فارسی، روی همین گوشی (رایگان)';
 const SPEAKERS = [['nova', 'زن (nova)'], ['shimmer', 'زن (shimmer)'], ['alloy', 'خنثی (alloy)'], ['onyx', 'مرد (onyx)'], ['echo', 'مرد (echo)'], ['fable', 'مرد (fable)']];
 const PIC_FROM = {key: 'Pollinations', free: 'Pollinations رایگان', horde: 'AI Horde', custom: 'سرویس خودت'};
 const NO_PLAN = {off: 'دستیار در تنظیمات خاموش است', limit: 'سرویس رایگان متن نوبت نداد', down: 'به سرویس متن دسترسی نبود', format: 'پاسخ سرویس متن قابل‌استفاده نبود'};
@@ -6394,22 +6839,85 @@ async function renderReel(m, clips, onStep, stop) {
   throw last instanceof Err ? last : new Err('ساخت ویدیو روی این دستگاه انجام نشد' + (last && last.message ? ' (' + last.message + ')' : '') + '.');
 }
 
+/* ── the narrator on the device: a worker runs the downloaded Persian voice; no text leaves the phone ── */
+const Dev = {w: null, n: 0, jobs: {}};
+function devQuit(why) {
+  if (Dev.w) { try { Dev.w.terminate(); } catch (e) { /* gone already */ } Dev.w = null; }
+  const jobs = Dev.jobs;
+  Dev.jobs = {};
+  for (const k in jobs) { clearTimeout(jobs[k].timer); jobs[k].no(new Err(why || 'لغو شد.')); }
+}
+function devRead(texts, onStep) {                      /* → one AudioBuffer per text (none where nothing came out) */
+  return new Promise((ok, no) => {
+    if (typeof Worker === 'undefined' || typeof WebAssembly === 'undefined' || typeof BigInt64Array === 'undefined') return no(new Err('این مرورگر گویندهٔ روی گوشی را اجرا نمی‌کند؛ با Chrome امتحان کن.'));
+    if (!Dev.w) {
+      Dev.w = new Worker('/api/voice/worker.js');
+      Dev.w.onmessage = ev => {
+        const d = ev.data, job = Dev.jobs[d.id];
+        if (!job) return;
+        job.alive();
+        if (d.kind === 'step') { if (job.onStep) job.onStep(d.i, d.pct || 0); return; }
+        if (d.kind === 'clip') {
+          if (d.pcm && d.pcm.length) { const buf = new AudioBuffer({length: d.pcm.length, sampleRate: d.rate, numberOfChannels: 1}); buf.copyToChannel(d.pcm, 0); job.out[d.i] = buf; }
+          return;
+        }
+        clearTimeout(job.timer); delete Dev.jobs[d.id];
+        if (d.kind === 'done') return job.ok(job.out);
+        devQuit();                                     /* after an error the worker starts fresh next time */
+        job.no(new Err('گویندهٔ روی گوشی نتوانست بخواند (' + String(d.error).slice(0, 140) + ').'));
+      };
+      Dev.w.onerror = ev => { if (ev && ev.preventDefault) ev.preventDefault(); devQuit('گویندهٔ روی گوشی اجرا نشد' + (ev && ev.message ? ' (' + String(ev.message).slice(0, 140) + ')' : '') + '.'); };
+    }
+    const id = ++Dev.n, job = {ok, no, onStep, out: [], timer: 0};
+    job.alive = () => { clearTimeout(job.timer); job.timer = setTimeout(() => devQuit('گویندهٔ روی گوشی جواب نداد؛ شاید حافظهٔ گوشی کم باشد. برنامه‌های دیگر را ببند و دوباره امتحان کن.'), 150000); };
+    Dev.jobs[id] = job; job.alive();
+    Dev.w.postMessage({id, texts});
+  });
+}
+const packed = () => S.st.studio.pack.state === 'ready';
+/* the one-time download of that narrator: where it stands, and the button; again() redraws the caller once it is there */
+function packBox(again) {
+  const box = h('div', {class: 'col'});
+  let timer = 0, was = S.st.studio.pack.state;
+  const poll = async () => { if (!box.isConnected) return; try { draw(await GET('/api/studio/pack')); } catch (e) { timer = setTimeout(poll, 3000); } };
+  const act = (path, del) => e => run(e.currentTarget, async () => draw(await (del ? DEL(path) : POST(path))));
+  const draw = pk => {
+    S.st.studio.pack = pk; box.setAttribute('data-pack', pk.state);
+    clearTimeout(timer);
+    if (pk.state === 'ready' && was !== 'ready' && again) { was = pk.state; return again(); }
+    was = pk.state;
+    if (pk.state === 'loading') {
+      const bar = h('i'); bar.style.width = pk.pct + '%';
+      fill(box, h('div', {class: 'sm'}, 'در حال دانلود گویندهٔ فارسی… ' + fa(pk.pct) + '٪'), h('div', {class: 'bar'}, bar),
+        h('div', {class: 'row'}, h('span', {class: 'grow muted sm'}, 'ایجنت را باز نگه دار. تا تمام شود می‌توانی ویدیوی بی‌صدا بسازی.'), h('button', {class: 'btn sm', 'data-pack-do': 'stop', onclick: act('/api/studio/pack/cancel')}, 'توقف')));
+      timer = setTimeout(poll, 1000);
+    } else if (pk.state === 'ready') fill(box, h('div', {class: 'row sm'}, h('i', {class: 'dot'}), h('span', {class: 'grow'}, 'گویندهٔ فارسی روی این دستگاه نصب است (' + fa(pk.mb) + ' مگابایت).'),
+      h('button', {class: 'btn sm danger', 'data-pack-do': 'remove', onclick: act('/api/studio/pack', true)}, 'حذف')));
+    else fill(box, pk.state === 'failed' ? h('div', {class: 'sm down'}, 'دانلود گوینده کامل نشد: ' + pk.why) : null,
+      h('div', {class: 'muted sm'}, 'گویندهٔ فارسیِ رایگان یک بار دانلود می‌شود (حدود ' + fa(pk.fetch_mb) + ' مگابایت) و بعد روی همین دستگاه، بدون کلید و بدون هزینه، متن ویدیو را می‌خواند.'),
+      h('div', {class: 'row'}, h('button', {class: 'btn sm', 'data-pack-do': 'get', onclick: act('/api/studio/pack')}, icon('download'), pk.state === 'failed' ? 'ادامهٔ دانلود' : 'دانلود گویندهٔ فارسی')));
+  };
+  draw(S.st.studio.pack);
+  return box;
+}
+
 function studio(init, done) {
   init = init || {};
   const m = {kind: init.kind === 'reel' ? 'reel' : 'image', style: 'photo', scenes: 4, pics: S.st.studio.image !== 'off', look: Math.floor(Math.random() * LOOKS.length), words: true, shots: [],
-    narr: !!S.st.studio.voice, speaker: S.st.studio.speaker || 'nova', voice: 'none', own: null};
+    narr: true, speaker: S.st.studio.speaker || DEVICE, voice: 'none', own: null};
+  const canRead = () => (m.speaker === DEVICE ? packed() : !!S.st.studio.voice);        /* is the chosen narrator there? */
   const stop = {on: false}, handle = () => (S.st.connected ? S.st.account.username : S.st.handle) || '';
   let timer = 0, anim = 0, jobId = '', player = null;
   const hush = () => { if (player) { const p = player; player = null; p.ac.close().catch(() => {}); } };
   const quit = () => { clearTimeout(timer); cancelAnimationFrame(anim); hush(); if (jobId) { POST('/api/studio/job/' + jobId + '/cancel').catch(() => {}); jobId = ''; } };
-  const s = sheet('بساز', {onclose: () => { stop.on = true; quit(); }});
+  const s = sheet('بساز', {onclose: () => { stop.on = true; quit(); devQuit(); }});
   const idea = h('textarea', {class: 'in', rows: 3, placeholder: 'مثلاً: تخفیف ۲۰٪ لاتهٔ پاییزی تا آخر هفته', 'aria-label': 'ایدهٔ پست', value: init.idea || ''});
-  const demo = () => (S.st.demo ? h('div', {class: 'muted sm'}, 'حالت نمایشی: متن‌ها، تصویرها و صدای گوینده ساختگی‌اند؛ در اجرای واقعی از سرویس‌های هوش مصنوعی می‌آیند.') : null);
+  const demo = () => (S.st.demo ? h('div', {class: 'muted sm'}, 'حالت نمایشی: متن‌ها و تصویرها ساختگی‌اند؛ در اجرای واقعی از سرویس‌های هوش مصنوعی می‌آیند.') : null);
 
   const form = () => {
     quit();
     const styles = [['photo', 'عکس واقعی'], ['art', 'تصویرسازی'], ['minimal', 'مینیمال'], ['3d', 'سه‌بعدی']];
-    const off = S.st.studio.image === 'off', can = !!S.st.studio.voice;
+    const off = S.st.studio.image === 'off', can = canRead(), dev = m.speaker === DEVICE;
     fill(s.body, field('ایده‌ات را بنویس', idea),
       segment([['image', 'عکس'], ['reel', 'ویدیو (ریل)']], m.kind, v => { m.kind = v; form(); }),
       m.kind === 'reel' ? [h('label', {class: 'f'}, 'چند صحنه؟'), segment([[3, '۳'], [4, '۴'], [5, '۵']], m.scenes, v => { m.scenes = v; form(); })] : null,
@@ -6418,10 +6926,11 @@ function studio(init, done) {
           h('div', {class: 'muted sm'}, off ? 'در تنظیمات خاموش است؛ طرح‌های خود برنامه استفاده می‌شود.' : S.st.studio.pollen || S.st.studio.custom ? 'با کلید خودت ساخته می‌شود.'
             : m.kind === 'reel' ? 'سرویس‌های رایگان کند و کوچک‌اند؛ برای ریل یکی دو دقیقه صبر لازم است.' : 'از سرویس رایگان می‌آید؛ چند ثانیه تا یک دقیقه طول می‌کشد.')),
         off ? null : toggle(m.pics, async v => { m.pics = v; }, 'تصویر با هوش مصنوعی')),
-      m.kind === 'reel' ? h('div', {class: 'row', 'data-opt': 'voice'}, h('div', {class: 'grow'}, h('b', null, 'گوینده (صداگذاری)'),
-          h('div', {class: 'muted sm'}, can ? 'متن هر صحنه نوشته می‌شود و گویندهٔ هوش مصنوعی آن را می‌خواند.'
-            : 'گویندهٔ هوش مصنوعی کلید Pollinations می‌خواهد (تنظیمات ← ساخت عکس و ویدیو). بدون کلید، بعد از ساخت می‌توانی صدای خودت را روی ویدیو ضبط کنی.')),
-        can ? toggle(m.narr, async v => { m.narr = v; }, 'گوینده') : null) : null, demo());
+      m.kind === 'reel' ? [h('div', {class: 'row', 'data-opt': 'voice'}, h('div', {class: 'grow'}, h('b', null, 'گوینده (صداگذاری)'),
+          h('div', {class: 'muted sm'}, !can ? (dev ? 'گویندهٔ فارسی هنوز روی این دستگاه نیست. بدون آن ویدیو بی‌صدا ساخته می‌شود و بعد می‌توانی صدای خودت را رویش ضبط کنی.'
+              : 'این گوینده کلید Pollinations می‌خواهد (تنظیمات ← ساخت عکس و ویدیو).')
+            : dev ? 'متن هر صحنه نوشته می‌شود و گویندهٔ فارسی آن را روی همین گوشی می‌خواند.' : 'متن هر صحنه نوشته می‌شود و گویندهٔ هوش مصنوعی آن را می‌خواند.')),
+        can ? toggle(m.narr, async v => { m.narr = v; }, 'گوینده') : null), !can && dev ? packBox(form) : null] : null, demo());
     s.setFoot(h('button', {class: 'btn pri', 'data-studio-go': '1', onclick: e => run(e.currentTarget, start)}, icon('spark'), m.kind === 'reel' ? 'ویدیو را بساز' : 'عکس را بساز'));
   };
   const working = job => {
@@ -6450,28 +6959,44 @@ function studio(init, done) {
   };
   const more = notes => { m.notes = (m.notes || []).concat(notes.filter(x => !(m.notes || []).includes(x))); };
   /* the narration clips of a job go to their scenes; texts: what each of them was asked to say */
-  const loadVoices = (voices, idxs, texts) => Promise.all(voices.map(async (v, j) => {
-    const sh = m.shots[idxs[j]];
-    sh.vwhy = v.why || '';
-    if (!v.preview) return;
+  const reading = (i, n, pct) => {
+    fill(s.body, h('div', {class: 'empty', 'data-reading': i}, h('i', {class: 'spin'}),
+      h('b', null, i < 0 ? 'گویندهٔ روی گوشی آماده می‌شود…' + (pct ? ' ' + fa(pct) + '٪' : '') : n === 1 ? 'گوینده در حال خواندن است…' : 'گوینده در حال خواندن صحنهٔ ' + fa(i + 1) + ' از ' + fa(n) + '…'),
+      h('div', {class: 'muted sm'}, i < 0 ? 'بار اول چند ثانیه بیشتر طول می‌کشد.' : 'صدا روی همین گوشی ساخته می‌شود؛ صفحه را باز نگه دار.')));
+    s.setFoot(h('button', {class: 'btn', onclick: () => devQuit()}, icon('x'), 'لغو'));
+  };
+  const loadVoices = async (voices, idxs, texts) => {
+    await Promise.all(voices.map(async (v, j) => {
+      const sh = m.shots[idxs[j]];
+      sh.vwhy = v.why || '';
+      if (!v.preview) return;
+      try {
+        const res = await fetch(v.preview, {credentials: 'same-origin'});
+        if (!res.ok) throw new Error('missing');
+        const buf = await decodeSound(await res.arrayBuffer());
+        sh.clip = {buf, dur: buf.duration, text: texts[j]};
+      } catch (e) { sh.vwhy = 'صدای این صحنه باز نشد.'; }
+    }));
+    const dev = voices.map((v, j) => j).filter(j => voices[j].source === DEVICE && voices[j].say);      /* these the device reads itself */
+    if (!dev.length || stop.on) return;
+    const tell = why => dev.forEach(j => { m.shots[idxs[j]].vwhy = why; });
+    if (!packed()) return tell('گویندهٔ فارسی هنوز روی این دستگاه دانلود نشده است.');
     try {
-      const res = await fetch(v.preview, {credentials: 'same-origin'});
-      if (!res.ok) throw new Error('missing');
-      const buf = await decodeSound(await res.arrayBuffer());
-      sh.clip = {buf, dur: buf.duration, text: texts[j]};
-    } catch (e) { sh.vwhy = 'صدای این صحنه باز نشد.'; }
-  }));
+      const bufs = await devRead(dev.map(j => voices[j].say), (i, pct) => { if (!stop.on) reading(i, dev.length, pct); });
+      dev.forEach((j, k) => { const sh = m.shots[idxs[j]]; if (bufs[k]) { sh.clip = {buf: bufs[k], dur: bufs[k].duration, text: texts[j]}; sh.vwhy = ''; } else sh.vwhy = 'صدای این صحنه ساخته نشد.'; });
+    } catch (e) { tell((e && e.message) || 'صدا ساخته نشد.'); }
+  };
   const start = async () => {
     const text = idea.value.trim();
     if (text.length < 3) { toast('ایده‌ات را در یک جمله بنویس', 'bad'); return; }
     m.plan = null;
-    watch(await POST('/api/studio/make', {idea: text, kind: m.kind, scenes: m.scenes, style: m.style, pictures: m.pics, voice: m.kind === 'reel' && m.narr && !!S.st.studio.voice, speaker: m.speaker}), async job => {
+    watch(await POST('/api/studio/make', {idea: text, kind: m.kind, scenes: m.scenes, style: m.style, pictures: m.pics, voice: m.kind === 'reel' && m.narr && canRead(), speaker: m.speaker}), async job => {
       const plan = job.plan;
       Object.assign(m, {notes: job.notes, head: plan.headline, sub: plan.sub, caption: (plan.caption + '\n\n' + plan.hashtags.join(' ')).trim(), own: null, voice: 'none'});
       m.shots = job.pictures.map((p, i) => ({prompt: p.prompt, src: p.preview, from: p.source, why: p.why, img: null, clip: null, vwhy: '',
         text: plan.scenes[i] ? plan.scenes[i].text : '', say: plan.scenes[i] ? (plan.scenes[i].say || plan.scenes[i].text || '').trim() : ''}));
-      await Promise.all(m.shots.map(async sh => { if (sh.src) { try { sh.img = await loadPic(sh.src); } catch (e) { sh.src = ''; sh.why = 'تصویر باز نشد.'; } } })
-        .concat(loadVoices(job.voices, job.voices.map((x, i) => i), m.shots.map(x => x.say))));
+      await Promise.all(m.shots.map(async sh => { if (sh.src) { try { sh.img = await loadPic(sh.src); } catch (e) { sh.src = ''; sh.why = 'تصویر باز نشد.'; } } }));
+      await loadVoices(job.voices, job.voices.map((x, i) => i), m.shots.map(x => x.say));
       if (m.shots.some(x => x.clip)) m.voice = 'ai';
       await faceReady();
       m.plan = plan;
@@ -6581,17 +7106,21 @@ function studio(init, done) {
       sh.vwhy && !sh.clip ? h('div', {class: 'sm down'}, sh.vwhy) : null];
   };
   const voiceCard = () => {
-    const can = !!S.st.studio.voice, total = fa(Math.round(reel().total)) + ' ثانیه', all = m.shots.map((x, i) => i);
-    const who = h('select', {class: 'in', 'aria-label': 'گوینده'}, SPEAKERS.concat(SPEAKERS.some(x => x[0] === m.speaker) ? [] : [[m.speaker, m.speaker]]).map(x => h('option', {value: x[0]}, x[1])));
+    const can = canRead(), dev = m.speaker === DEVICE, total = fa(Math.round(reel().total)) + ' ثانیه', all = m.shots.map((x, i) => i);
+    const names = [[DEVICE, DEVICE_NAME]].concat(S.st.studio.voice || !dev ? SPEAKERS : []);
+    const who = h('select', {class: 'in', 'aria-label': 'گوینده'}, names.concat(names.some(x => x[0] === m.speaker) ? [] : [[m.speaker, m.speaker]]).map(x => h('option', {value: x[0]}, x[1])));
     who.value = m.speaker;
-    who.addEventListener('change', () => { m.speaker = who.value; readScenes(all.filter(i => m.shots[i].say)); });
+    who.addEventListener('change', () => { m.speaker = who.value; hush(); if (canRead()) readScenes(all.filter(i => m.shots[i].say)); else { m.voice = m.voice === 'ai' ? 'none' : m.voice; result(); } });
     return h('div', {class: 'card col', 'data-voice': m.voice}, h('div', {class: 'row'}, h('b', {class: 'grow'}, 'صدا'),
         m.voice !== 'none' ? h('button', {class: 'btn sm', 'data-voice-do': 'play', onclick: e => run(e.currentTarget, play)}, icon('play'), 'پخش با صدا') : null),
-      h('div', {class: 'muted sm'}, m.voice === 'ai' ? 'گویندهٔ هوش مصنوعی متن هر صحنه را می‌خواند؛ ویدیو ' + total + ' می‌شود.' : m.voice === 'mine' ? 'صدای خودت روی ویدیو می‌نشیند؛ ویدیو ' + total + ' می‌شود.'
-        : 'ویدیو بی‌صداست. ' + (can ? 'گوینده را روشن کن یا صدای خودت را ضبط کن.' : 'گویندهٔ هوش مصنوعی کلید Pollinations می‌خواهد (تنظیمات ← ساخت عکس و ویدیو)؛ بدون کلید می‌توانی صدای خودت را ضبط کنی.')),
-      m.voice === 'ai' ? [field('گوینده', who), m.shots.map((sh, i) => sayField(i)), S.st.demo ? h('div', {class: 'muted sm'}, 'حالت نمایشی: به‌جای صدای گوینده بوق می‌شنوی.') : null] : null,
+      h('div', {class: 'muted sm'}, m.voice === 'ai' ? (dev ? 'گویندهٔ فارسی متن هر صحنه را می‌خواند؛ ویدیو ' : 'گویندهٔ هوش مصنوعی متن هر صحنه را می‌خواند؛ ویدیو ') + total + ' می‌شود.'
+        : m.voice === 'mine' ? 'صدای خودت روی ویدیو می‌نشیند؛ ویدیو ' + total + ' می‌شود.'
+        : 'ویدیو بی‌صداست. ' + (can ? 'گوینده را روشن کن یا صدای خودت را ضبط کن.' : dev ? 'گویندهٔ فارسی را دانلود کن یا صدای خودت را ضبط کن.' : 'این گوینده کلید Pollinations می‌خواهد (تنظیمات ← ساخت عکس و ویدیو)؛ بدون کلید می‌توانی صدای خودت را ضبط کنی.')),
+      m.voice === 'ai' || S.st.studio.voice ? field('گوینده', who) : null,
+      m.voice === 'ai' ? [m.shots.map((sh, i) => sayField(i)), S.st.demo && !dev ? h('div', {class: 'muted sm'}, 'حالت نمایشی: این گوینده به‌جای صدا بوق می‌زند.') : null] : null,
+      m.voice !== 'ai' && !can && dev ? packBox(() => readScenes(all.filter(i => m.shots[i].say))) : null,   /* once it is there it reads at once */
       h('div', {class: 'row wrap'},
-        can && m.voice !== 'ai' ? h('button', {class: 'btn sm', 'data-voice-do': 'ai', onclick: () => readScenes(all.filter(i => m.shots[i].say))}, icon('spark'), 'گویندهٔ هوش مصنوعی') : null,
+        can && m.voice !== 'ai' ? h('button', {class: 'btn sm', 'data-voice-do': 'ai', onclick: () => readScenes(all.filter(i => m.shots[i].say))}, icon('spark'), dev ? 'گویندهٔ فارسی' : 'گویندهٔ هوش مصنوعی') : null,
         h('button', {class: 'btn sm', 'data-voice-do': 'record', onclick: recordSheet}, icon('mic'), m.own ? 'ضبط دوباره' : 'ضبط صدای خودم'),
         m.voice !== 'mine' && m.own ? h('button', {class: 'btn sm', 'data-voice-do': 'mine', onclick: () => { hush(); m.voice = 'mine'; result(); }}, 'صدای ضبط‌شدهٔ خودم') : null,
         m.voice !== 'none' ? h('button', {class: 'btn sm', 'data-voice-do': 'off', onclick: () => { hush(); m.voice = 'none'; result(); }}, 'بی‌صدا') : null));
@@ -6854,7 +7383,8 @@ async function settingsSheet() {
   const pollen = inp('', {class: 'in ltr', type: 'password', autocomplete: 'off', 'aria-label': 'کلید Pollinations', placeholder: set.studio.pollen_set ? '•••••• (ذخیره شده)' : 'sk_…'});
   const picUrl = inp(set.studio.url, {class: 'in ltr', placeholder: 'https://…/v1'}), picModel = inp(set.studio.model, {class: 'in ltr', placeholder: 'gpt-image-1'});
   const picKey = inp('', {class: 'in ltr', type: 'password', autocomplete: 'off', placeholder: set.studio.key_set ? '•••••• (ذخیره شده)' : 'کلید API'});
-  const speaker = sel(set.studio.speaker, SPEAKERS.concat(SPEAKERS.some(x => x[0] === set.studio.speaker) ? [] : [[set.studio.speaker, set.studio.speaker]]));
+  const voices = [['', 'خودکار (بدون کلید: گویندهٔ روی گوشی)'], [DEVICE, DEVICE_NAME]].concat(SPEAKERS.map(x => [x[0], x[1] + ' — با کلید']));
+  const speaker = sel(set.studio.speaker, voices.concat(voices.some(x => x[0] === set.studio.speaker) ? [] : [[set.studio.speaker, set.studio.speaker]]));
   speaker.setAttribute('aria-label', 'گوینده');
   const ttsModel = inp(set.studio.tts_model, {class: 'in ltr', placeholder: 'tts-1', 'aria-label': 'نام مدل صدا'});
   const testKey = async () => {                        /* a key that was just typed is saved first, then Pollinations is asked about it */
@@ -6871,8 +7401,9 @@ async function settingsSheet() {
       () => ({brand: {about: about.value, tone: tone.value, hashtags: tags.value, handle: handle.value}})),
     box('studio', 'image', 'ساخت عکس و ویدیو', [h('p', {class: 'muted sm'}, 'ایجنت تصویر را از سرویس‌های هوش مصنوعی می‌گیرد و عکس نهایی و ویدیو را روی همین دستگاه می‌سازد. بدون ثبت‌نام از دو سرویس رایگان استفاده می‌کند: Pollinations (هر ۴۵ ثانیه یک تصویر، با نشان کوچک خودش در گوشه) و AI Horde (تصویر کوچک‌تر، گاهی با صف). اگر هیچ‌کدام جواب ندهند، طرح خود برنامه کشیده می‌شود.'),
         field('سرویس تصویر', picMode),
-        field('کلید Pollinations (اختیاری)', pollen, 'با کلید خودت (از enter.pollinations.ai) تصویرها بزرگ‌تر، بدون انتظار و بدون نشان می‌شوند، متن‌ها را مدل بهتری می‌نویسد و گویندهٔ هوش مصنوعی برای ویدیو روشن می‌شود. سرویس رایگانِ بدون کلید، صدا ندارد.'),
+        field('کلید Pollinations (اختیاری)', pollen, 'با کلید خودت (از enter.pollinations.ai) تصویرها بزرگ‌تر، بدون انتظار و بدون نشان می‌شوند، متن‌ها را مدل بهتری می‌نویسد و گوینده‌های آن سرویس هم برای ویدیو در دسترس‌اند. بدون کلید، گویندهٔ فارسیِ روی همین دستگاه کار می‌کند.'),
         field('گوینده', speaker, 'صدایی که متن ویدیو را می‌خواند. در خود «بساز» هم می‌توانی عوضش کنی و گوش بدهی.'),
+        h('div', {class: 'card col', 'data-sec': 'pack'}, h('b', null, 'گویندهٔ فارسیِ روی همین دستگاه'), packBox()),
         h('details', {class: 'box'}, h('summary', null, icon('link'), 'سرویس خودم (سازگار با OpenAI)'), h('div', {class: 'col'}, field('نشانی', picUrl), field('نام مدل تصویر', picModel), field('کلید', picKey),
           field('نام مدل صدا (اختیاری)', ttsModel, 'اگر سرویس خودت گوینده هم دارد (audio/speech)، نام مدلش را بنویس. خالی یعنی گویندهٔ Pollinations.')))],
       () => ({studio: {image: picMode.value, pollen: pollen.value, url: picUrl.value, model: picModel.value, key: picKey.value, speaker: speaker.value, tts_model: ttsModel.value}}),
@@ -6909,7 +7440,8 @@ function helpSheet() {
   add(s.body,
     sec('ساختن پست از روی یک ایده', 'در «بساز» ایده‌ات را بنویس: ایجنت کپشن و هشتگ می‌نویسد، تصویر را از سرویس هوش مصنوعی می‌گیرد و عکس نهایی یا ریل را روی همین دستگاه می‌سازد.',
       'سرویس‌های رایگان تصویر کند و کوچک‌اند و گاهی جواب نمی‌دهند؛ آن وقت ایجنت طرح خودش را می‌کشد. با کلید Pollinations (در تنظیمات) نتیجه بهتر و سریع‌تر است.',
-      'ریل از چند تصویر با حرکت و نوشته ساخته می‌شود. با کلید Pollinations گویندهٔ هوش مصنوعی متن هر صحنه را می‌خواند؛ بدون کلید می‌توانی صدای خودت را روی ویدیو ضبط کنی. آهنگ زمینه را موقع انتشار در اینستاگرام اضافه کن.',
+      'ریل از چند تصویر با حرکت و نوشته ساخته می‌شود و گوینده متن هر صحنه را رویش می‌خواند. گویندهٔ فارسیِ رایگان یک بار دانلود می‌شود (حدود ۸۵ مگابایت) و بعد روی همین گوشی، بدون کلید و بدون اینترنت، کار می‌کند؛ تلفظش همیشه بی‌نقص نیست، برای همین متن هر صحنه را می‌توانی عوض کنی و دوباره بشنوی.',
+      'به‌جای گوینده می‌توانی صدای خودت را ضبط کنی، یا با کلید Pollinations از گوینده‌های آن سرویس استفاده کنی. آهنگ زمینه را موقع انتشار در اینستاگرام اضافه کن.',
       'فیلمی که خودِ هوش مصنوعی از صفر بسازد (آدم و صحنهٔ متحرک) فقط در سرویس‌های پولی هست و در این ایجنت نیست.'),
     sec('انتشار با خودت (بدون اتصال پیج)', 'پست آماده را باز کن: «ارسال به اینستاگرام» فایل را به اپ می‌دهد و کپشن را کپی می‌کند؛ آنجا بچسبانش. اگر این دکمه نبود، «ذخیره» و «کپی کپشن» را بزن.',
       'برای هر پست می‌توانی یادآوری بگذاری؛ سر وقت در پنل (و در تلگرام، اگر وصلش کرده باشی) خبر می‌دهد. بعد از انتشار «منتشر کردم» را بزن.'),

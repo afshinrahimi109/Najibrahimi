@@ -1,5 +1,9 @@
 """Posting by hand (no page connected) and the studio that turns an idea into words and pictures."""
+import collections
+import hashlib
 import json
+import os
+import shutil
 import time
 import unittest
 import urllib.parse
@@ -491,16 +495,36 @@ class VoiceTests(Base):
     def said(self, service="pgen", tail="v1/audio/speech"):
         return [c[4] for c in self.calls(service, tail)]
 
-    def test_without_a_key_there_is_no_narrator_and_the_reason_is_told(self):
+    def test_without_a_key_the_narrator_on_the_device_is_the_speaker(self):
         self.text_ai(TOLD)
-        self.assertIs(self.rig.ok("GET", "/api/status")["studio"]["voice"], False)
+        st = self.rig.ok("GET", "/api/status")["studio"]
+        self.assertEqual((st["voice"], st["speaker"], st["pack"]["state"]), (False, "device", "none"))
         job = self.make(idea="لاتهٔ پاییزی", kind="reel", scenes=3, voice=True, pictures=False)
-        self.assertEqual([v["text"] for v in job["voices"]], SAYS)        # the lines are there: the owner may read them aloud
-        self.assertEqual([(v["file"], v["why"]) for v in job["voices"]], [("", ia.NO_VOICE)] * 3)
+        self.assertEqual([v["text"] for v in job["voices"]], SAYS)        # the lines are there; the panel reads them on the device
+        self.assertEqual([(v["say"], v["source"], v["file"], v["why"]) for v in job["voices"]], [(ia.spoken(t), "device", "", "") for t in SAYS])
+        self.assertEqual(job["voices"][0]["say"], "لاتهٔ پاییزی ما این هفته بیست درصد تخفیف دارد.")
         self.assertEqual([sc["say"] for sc in job["plan"]["scenes"]], SAYS)
-        job = self.wait(self.rig.ok("POST", "/api/studio/voice", {"texts": ["سلام دنیا", "خداحافظ"]}))
+        job = self.wait(self.rig.ok("POST", "/api/studio/voice", {"texts": ["ساعت ۸:۳۰ باز می‌کنیم ☕️", "خداحافظ"]}))
+        self.assertEqual((job["status"], job["notes"], [v["say"] for v in job["voices"]]), ("done", [], ["ساعت هشت و سی باز می‌کنیم", "خداحافظ"]))
+        self.assertEqual(self.said() + self.said("oimg", "audio/speech"), [])           # no service was asked
+
+    def test_a_service_speaker_without_a_key_says_what_is_missing(self):
+        self.text_ai(TOLD)
+        job = self.make(idea="لاتهٔ پاییزی", kind="reel", scenes=3, voice=True, pictures=False, speaker="nova")
+        self.assertEqual([(v["file"], v["why"]) for v in job["voices"]], [("", ia.NO_VOICE)] * 3)
+        job = self.wait(self.rig.ok("POST", "/api/studio/voice", {"texts": ["سلام دنیا", "خداحافظ"], "speaker": "onyx"}))
         self.assertEqual((job["status"], [v["why"] for v in job["voices"]], job["notes"]), ("done", [ia.NO_VOICE] * 2, [ia.NO_VOICE]))
-        self.assertEqual(self.said() + self.said("oimg", "audio/speech"), [])           # nobody was asked
+        self.assertEqual(self.said() + self.said("oimg", "audio/speech"), [])
+
+    def test_with_a_key_the_narrator_on_the_device_can_still_be_chosen(self):
+        self.key()
+        job = self.make(idea="لاتهٔ پاییزی", kind="reel", scenes=3, voice=True, pictures=False, speaker="device")
+        self.assertEqual([v["source"] for v in job["voices"]], ["device"] * 3)
+        self.rig.ok("POST", "/api/settings", {"studio": {"speaker": "device"}})
+        self.assertEqual(self.rig.ok("GET", "/api/status")["studio"]["speaker"], "device")
+        job = self.wait(self.rig.ok("POST", "/api/studio/voice", {"texts": ["سلام دنیا"]}))
+        self.assertEqual(job["voices"][0]["source"], "device")
+        self.assertEqual(self.said(), [])
 
     def test_narration_is_only_made_when_asked_for(self):
         self.key()
@@ -541,7 +565,8 @@ class VoiceTests(Base):
         self.wait(self.rig.ok("POST", "/api/studio/voice", {"texts": ["سلام دنیا"], "speaker": "../etc <script>"}))      # not a name: the saved one
         self.assertEqual([c["voice"] for c in self.said()], ["onyx", "onyx", "shimmer", "onyx"])
         self.rig.ok("POST", "/api/settings", {"studio": {"speaker": "no such speaker!"}})
-        self.assertEqual(self.rig.ok("GET", "/api/settings")["studio"]["speaker"], "nova")
+        self.assertEqual(self.rig.ok("GET", "/api/settings")["studio"]["speaker"], "")           # no choice ...
+        self.assertEqual(self.rig.ok("GET", "/api/status")["studio"]["speaker"], "nova")         # ... so, with a key, the service's first voice
 
     def test_lines_can_be_read_again_one_by_one(self):
         self.key()
@@ -616,6 +641,10 @@ class VoiceTests(Base):
             job = rig.ok("GET", "/api/studio/job/" + job["id"])
         self.assertEqual((job["status"], [v["source"] for v in job["voices"]]), ("done", ["key"] * 3))
         self.assertTrue(all(len(v["text"]) > 12 for v in job["voices"]), job["voices"])
+        self.assertEqual(rig.agent.pack.sources, ia.VOICE_SOURCES)        # the demo would fetch the real narrator ...
+        self.assertEqual(rig.ok("GET", "/api/status")["studio"]["speaker"], "nova")
+        rig.agent.pack.files = {}                                          # ... and once it is there, it is the one that reads
+        self.assertEqual(rig.ok("GET", "/api/status")["studio"]["speaker"], "device")
 
     def test_a_narration_clip_is_not_a_post(self):
         self.key()
@@ -645,6 +674,224 @@ class VoiceTests(Base):
         status, out, _ = self.rig.req("POST", "/api/studio/key", {})
         self.assertEqual(status, 502)
         self.assertIn("جواب روشنی نداد", out["error"])
+
+
+class PackTests(Base):
+    """The narrator that runs on the owner's device: its files are fetched once, checked against known hashes, and
+    handed to the panel. (Here the simulator hands out small stand-ins; the steps are the same.)"""
+
+    def setUp(self):
+        super().setUp()
+        self.pack = self.rig.agent.pack
+        self.names = sorted(self.sim.pack_files)
+
+    def fetched(self):
+        return [c[2] for c in self.calls("voice")]
+
+    def settle(self, timeout=30):
+        end = time.time() + timeout
+        while time.time() < end:
+            view = self.rig.ok("GET", "/api/studio/pack")
+            if view["state"] != "loading":
+                return view
+            time.sleep(0.02)
+        self.fail("the download did not end: %s" % view)
+
+    def get(self):
+        self.rig.ok("POST", "/api/studio/pack")
+        return self.settle()
+
+    def on_disk(self):
+        return sorted(os.listdir(self.pack.dir)) if os.path.isdir(self.pack.dir) else []
+
+    def test_the_real_list_is_sound(self):
+        self.assertEqual(sorted(ia.VOICE_FILES), self.names)              # the stand-ins have the names of the real files
+        for name, (size, sha) in ia.VOICE_FILES.items():
+            self.assertGreater(size, 100000, name)
+            self.assertRegex(sha, r"^[0-9a-f]{64}$")
+        covered = {}
+        for base, archive, inside, names in ia.VOICE_SOURCES:
+            self.assertTrue(base.startswith("https://"), base)
+            self.assertEqual(bool(archive), base.endswith(".tgz"), base)
+            self.assertEqual(bool(archive), bool(inside), base)
+            if not archive and not base.endswith("/"):
+                self.assertEqual(len(names), 1, base)
+            for n in names:
+                self.assertIn(n, ia.VOICE_FILES)
+                covered[n] = covered.get(n, 0) + 1
+        self.assertEqual(sorted(covered), self.names)
+        self.assertTrue(all(v >= 2 for v in covered.values()), covered)    # no file hangs on one server alone
+        total = sum(v[0] for v in ia.VOICE_FILES.values())
+        self.assertEqual(self.pack.view()["fetch_mb"], ia.VOICE_FETCH_MB)
+        self.assertLess(abs(total / 1e6 - 93), 1)
+
+    def test_nothing_is_there_before_the_owner_asks(self):
+        view = self.rig.ok("GET", "/api/studio/pack")
+        self.assertEqual((view["state"], view["pct"], view["why"]), ("none", 0, ""))
+        self.assertEqual(self.rig.ok("GET", "/api/status")["studio"]["pack"], view)
+        for name in self.names:
+            self.assertEqual(self.rig.req("GET", "/api/voice/" + name)[0], 404, name)
+        self.assertEqual(self.fetched(), [])
+        self.assertEqual(self.on_disk(), [])
+
+    def test_the_files_are_fetched_checked_and_served(self):
+        view = self.get()
+        self.assertEqual((view["state"], view["pct"], view["why"]), ("ready", 100, ""))
+        self.assertEqual(self.fetched(), ["pack.tgz", "ort.wasm.min.js", "ort-wasm-simd.wasm", "voice.onnx"])     # the archive brings three of the six
+        self.assertEqual(self.on_disk(), self.names)                       # nothing half-done is left behind
+        for name in self.names:
+            status, body, headers = self.rig.req("GET", "/api/voice/" + name)
+            self.assertEqual((status, body if isinstance(body, bytes) else None), (200, self.sim.pack_files[name]), name)
+            self.assertEqual(headers["Cache-Control"], "private, max-age=31536000, immutable")
+        self.assertTrue(self.rig.req("GET", "/api/voice/ort.wasm.min.js")[2]["Content-Type"].startswith("text/javascript"))
+        self.assertEqual(self.rig.req("GET", "/api/voice/ort-wasm-simd.wasm")[2]["Content-Type"], "application/wasm")
+        self.assertEqual(self.rig.req("GET", "/api/voice/voice.onnx")[2]["Content-Type"], "application/octet-stream")
+        self.assertEqual(self.rig.req("GET", "/api/voice/voice.onnx", headers={"Range": "bytes=0-9"})[1], self.sim.pack_files["voice.onnx"][:10])
+        self.assertEqual(self.rig.req("GET", "/api/voice/agent.db")[0], 404)
+        self.assertEqual(self.rig.req("GET", "/api/voice/..%2Fagent.db")[0], 404)
+        before = len(self.fetched())
+        self.assertEqual(self.get()["state"], "ready")                      # asking again fetches nothing
+        self.assertEqual(len(self.fetched()), before)
+
+    def test_the_worker_is_part_of_the_agent_and_may_only_talk_to_it(self):
+        status, body, headers = self.rig.req("GET", "/api/voice/worker.js")
+        self.assertEqual(status, 200)
+        self.assertEqual(body.decode("utf-8"), ia.VOICE_WORKER_JS)
+        self.assertEqual(headers["Content-Security-Policy"], "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'")
+        page = self.rig.req("GET", "/")[2]["Content-Security-Policy"]
+        self.assertIn("worker-src 'self'", page)
+        self.assertIn("connect-src 'self'", page)
+        for word in ("http://", "https://", "eval(", "Function("):
+            self.assertNotIn(word, ia.VOICE_WORKER_JS)
+
+    def test_the_narrator_files_need_the_login(self):
+        rig = Rig(connect=False, auth=True)
+        self.addCleanup(rig.close)
+        self.assertEqual(rig.req("GET", "/api/voice/worker.js")[0], 401)
+        self.assertEqual(rig.req("GET", "/api/voice/voice.onnx")[0], 401)
+        self.assertEqual(rig.req("GET", "/api/studio/pack")[0], 401)
+        self.assertEqual(rig.req("POST", "/api/studio/pack")[0], 401)
+
+    def test_a_broken_connection_is_picked_up_where_it_stopped(self):
+        self.assertGreater(len(self.sim.pack_tgz()), 300)
+        self.sim.voice_cut = 200                                           # the archive breaks off after 200 bytes
+        self.assertEqual(self.get()["state"], "ready")
+        archive = [c for c in self.calls("voice") if c[2] == "pack.tgz"]
+        self.assertEqual([c[5].get("range") for c in archive], [None, "bytes=200-"])
+        self.assertEqual([c[5].get("range") for c in self.calls("voice") if c[2] != "pack.tgz"], [None] * 3)
+        self.assertEqual(self.on_disk(), self.names)
+        for name in self.names:
+            with open(os.path.join(self.pack.dir, name), "rb") as fh:
+                self.assertEqual(fh.read(), self.sim.pack_files[name], name)
+
+    def test_a_file_that_is_not_the_original_is_refused(self):
+        good = self.sim.pack_files["voice.onnx"]
+        self.sim.pack_files["voice.onnx"] = good[:-1] + b"!"              # same size, one byte changed
+        view = self.get()
+        self.assertEqual(view["state"], "failed")
+        self.assertIn("«voice.onnx» با نسخهٔ اصلی یکی نبود", view["why"])
+        self.assertEqual(self.on_disk(), [n for n in self.names if n != "voice.onnx"])
+        self.assertEqual(self.rig.req("GET", "/api/voice/ort.wasm.min.js")[0], 404)     # an incomplete narrator is not handed out
+        self.assertLess(view["pct"], 100)
+        self.sim.pack_files["voice.onnx"] = good
+        before = len(self.fetched())
+        self.assertEqual(self.get()["state"], "ready")
+        self.assertEqual(self.fetched()[before:], ["voice.onnx"])          # only what was missing is fetched
+
+    def test_a_file_of_the_wrong_size_is_refused(self):
+        self.sim.pack_files["ort.wasm.min.js"] += b"// more"
+        view = self.get()
+        self.assertEqual(view["state"], "failed")
+        self.assertIn("اندازهٔ فایل روی سرور با نسخهٔ اصلی یکی نبود", view["why"])
+        self.assertNotIn("ort.wasm.min.js", self.on_disk())
+        self.assertFalse([n for n in self.on_disk() if n.endswith((".part", ".new"))])
+
+    def test_when_a_server_refuses_the_next_one_is_asked(self):
+        self.sim.script("voice", 404, {"error": "gone"})                   # the archive is not there (any more)
+        self.assertEqual(self.get()["state"], "ready")
+        self.assertEqual(self.fetched(), ["pack.tgz", "piper_phonemize.js", "piper_phonemize.wasm", "piper_phonemize.data",
+                                          "ort.wasm.min.js", "ort-wasm-simd.wasm", "voice.onnx"])
+
+    def test_a_busy_server_is_asked_again(self):
+        self.sim.script("voice", 503, {"error": "busy"}, times=3)
+        self.assertEqual(self.get()["state"], "ready")
+        self.assertEqual(self.fetched()[:5], ["pack.tgz"] * 4 + ["ort.wasm.min.js"])
+
+    def test_an_archive_that_does_not_open_is_not_the_end(self):
+        tgz = self.sim.pack_tgz()
+        self.sim.pack_tgz = lambda: b"\x1f\x8b" + b"x" * (len(tgz) - 2)     # right size, not an archive
+        self.assertEqual(self.get()["state"], "ready")
+        self.assertEqual(self.fetched()[:4], ["pack.tgz", "piper_phonemize.js", "piper_phonemize.wasm", "piper_phonemize.data"])
+
+    def test_when_no_server_answers_the_owner_is_told_and_can_try_again(self):
+        self.sim.script("voice", 404, {"error": "gone"}, times=40)
+        view = self.get()
+        self.assertEqual((view["state"], view["pct"]), ("failed", 0))
+        self.assertIn("سرور فایل را نداد (HTTP 404)", view["why"])
+        self.assertEqual(self.rig.ok("GET", "/api/status")["studio"]["pack"]["state"], "failed")
+        self.sim.ai_script.clear()
+        self.assertEqual(self.get()["state"], "ready")
+
+    def test_a_server_that_cannot_be_reached(self):
+        self.pack.sources = [("http://127.0.0.1:9/x/", 0, "", tuple(self.names))]
+        view = self.get()
+        self.assertEqual(view["state"], "failed")
+        self.assertIn("به سرور دانلود دسترسی نبود", view["why"])
+        self.assertIn("دانلود از همان‌جا ادامه پیدا می‌کند", view["why"])
+
+    def test_an_own_copy_is_asked_first(self):
+        self.rig.app.cfg.voice_mirror = self.rig.base + "/_sim/ai/voice"   # AGENT_VOICE_MIRROR
+        self.assertEqual(self.get()["state"], "ready")
+        self.assertEqual(sorted(self.fetched()), self.names)               # each file by its name; the archive was not needed
+
+    def test_files_copied_by_hand_are_checked_before_they_are_used(self):
+        os.makedirs(self.pack.dir)
+        for name, blob in self.sim.pack_files.items():
+            with open(os.path.join(self.pack.dir, name), "wb") as fh:
+                fh.write(blob if name != "voice.onnx" else b"?" * len(blob))
+        self.assertEqual(self.rig.ok("GET", "/api/studio/pack")["state"], "ready")      # by size alone it looks complete
+        self.assertEqual(self.get()["state"], "ready")
+        self.assertEqual(self.fetched(), ["voice.onnx"])                   # the one that was not the original was fetched anew
+        with open(os.path.join(self.pack.dir, "voice.onnx"), "rb") as fh:
+            self.assertEqual(hashlib.sha256(fh.read()).hexdigest(), self.pack.files["voice.onnx"][1])
+
+    def test_no_room_on_the_device(self):
+        real, room = shutil.disk_usage, collections.namedtuple("usage", "total used free")
+        shutil.disk_usage = lambda path: room(10 ** 9, 10 ** 9 - 1024, 1024)
+        self.addCleanup(setattr, shutil, "disk_usage", real)
+        view = self.get()
+        self.assertEqual(view["state"], "failed")
+        self.assertIn("حافظهٔ دستگاه برای گوینده جا ندارد", view["why"])
+        self.assertEqual(self.fetched(), [])
+
+    def test_the_download_can_be_stopped_and_the_files_removed(self):
+        self.sim.script("voice", 503, {"error": "busy"}, times=4000)       # a download that does not get anywhere
+        self.assertEqual(self.rig.ok("POST", "/api/studio/pack")["state"], "loading")
+        self.assertEqual(self.rig.ok("POST", "/api/studio/pack")["state"], "loading")   # a second press starts nothing new
+        self.rig.ok("POST", "/api/studio/pack/cancel")
+        view = self.settle()
+        self.assertEqual((view["state"], view["why"]), ("none", ""))       # stopped on request: not a failure
+        self.sim.ai_script.clear()
+        self.assertEqual(self.get()["state"], "ready")
+        view = self.rig.ok("DELETE", "/api/studio/pack")
+        self.assertEqual((view["state"], view["pct"]), ("none", 0))
+        self.assertEqual(self.on_disk(), [])
+        self.assertEqual(self.rig.req("GET", "/api/voice/voice.onnx")[0], 404)
+        self.assertEqual(self.rig.ok("DELETE", "/api/studio/pack")["state"], "none")    # removing nothing is fine
+
+    def test_the_progress_is_told_while_it_loads(self):
+        seen = []
+        real = self.pack.accept
+
+        def slow(path, name):
+            seen.append(self.pack.view())
+            return real(path, name)
+
+        self.pack.accept = slow
+        self.assertEqual(self.get()["state"], "ready")
+        self.assertEqual({v["state"] for v in seen}, {"loading"})
+        self.assertEqual([v["pct"] for v in seen], sorted(v["pct"] for v in seen))
+        self.assertTrue(0 < seen[-1]["pct"] < 100, seen)
 
 
 if __name__ == "__main__":

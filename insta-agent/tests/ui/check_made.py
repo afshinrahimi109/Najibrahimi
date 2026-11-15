@@ -4,6 +4,8 @@ a sound track that decodes, lasts as long as the picture, and has speech where t
 
     pip install imageio-ffmpeg        (brings an ffmpeg; one on the PATH is used as well)
     python check_made.py [folder]     (default: ./shots)
+    python check_made.py --real       only the reel of `serve.py realvoice.mjs real` (the real Persian narrator);
+                                      its sound is also written next to it as a WAV, for listen.py
 """
 import array
 import json
@@ -61,14 +63,14 @@ def heard(exe, path):
     return len(pcm) / 48000.0, max([abs(x) for x in pcm] or [0]), stretches, run.stderr.decode("utf-8", "replace").strip()
 
 
-def narrated(exe, folder):
+def narrated(exe, folder, listing="made.json", least=4):
     """The reels with sound; what the panel said about each is in made.json."""
-    listing = os.path.join(folder, "made.json")
+    listing = os.path.join(folder, listing)
     if not os.path.exists(listing):
-        return say(False, "made.json", "the narrated reels were not made")
+        return say(False, os.path.basename(listing), "the narrated reels were not made")
     with open(listing, encoding="utf-8") as fh:
         made = json.load(fh)
-    good = len(made) >= 3
+    good = len(made) >= least
     for name, m in sorted(made.items()):
         path = os.path.join(folder, name)
         if not os.path.exists(path):
@@ -85,10 +87,13 @@ def narrated(exe, folder):
         loose = bool(m.get("loose"))                   # recorded by the browser while it played: lengths are near, not exact
         ok = (bool(video) and video.group(1) == "h264" and video.group(2) == "%dx%d" % (m["w"], m["h"]) and bool(audio)
               and audio.group(1) in ("aac", "opus") and audio.group(2) == "48000" and not complaint and peak > 3000
+              and (m["sound"] != "aac" or "mp4a" in info)
               and abs(seconds - m["seconds"]) < (1.0 if loose else 0.08)
               and (loose or (not errors and frames == int(round(m["seconds"] * 30))))
-              and ("speech" not in m or stretches == m["speech"])
+              and ("speech" not in m or (stretches >= m["speech"] if m.get("real") else stretches == m["speech"]))   # a real voice pauses inside a line too
               and (loose or audio.group(1) == m["sound"]))
+        if m.get("real") and audio:                    # for the speech recogniser
+            subprocess.run([exe, "-hide_banner", "-v", "error", "-y", "-i", path, "-map", "0:a:0", "-ac", "1", "-ar", "16000", path + ".wav"])
         good &= say(ok, name, "%s %s, %d frames; sound: %s %s Hz %s, %.2f s (the reel: %.2f s), loudest %d of 32767, %d stretches of sound%s%s" % (
             video.group(1) if video else "?", video.group(2) if video else "?", frames, audio.group(1) if audio else "none",
             audio.group(2) if audio else "?", audio.group(3) if audio else "?", seconds, m["seconds"], peak, stretches,
@@ -98,7 +103,13 @@ def narrated(exe, folder):
 
 
 def main():
-    folder = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "shots")
+    args = [a for a in sys.argv[1:] if a != "--real"]
+    folder = args[0] if args else os.path.join(HERE, "shots")
+    if "--real" in sys.argv[1:]:
+        exe = ffmpeg()
+        if not exe:
+            return say(False, "ffmpeg", "no ffmpeg found (pip install imageio-ffmpeg)") or 1
+        return 0 if narrated(exe, folder, "made-real.json", 1) else 1
     good = True
     pic = os.path.join(folder, "made-picture.jpg")
     size = ia.image_size(pic) if os.path.exists(pic) else (0, 0)
