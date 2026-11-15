@@ -4,12 +4,13 @@ This is NOT part of the normal test run: those tests never leave the machine. Gi
 request (see the workflow), and every finding is written as an annotation so it can be read from the run's summary
 page or the API. Pictures come back as very small previews inside those annotations.
 
-    python live_check.py reel|picture|voice
+    python live_check.py reel|picture|voice|pack
 """
 import base64
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -108,5 +109,39 @@ def check_voice():
             ("%s %s bytes from %s" % (f["mime"], f["size"], v["source"])) if f else v["why"], v["text"]))
 
 
+def check_pack():
+    """The narrator on the device: does every address the agent knows still hand out the very files it expects?
+    Each address is asked by itself, for all the files it should bring; every file is checked against its SHA-256."""
+    a, works = agent(), {}
+    for base, archive, inside, names in ia.VOICE_SOURCES:
+        pack = ia.VoicePack(a)
+        pack.dir = tempfile.mkdtemp(prefix="ia-pack-")
+        pack.files = {n: ia.VOICE_FILES[n] for n in names}
+        pack.sources = [(base, archive, inside, names)]
+        t0 = time.time()
+        pack.run()
+        view, mb = pack.view(), (archive or sum(ia.VOICE_FILES[n][0] for n in names)) / 1e6
+        ok = view["state"] == "ready"
+        for n in names:
+            works[n] = works.get(n, 0) + (1 if ok else 0)
+        note("notice" if ok else "warning", "narrator files from " + urlhost(base), "%s: %s, %.1f MB in %.0f s (%s) %s" % (
+            base, "every file is the original" if ok else "FAILED", mb, time.time() - t0, ", ".join(names), view["why"]))
+        shutil.rmtree(pack.dir, ignore_errors=True)
+    first = {}
+    for base, archive, inside, names in ia.VOICE_SOURCES:                # what a phone fetches when every first address answers
+        if not any(n in first for n in names):
+            for n in names:
+                first[n] = archive / float(len(names)) if archive else ia.VOICE_FILES[n][0]
+    note("notice" if all(works.get(n) for n in ia.VOICE_FILES) else "error", "narrator files",
+         "addresses that work, per file: %s; a phone fetches %.1f MB, the files take %.1f MB" % (
+             json.dumps(works), sum(first.values()) / 1e6, sum(v[0] for v in ia.VOICE_FILES.values()) / 1e6))
+    if not all(works.get(n) for n in ia.VOICE_FILES):
+        sys.exit(1)
+
+
+def urlhost(url):
+    return url.split("/")[2]
+
+
 if __name__ == "__main__":
-    {"reel": check_reel, "picture": check_picture, "voice": check_voice}[sys.argv[1] if len(sys.argv) > 1 else "reel"]()
+    {"reel": check_reel, "picture": check_picture, "voice": check_voice, "pack": check_pack}[sys.argv[1] if len(sys.argv) > 1 else "reel"]()

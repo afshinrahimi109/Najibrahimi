@@ -73,14 +73,14 @@ jobs:
       - name: Login, connect and disconnect
         working-directory: insta-agent/tests/ui
         run: python serve.py connect.mjs sim
-      - name: "Without a page: the studio makes a picture and reels (silent, own voice, AI narrator), the owner takes them out"
+      - name: An ffmpeg (it makes AAC sound for one check and decodes what the studio made)
+        run: python -m pip install --quiet imageio-ffmpeg
+      - name: "Without a page: the studio makes a picture and reels (silent, own voice, narrators), the owner takes them out"
         working-directory: insta-agent/tests/ui
         run: python serve.py byhand.mjs hand
       - name: The reels are MP4 files a normal player decodes from the first frame to the last, sound included
         working-directory: insta-agent/tests/ui
-        run: |
-          python -m pip install --quiet imageio-ffmpeg
-          python check_made.py
+        run: python check_made.py
       - name: Keep the screenshots
         if: always()
         uses: actions/upload-artifact@v7
@@ -118,3 +118,53 @@ jobs:
         if: always()
         working-directory: insta-agent/tests
         run: python live_check.py picture
+
+  # Also only on request: the narrator that runs on the owner's device, for real. Its files are downloaded from every
+  # address the agent knows (each must hand out the very files the agent expects), then a real browser lets the
+  # Persian voice read a reel, a player decodes it and a speech recogniser writes down what it hears. The reel is
+  # kept as an artifact, so a person can listen to it.
+  narrator:
+    name: The Persian narrator, for real (on request)
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[live-check]'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Install the browser driver
+        working-directory: insta-agent/tests/ui
+        run: npm install --no-audit --no-fund
+      - name: Find Chrome
+        run: echo "CHROME_PATH=$(which google-chrome || which chromium-browser || which chromium)" >> "$GITHUB_ENV"
+      - name: Every address the narrator's files can come from
+        working-directory: insta-agent/tests
+        run: python live_check.py pack
+      - name: A reel read by the Persian narrator (its files are fetched the way a phone fetches them)
+        if: always()
+        working-directory: insta-agent/tests/ui
+        run: python serve.py realvoice.mjs real
+      - name: A player decodes that reel, sound included
+        working-directory: insta-agent/tests/ui
+        run: |
+          python -m pip install --quiet imageio-ffmpeg
+          python check_made.py --real
+      - name: A speech recogniser writes down what the narrator says
+        working-directory: insta-agent/tests/ui
+        run: |
+          python -m pip install --quiet faster-whisper
+          python listen.py
+      - name: Keep the reel and the screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: persian-narrator-reel
+          path: |
+            insta-agent/tests/ui/shots/made-reel-persian.mp4
+            insta-agent/tests/ui/shots/made-reel-persian.mp4.wav
+            insta-agent/tests/ui/shots/12*.png
+          if-no-files-found: ignore

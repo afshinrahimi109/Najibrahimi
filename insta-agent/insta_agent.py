@@ -49,7 +49,7 @@ import zlib
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 DEFAULT_PORT = 8787
 API_VERSIONS = ["v26.0", "v27.0", "v25.0", ""]
 KINDS = ("image", "carousel", "reel", "story")
@@ -1603,6 +1603,9 @@ VOICE_SOURCES = [
     ("https://registry.npmjs.org/onnxruntime-web/-/onnxruntime-web-1.18.0.tgz", 36155916, "package/dist/", _ORT),
     ("https://huggingface.co" + _AMIR, 0, "", ("voice.onnx",)),
     ("https://hf-mirror.com" + _AMIR, 0, "", ("voice.onnx",)),
+    # the same file as it sits in two public repositories on GitHub, for networks that reach neither of the above
+    ("https://raw.githubusercontent.com/dibbed/TTSKit-multi-engine-tts/9eb30526a4c707c88e44aa43097fbed62d7e8fc6/models/piper/fa_IR-amir-medium.onnx", 0, "", ("voice.onnx",)),
+    ("https://raw.githubusercontent.com/unesjalai/farsi-tts-api/84bb6a6609db57aff1420ba886b75fc368c6430a/models/fa_IR-amir-medium.onnx", 0, "", ("voice.onnx",)),
 ]
 VOICE_MIME = {"js": "text/javascript; charset=utf-8", "wasm": "application/wasm"}
 # The worker the panel starts. It is the only code of the agent that touches the downloaded files, and its own
@@ -2393,9 +2396,11 @@ DEFAULT_RULES = [
 
 
 class PackError(Exception):
-    def __init__(self, message):
+    """net=True: the trouble is the connection, so trying again later can help."""
+
+    def __init__(self, message, net=False):
         super().__init__(message)
-        self.message = message
+        self.message, self.net = message, net
 
 
 class VoicePack:
@@ -2461,7 +2466,8 @@ class VoicePack:
 
     # ── fetching ──
     def run(self):
-        why = ""
+        why, failed = "", []
+        again = " اینترنت (و فیلترشکن) را بررسی کن و دوباره بزن؛ دانلود از همان‌جا ادامه پیدا می‌کند."
         try:
             os.makedirs(self.dir, exist_ok=True)
             for name in self.files:                    # what is already there (left from before, or copied by hand) is checked, not trusted
@@ -2481,9 +2487,13 @@ class VoicePack:
                 try:
                     self.bring(base, archive, inside, need)
                 except PackError as e:
-                    why = e.message
+                    failed.append((names, e.message + (again if e.net else "")))
                     log("voice pack:", base, "→", e.message)
                 self.part = 0
+            for names, message in failed:              # of a file's addresses the first one is the one to tell about
+                if any(not self.have(n) for n in names):
+                    why = message
+                    break
         except PackError as e:
             why = e.message
         except Exception:
@@ -2497,7 +2507,9 @@ class VoicePack:
             log("voice pack: the narrator is on this device now (%d MB)" % round(sum(v[0] for v in self.files.values()) / 1e6))
 
     def bring(self, base, archive, inside, need):
-        weight = sum(self.files[n][0] for n in need)
+        weight, host = sum(self.files[n][0] for n in need), urllib.parse.urlsplit(base).netloc
+        if not self.agent.graph.reachable(base):       # a blocked address often just hangs; this finds out in seconds
+            raise PackError("به سرور دانلود (%s) دسترسی نبود." % host, net=True)
 
         def moved(frac, before=0, share=weight):
             self.part = before + int(frac * share)
@@ -2555,8 +2567,8 @@ class VoicePack:
         """Fetches one address into a .part file and returns its path. A broken connection is picked up where it
         stopped; six tries in a row that bring nothing end it."""
         part = os.path.join(self.dir, hashlib.sha1(url.encode("utf-8")).hexdigest()[:16] + ".part")
-        idle, last = 0, "سرور جواب نداد"
-        while idle < 6:
+        idle, last = 0, "سرور دانلود جواب نداد."
+        while True:
             if self.stop.is_set():
                 raise PackError("لغو شد.")
             have = os.path.getsize(part) if os.path.exists(part) else 0
@@ -2588,19 +2600,20 @@ class VoicePack:
                 if have + got > size:
                     os.remove(part)
                     raise PackError("اندازهٔ فایل روی سرور با نسخهٔ اصلی یکی نبود.")
-                last = "ارتباط وسط دانلود قطع شد"
+                last = "ارتباط وسط دانلود قطع شد."
             except urllib.error.HTTPError as e:
                 if e.code == 416:                      # the rest that was asked for does not exist: start over
                     os.remove(part)
                 elif e.code not in (408, 425, 429, 500, 502, 503, 504):
                     raise PackError("سرور فایل را نداد (HTTP %d)." % e.code)
-                last = "سرور فایل را نداد (HTTP %d)" % e.code
+                last = "سرور فایل را نداد (HTTP %d)." % e.code
             except (urllib.error.URLError, socket.timeout, ssl.SSLError, http.client.HTTPException, OSError) as e:
-                last = "به سرور دانلود دسترسی نبود (%s)" % (str(getattr(e, "reason", e))[:80] or e.__class__.__name__)
+                last = "ارتباط با سرور دانلود برقرار نماند (%s)." % (str(getattr(e, "reason", e))[:80] or e.__class__.__name__)
             idle = 0 if got else idle + 1
+            if idle >= (6 if have + got else 3):       # a server that never sent a byte gets fewer chances
+                raise PackError(last, net=True)
             if self.stop.wait(min(15, 1 + 3 * idle) if not self.cfg.sim else 0.05):
                 raise PackError("لغو شد.")
-        raise PackError(last + ". اینترنت (و فیلترشکن) را بررسی کن و دوباره بزن؛ دانلود از همان‌جا ادامه پیدا می‌کند.")
 
 
 class Rules:
@@ -4235,6 +4248,7 @@ class Sim:
         self.ai_key = "sk_sim_demo_key"
         self.pollen = 1.25                             # credit of that key; None: the key may not see its balance
         self.voice_cut = 0                             # > 0: the next download of a narrator file breaks off after that many bytes
+        self.voice_delay = 0.0                         # seconds every answer of the narrator's download server takes
         self.pack_files = dict(SIM_VOICE_FILES)
         self.ai_text = None                            # the text service's answer: a string, or a function of the request
         self.ai_delay = 0.0                            # seconds every picture takes
@@ -4410,6 +4424,8 @@ class Sim:
                 return answer(402, {"success": False, "error": {"message": "Insufficient pollen balance.", "code": "PAYMENT_REQUIRED"}, "status": 402})
             return 200, "audio/wav", fake_speech(asked["input"]), {}
 
+        if service == "voice" and self.voice_delay:
+            time.sleep(self.voice_delay)
         with self.lock:
             self.ai_calls.append((service, method, tail, dict(q), body, {k.lower(): v for k, v in headers.items()}))
             if len(self.ai_calls) > 2000:

@@ -813,9 +813,14 @@ class PackTests(Base):
                                           "ort.wasm.min.js", "ort-wasm-simd.wasm", "voice.onnx"])
 
     def test_a_busy_server_is_asked_again(self):
-        self.sim.script("voice", 503, {"error": "busy"}, times=3)
+        self.sim.script("voice", 503, {"error": "busy"}, times=2)
         self.assertEqual(self.get()["state"], "ready")
-        self.assertEqual(self.fetched()[:5], ["pack.tgz"] * 4 + ["ort.wasm.min.js"])
+        self.assertEqual(self.fetched()[:4], ["pack.tgz"] * 3 + ["ort.wasm.min.js"])
+        self.sim.ai_calls.clear()
+        self.rig.ok("DELETE", "/api/studio/pack")
+        self.sim.script("voice", 503, {"error": "busy"}, times=3)          # three times nothing: the next address is asked
+        self.assertEqual(self.get()["state"], "ready")
+        self.assertEqual(self.fetched()[:6], ["pack.tgz"] * 3 + ["piper_phonemize.js", "piper_phonemize.wasm", "piper_phonemize.data"])
 
     def test_an_archive_that_does_not_open_is_not_the_end(self):
         tgz = self.sim.pack_tgz()
@@ -827,7 +832,7 @@ class PackTests(Base):
         self.sim.script("voice", 404, {"error": "gone"}, times=40)
         view = self.get()
         self.assertEqual((view["state"], view["pct"]), ("failed", 0))
-        self.assertIn("سرور فایل را نداد (HTTP 404)", view["why"])
+        self.assertEqual(view["why"], "سرور فایل را نداد (HTTP 404).")
         self.assertEqual(self.rig.ok("GET", "/api/status")["studio"]["pack"]["state"], "failed")
         self.sim.ai_script.clear()
         self.assertEqual(self.get()["state"], "ready")
@@ -836,8 +841,18 @@ class PackTests(Base):
         self.pack.sources = [("http://127.0.0.1:9/x/", 0, "", tuple(self.names))]
         view = self.get()
         self.assertEqual(view["state"], "failed")
-        self.assertIn("به سرور دانلود دسترسی نبود", view["why"])
+        self.assertIn("به سرور دانلود (127.0.0.1:9) دسترسی نبود.", view["why"])
         self.assertIn("دانلود از همان‌جا ادامه پیدا می‌کند", view["why"])
+        self.assertEqual(self.fetched(), [])
+
+    def test_a_server_that_keeps_failing_is_given_up_and_the_owner_hears_why(self):
+        self.pack.sources = self.pack.sources[-1:]                         # one address for the voice, and it is always busy
+        self.pack.files = {"voice.onnx": self.pack.files["voice.onnx"]}
+        self.sim.script("voice", 503, {"error": "busy"}, times=10)
+        view = self.get()
+        self.assertEqual(view["state"], "failed")
+        self.assertTrue(view["why"].startswith("سرور فایل را نداد (HTTP 503). اینترنت (و فیلترشکن) را بررسی کن"), view["why"])
+        self.assertEqual(self.fetched(), ["voice.onnx"] * 3)
 
     def test_an_own_copy_is_asked_first(self):
         self.rig.app.cfg.voice_mirror = self.rig.base + "/_sim/ai/voice"   # AGENT_VOICE_MIRROR
@@ -865,13 +880,16 @@ class PackTests(Base):
         self.assertEqual(self.fetched(), [])
 
     def test_the_download_can_be_stopped_and_the_files_removed(self):
-        self.sim.script("voice", 503, {"error": "busy"}, times=4000)       # a download that does not get anywhere
+        self.sim.script("voice", 503, {"error": "busy"}, times=4000)       # a download that does not get anywhere ...
+        self.sim.voice_delay = 0.4                                         # ... and takes its time over it
         self.assertEqual(self.rig.ok("POST", "/api/studio/pack")["state"], "loading")
         self.assertEqual(self.rig.ok("POST", "/api/studio/pack")["state"], "loading")   # a second press starts nothing new
         self.rig.ok("POST", "/api/studio/pack/cancel")
         view = self.settle()
         self.assertEqual((view["state"], view["why"]), ("none", ""))       # stopped on request: not a failure
+        self.assertLess(len(self.fetched()), 6)
         self.sim.ai_script.clear()
+        self.sim.voice_delay = 0
         self.assertEqual(self.get()["state"], "ready")
         view = self.rig.ok("DELETE", "/api/studio/pack")
         self.assertEqual((view["state"], view["pct"]), ("none", 0))
