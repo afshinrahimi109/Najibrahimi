@@ -15,6 +15,7 @@
 راهنمای کامل: README.md کنار همین فایل.
 """
 import argparse
+import base64
 import copy
 import hashlib
 import hmac
@@ -240,6 +241,9 @@ class Config:
         self.tunnel_cmd = env.get("AGENT_TUNNEL_CMD") or ""
         self.ai_url = env.get("AGENT_AI_URL") or ""
         self.temp_host = env.get("AGENT_TEMP_HOST") or "https://litterbox.catbox.moe/resources/internals/api.php"
+        self.image_api = (env.get("AGENT_IMAGE_URL") or "https://image.pollinations.ai").rstrip("/")
+        self.gen_api = (env.get("AGENT_GEN_URL") or "https://gen.pollinations.ai").rstrip("/")
+        self.horde_api = (env.get("AGENT_HORDE_URL") or "https://aihorde.net/api/v2").rstrip("/")
         self.api_version = env.get("IG_API_VERSION") or API_VERSIONS[0]
         self.ig_graph = (env.get("IG_GRAPH_URL") or "https://graph.instagram.com").rstrip("/")
         self.fb_graph = (env.get("FB_GRAPH_URL") or "https://graph.facebook.com").rstrip("/")
@@ -367,12 +371,12 @@ DEFAULT_SETTINGS = {
     "limits": {"per_hour": 30, "cooldown_min": 30, "daily_posts": 25, "quiet_from": "", "quiet_to": ""},
     "brand": {"about": "", "tone": "صمیمی و محترمانه", "hashtags": "", "handle": ""},
     "ai": {"mode": "free", "url": "", "model": "", "key": ""},
-    "studio": {"image": "auto", "key": "", "url": "", "model": ""},
+    "studio": {"image": "auto", "pollen": "", "url": "", "key": "", "model": ""},
     "media": {"method": "auto", "public_url": "", "temp_ok": False},
     "network": {"proxy": ""},
     "telegram": {"token": "", "chat_id": ""},
 }
-SECRET_FIELDS = (("ai", "key"), ("studio", "key"), ("telegram", "token"))
+SECRET_FIELDS = (("ai", "key"), ("studio", "pollen"), ("studio", "key"), ("telegram", "token"))
 
 
 def deep_merge(base, extra):
@@ -1184,6 +1188,21 @@ class MediaStore:
                   (fid, ext, mime, kind, size, w, h, str(name or "")[:200], now()))
         return self.get(fid)
 
+    def add_asset(self, raw, name=""):
+        """A picture the studio fetched, in whatever format it came. The panel draws the final image from it;
+        it is never published as it is and, like every unused file, it is removed after a day."""
+        found = sniff(raw[:64])
+        if not found or found[0] != "image":
+            raise UserError("این فایل عکس نیست.")
+        fid = secrets.token_hex(12)
+        final = os.path.join(self.dir, "%s.%s" % (fid, found[1]))
+        with open(final, "wb") as fh:
+            fh.write(raw)
+        w, h = image_size(final)
+        self.db.x("INSERT INTO files (id, ext, mime, kind, size, width, height, name, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                  (fid, found[1], found[2], "asset", len(raw), w, h, str(name or "")[:200], now()))
+        return self.get(fid)
+
     def methods(self):
         m = self.settings.all()["media"]
         public = (m["public_url"] or self.cfg.public_url).rstrip("/")
@@ -1261,7 +1280,11 @@ class MediaStore:
 # ───────────────────────────── writing assistant ─────────────────────────────
 
 class AIDown(Exception):
-    pass
+    """The text service gave no usable answer. wait > 0: it asked to come back after that many seconds."""
+
+    def __init__(self, why="", wait=0.0):
+        super().__init__(why)
+        self.wait = max(0.0, float(wait or 0))
 
 
 class AI:
@@ -1269,40 +1292,60 @@ class AI:
 
     def __init__(self, cfg, settings, graph, ig):
         self.cfg, self.settings, self.graph, self.ig = cfg, settings, graph, ig
+        self.free_at = 0.0                             # when the free service takes the next question from this address
 
     def endpoint(self):
-        s = self.settings.all()["ai"]
-        if s["mode"] == "off":
+        """(address, key, model, kind) of the text service in use, or None when it is switched off."""
+        s = self.settings.all()
+        ai, pollen = s["ai"], s["studio"]["pollen"]
+        if ai["mode"] == "off":
             return None
-        if s["mode"] == "custom" and s["url"]:
-            return s["url"], s["key"], s["model"] or "gpt-4o-mini"
-        if self.cfg.ai_url:
-            return self.cfg.ai_url, "", s["model"] or "openai"
-        if self.cfg.sim:
+        if ai["mode"] == "custom" and ai["url"]:
+            return ai["url"], ai["key"], ai["model"] or "gpt-4o-mini", "custom"
+        if self.cfg.ai_url:                            # AGENT_AI_URL: an own service that needs no key
+            return self.cfg.ai_url, "", ai["model"] or "openai", "custom"
+        if pollen:                                     # the owner's Pollinations key: better models, no waiting
+            return self.cfg.gen_api + "/v1/chat/completions", pollen, ai["model"], "pollen"
+        if self.cfg.sim and self.FREE_URL == AI.FREE_URL:
             return None                                # demo and tests never call out
-        return self.FREE_URL, "", "openai"
+        return self.FREE_URL, "", "openai-fast", "free"
 
     def mode(self):
         ep = self.endpoint()
-        return "off" if not ep else ("custom" if ep[0] != self.FREE_URL else "free")
+        return ep[3] if ep else "off"
 
     def ask(self, system, user, history=None, max_tokens=700):
         ep = self.endpoint()
         if not ep:
             raise AIDown("off")
-        url, key, model = ep
+        url, key, model, kind = ep
+        if kind == "free" and now() < self.free_at:
+            raise AIDown("limit", self.free_at - now())
         if not url.rstrip("/").endswith(("/chat/completions", "/openai")):
             url = url.rstrip("/") + "/chat/completions"
         messages = [{"role": "system", "content": system}] + list(history or []) + [{"role": "user", "content": user}]
         headers = {"Content-Type": "application/json"}
         if key:
             headers["Authorization"] = "Bearer " + key
-        payload = jdump({"model": model, "messages": messages, "max_tokens": max_tokens, "temperature": 0.8})
+        payload = {"messages": messages, "max_tokens": max_tokens}
+        if model:
+            payload["model"] = model
+        if kind != "pollen":                           # its default model takes no temperature
+            payload["temperature"] = 0.8
+        if kind == "free":
+            payload["seed"] = random.randint(1, 2 ** 31 - 1)      # the same question must not come back from a shared cache
         try:
-            status, _, body = self.graph.http("POST", url, payload.encode("utf-8"), headers, timeout=45)
+            status, hdrs, body = self.graph.http("POST", url, jdump(payload).encode("utf-8"), headers, timeout=45)
         except GraphError as e:
             raise AIDown(str(e))
-        data = jload(body.decode("utf-8", "replace"), None)
+        raw = body.decode("utf-8", "replace")
+        data = jload(raw, None)
+        if status in (402, 429, 503) and kind == "free":
+            m = re.search(r"(?:retry after|wait)\s+(\d+)\s*s", raw, re.I)
+            after = str(hdrs.get("retry-after") or "")
+            wait = int(m.group(1)) if m else int(after) if after.isdigit() else FREE_GAP
+            self.free_at = now() + wait
+            raise AIDown("limit", wait)
         try:
             if status >= 400:
                 raise KeyError(status)
@@ -1312,7 +1355,15 @@ class AI:
         text = re.sub(r"<think>.*?</think>", "", text or "", flags=re.S).strip()
         if not text:
             raise AIDown("empty answer")
+        if kind == "free":
+            self.free_at = now() + FREE_GAP
         return text
+
+    @staticmethod
+    def offline(e, **extra):
+        """What the panel is told when templates stand in for the assistant (and how long the free service asks to wait)."""
+        wait = int(getattr(e, "wait", 0) + 0.999)
+        return dict(extra, source="offline", **({"wait": wait} if wait else {}))
 
     def persona(self):
         b, a = self.settings.all()["brand"], self.ig.acct
@@ -1355,13 +1406,14 @@ class AI:
             items = [limit_tags(i) for i in items if i][:5]
             if items:
                 return {"items": items, "source": "ai"}
-        except AIDown:
-            pass
+            down = None
+        except AIDown as e:
+            down = e
         tail = " ".join(self.offline_hashtags(topic)[:5])
-        return {"source": "offline", "items": [
+        return self.offline(down, items=[
             "%s ✨\n\n%s" % (topic, tail),
             "%s\n\nنظر شما چیه؟ توی کامنت‌ها برامون بنویسید 👇\n\n%s" % (topic, tail),
-            "یه خبر خوب: %s 🌿\nاگه دوست داشتید برای دوستاتون هم بفرستید.\n\n%s" % (topic, tail)]}
+            "یه خبر خوب: %s 🌿\nاگه دوست داشتید برای دوستاتون هم بفرستید.\n\n%s" % (topic, tail)])
 
     def hashtags(self, topic):
         topic = str(topic or "").strip()[:500]
@@ -1375,9 +1427,10 @@ class AI:
                     tags.append(t)
             if len(tags) >= 3:
                 return {"items": tags[:12], "source": "ai"}
-        except AIDown:
-            pass
-        return {"items": self.offline_hashtags(topic)[:12], "source": "offline"}
+            down = None
+        except AIDown as e:
+            down = e
+        return self.offline(down, items=self.offline_hashtags(topic)[:12])
 
     def ideas(self, count=6):
         about = self.settings.all()["brand"]["about"] or "پیج"
@@ -1388,14 +1441,15 @@ class AI:
             items = [i for i in items if len(i) > 8][:count]
             if items:
                 return {"items": items, "source": "ai"}
-        except AIDown:
-            pass
+            down = None
+        except AIDown as e:
+            down = e
         base = ["پشت‌صحنهٔ یک روز کاری: از صبح تا شب در چند عکس", "معرفی پرطرفدارترین محصول یا خدمت و دلیل محبوبیتش",
                 "پاسخ به سه سؤال پرتکرار مشتری‌ها در یک پست چندتایی", "قبل و بعد: نتیجهٔ یک کار واقعی را نشان بده",
                 "یک نکتهٔ آموزشی کوتاه که مخاطب همین امروز به کارش بیاید", "نظر یک مشتری راضی (با اجازهٔ خودش)",
                 "نظرسنجی در استوری: از مخاطب بپرس چه چیزی دوست دارد ببیند", "داستان شروع کار: %s چطور راه افتاد؟" % about]
         random.shuffle(base)
-        return {"items": base[:count], "source": "offline"}
+        return self.offline(down, items=base[:count])
 
     @staticmethod
     def offline_reply(text):
@@ -1418,8 +1472,8 @@ class AI:
                            % ("کامنت" if kind == "comment" else "پیام", str(text)[:600],
                               ("متن پست: «%s»\n" % context[:400]) if context else ""), max_tokens=220)
             return {"text": out.strip().strip("«»\"'")[:900], "source": "ai"}
-        except AIDown:
-            return {"text": self.offline_reply(text), "source": "offline"}
+        except AIDown as e:
+            return self.offline(e, text=self.offline_reply(text))
 
     def chat(self, history, facts):
         history = [{"role": "assistant" if m.get("role") == "assistant" else "user", "content": str(m.get("content") or "")[:2000]}
@@ -1429,9 +1483,470 @@ class AI:
         try:
             text = self.ask(self.persona() + "\nوضعیت فعلی پیج:\n" + facts, history[-1]["content"], history[:-1], 800)
             return {"text": text, "source": "ai"}
-        except AIDown:
-            return {"source": "offline", "text": "الان به سرویس هوش مصنوعی دسترسی ندارم، ولی این وضعیت فعلی پیج است:\n\n"
-                    + facts + "\n\nبرای ایدهٔ پست و کپشن می‌توانی از دکمه‌های «کپشن پیشنهادی» و «ایده» هم استفاده کنی."}
+        except AIDown as e:
+            if e.wait:
+                return self.offline(e, text="سرویس رایگان هوش مصنوعی هر ۴۵ ثانیه یک پاسخ می‌دهد؛ %s ثانیهٔ دیگر دوباره بپرس."
+                                    % fa(int(e.wait + 0.999)))
+            return self.offline(e, text="الان به سرویس هوش مصنوعی دسترسی ندارم، ولی این وضعیت فعلی پیج است:\n\n" + facts
+                                + "\n\nبرای ایدهٔ پست و کپشن می‌توانی از دکمه‌های «کپشن پیشنهادی» و «ایده» هم استفاده کنی.")
+
+
+# ───────────────────────────── studio: a post or a reel out of one idea ─────────────────────────────
+# The agent writes the words itself (caption, hashtags, a headline, a line for each scene) and asks a picture
+# service for the pictures. The panel then draws the final image or renders the reel on the phone itself, so the
+# result exists even when no picture service can be reached.
+
+PICTURE_SIZES = {"post": (768, 960), "reel": (720, 1280), "square": (896, 896)}
+HORDE_SIZES = {"post": (512, 640), "reel": (384, 704), "square": (576, 576)}     # the most it gives without an account
+PICTURE_STYLES = {
+    "photo": "professional photograph, natural light, shallow depth of field, highly detailed",
+    "art": "digital illustration, soft colors, clean shapes",
+    "minimal": "minimalist composition, plain background, a lot of empty space, soft light",
+    "3d": "3D render, soft studio lighting, pastel colors",
+}
+NO_TEXT = "no text, no letters, no watermark"
+HORDE_MODELS = {"photo": ["ICBINP - I Can't Believe It's Not Photography", "AbsoluteReality", "Deliberate", "stable_diffusion"],
+                "art": ["Dreamshaper", "Deliberate", "stable_diffusion"]}
+HORDE_AVOID = re.compile(r"nsfw|pony|anime|furry|hentai|illustrious|noob|waifu|anything|XL|flux", re.I)
+HORDE_AGENT = "insta-agent:%s:github.com/afshinrahimi109/Najibrahimi" % VERSION
+HORDE_POLL = 3.0                # seconds between two looks at a queued picture
+HORDE_WAIT = 150                # how long a picture may sit in the volunteers' queue
+FREE_GAP = 46                   # the free service gives one picture (and one text) every 45 seconds per address
+PATIENCE = 60                   # the longest the studio waits for a service that says "come back in N seconds"
+GRACE = 1.0                     # ...plus this much, so the service's clock has surely moved on
+PICTURE_MAX = 15 * 1024 * 1024
+SCENE_LINES = ["جزئیات بیشتر در کپشن 👇", "همین حالا پیام بده", "برای دوستانت هم بفرست", "ما را دنبال کن"]
+
+
+class PictureError(Exception):
+    """A picture service could not deliver. wait > 0: it asked to come back after that many seconds.
+    tell=True: the owner should hear about it even when another service delivers (a refused key, for example)."""
+
+    def __init__(self, message, wait=0.0, tell=False):
+        super().__init__(message)
+        self.message, self.wait, self.tell = message, max(0.0, float(wait or 0)), tell
+
+
+def shorten(text, limit):
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit + 1]
+    return (cut[:cut.rfind(" ")] if " " in cut[limit // 2:] else text[:limit]).rstrip(" ،,.؛:-") + "…"
+
+
+def loose_json(text):
+    """The first JSON object inside an answer that may carry a code fence or a few words around it."""
+    text = str(text or "")
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    data = jload(text[start:end + 1], None)
+    return data if isinstance(data, dict) else None
+
+
+class Studio:
+    def __init__(self, agent):
+        self.agent, self.cfg, self.graph = agent, agent.cfg, agent.graph
+        self.jobs, self.lock = {}, threading.Lock()
+        self.free_at = 0.0                             # when the free picture service takes the next request from here
+        self.models, self.models_at = None, 0.0
+
+    def conf(self):
+        return self.agent.settings.all()["studio"]
+
+    def state(self):
+        c = self.conf()
+        return {"image": c["image"], "pollen": bool(c["pollen"]), "custom": bool(c["url"]),
+                "free_wait": max(0, int(self.free_at - now())), "text": self.agent.ai.mode()}
+
+    # ── words ──
+    def plan(self, idea, kind, n, job=None):
+        """Caption, hashtags, headline and one picture description per scene: from the assistant, or from templates."""
+        ai, text, why = self.agent.ai, "", ""
+        reel = kind == "reel"
+        ask = ("ایده: «%s»\nبرای %s اینستاگرام فقط یک شیء JSON معتبر بده (بدون هیچ توضیح یا متن دیگری) با این کلیدها:\n"
+               "\"caption\": کپشن فارسی ۲ تا ۴ جمله با یکی دو ایموجی؛ بدون هشتگ.\n"
+               "\"hashtags\": آرایهٔ ۳ تا ۵ هشتگ دقیق و مرتبط.\n"
+               "\"headline\": تیتر فارسی خیلی کوتاه برای نوشتن روی تصویر (حداکثر ۶ کلمه).\n"
+               "\"sub\": یک جملهٔ کوتاه تکمیلی یا دعوت به اقدام (حداکثر ۸ کلمه) یا رشتهٔ خالی.\n"
+               "\"image\": توصیف انگلیسی دقیق یک تصویر برای مدل تصویرساز (سوژه، محیط، نور، زاویه)، بدون هیچ نوشته‌ای در تصویر.\n"
+               % (idea, ("یک ریل %d صحنه‌ای" % n) if reel else "یک پست تصویری"))
+        if reel:
+            ask += ("\"scenes\": آرایهٔ دقیقاً %d صحنه؛ هر صحنه یک شیء با \"text\" (جملهٔ فارسی خیلی کوتاه برای روی تصویر، حداکثر ۷ کلمه) "
+                    "و \"image\" (توصیف انگلیسی تصویر همان صحنه). صحنهٔ اول توجه را جلب کند و صحنهٔ آخر دعوت به اقدام باشد.\n" % n)
+        for attempt in (0, 1):
+            try:
+                text = ai.ask(ai.persona() + " هر چه می‌نویسی فقط یک شیء JSON معتبر باشد.", ask, max_tokens=1100)
+                break
+            except AIDown as e:
+                wait = e.wait
+                why = "limit" if wait else ("off" if str(e) == "off" else "down")
+                if attempt or not 0 < wait <= PATIENCE or job is None:
+                    break
+                job["step"] = "سرویس رایگان متن هر ۴۵ ثانیه یک پاسخ می‌دهد؛ %s ثانیهٔ دیگر…" % fa(int(wait + GRACE))
+                if job["cancel"].wait(wait + GRACE):
+                    break
+        base = self.offline_plan(idea, kind, n)
+        data = loose_json(text)
+        if not data:
+            base["why"] = why or ("down" if not text else "format")
+            return base
+
+        def s(value, limit):
+            return shorten(value, limit) if isinstance(value, str) else ""
+
+        out = dict(base, source="ai", why="")
+        caption = str(data.get("caption") or "").strip() if isinstance(data.get("caption"), str) else ""
+        caption = re.sub(r"\s*#[^\s#]+", "", caption).strip()[:1800]       # hashtags travel on their own
+        tags = []
+        for t in (data.get("hashtags") if isinstance(data.get("hashtags"), list) else []):
+            t = "#" + re.sub(r"[\s#]+", "_", str(t).strip().lstrip("#")).strip("_")
+            if len(t) > 1 and norm(t) not in [norm(x) for x in tags]:
+                tags.append(t[:60])
+        out.update(caption=caption or base["caption"], hashtags=tags[:GOOD_HASHTAGS] or base["hashtags"],
+                   headline=s(data.get("headline"), 70) or base["headline"], sub=s(data.get("sub"), 90),
+                   image=s(data.get("image"), 500) or base["image"])
+        if reel:
+            scenes = []
+            for i, sc in enumerate(data.get("scenes") if isinstance(data.get("scenes"), list) else []):
+                if isinstance(sc, dict) and len(scenes) < n:
+                    scenes.append({"text": s(sc.get("text"), 80) or base["scenes"][i]["text"], "image": s(sc.get("image"), 500) or out["image"]})
+            out["scenes"] = scenes + base["scenes"][len(scenes):]
+        return out
+
+    def offline_plan(self, idea, kind, n):
+        ai = self.agent.ai
+        tags = ai.offline_hashtags(idea)[:GOOD_HASHTAGS]
+        parts = [p.strip() for p in re.split(r"[\n.!؟?؛،:\-–—]+", idea) if len(p.strip()) >= 3]
+        headline = shorten(parts[0] if parts else idea, 60)
+        lines = [shorten(p, 70) for p in parts][:max(1, n - 1)]
+        handle = self.agent.ig.acct.get("username") or self.agent.settings.get("brand.handle") or ""
+        extra = ([("@" + handle)] if handle else []) + SCENE_LINES
+        while len(lines) < n:
+            lines.append(extra[(len(lines) - 1) % len(extra)] if lines else headline)
+        return {"source": "offline", "why": "", "caption": "%s ✨\n\nنظر شما چیه؟ توی کامنت‌ها برامون بنویسید 👇" % idea, "hashtags": tags,
+                "headline": headline, "sub": "", "image": idea,
+                "scenes": [{"text": t, "image": idea} for t in lines[:n]] if kind == "reel" else []}
+
+    # ── pictures ──
+    def fetch(self, method, url, data=None, headers=None, timeout=120):
+        try:
+            return self.graph.http(method, url, data, headers, timeout)
+        except GraphError:
+            raise PictureError("ارتباط با سرویس تصویر برقرار نشد (اینترنت یا فیلترشکن را بررسی کن).")
+
+    @staticmethod
+    def is_picture(raw):
+        found = sniff(raw[:64])
+        return bool(found and found[0] == "image" and found[1] in ("jpg", "png", "webp") and len(raw) <= PICTURE_MAX)
+
+    @staticmethod
+    def refusal(headers, raw):
+        """(what the service said, how many seconds it wants us to wait) out of a "not now" answer."""
+        text = raw[:2000].decode("utf-8", "replace")
+        data, msg = jload(text, None), ""
+        if isinstance(data, dict):
+            err = data.get("error")
+            msg = (err.get("message") if isinstance(err, dict) else err) or data.get("message") or ""
+        msg = str(msg or text)[:300]
+        m = re.search(r"(?:retry after|wait)\s+(\d+)\s*s", msg, re.I)
+        if m:
+            return msg, int(m.group(1))
+        after = str(headers.get("retry-after") or "")
+        return msg, int(after) if after.isdigit() else 0
+
+    def from_key(self, prompt, shape, seed, style, job):
+        """Pollinations with the owner's own key: full size, no waiting, no logo."""
+        c = self.conf()
+        if not c["pollen"]:
+            raise PictureError("")
+        w, h = PICTURE_SIZES[shape]
+        q = {"width": w, "height": h, "seed": seed, "safe": "true"}
+        url = "%s/image/%s?%s" % (self.cfg.gen_api, urllib.parse.quote(prompt[:900], safe=""), urllib.parse.urlencode(q))
+        status, headers, raw = self.fetch("GET", url, headers={"Authorization": "Bearer " + c["pollen"]})
+        if status == 200 and self.is_picture(raw):
+            return raw
+        if status == 401:
+            raise PictureError("کلید Pollinations پذیرفته نشد؛ در تنظیمات دوباره واردش کن.", tell=True)
+        if status == 402:
+            raise PictureError("اعتبار (Pollen) کلید Pollinations تمام شده است.", tell=True)
+        _, wait = self.refusal(headers, raw)
+        if status in (429, 503):
+            raise PictureError("Pollinations فعلاً شلوغ است.", wait or 10)
+        raise PictureError("Pollinations جواب نداد (HTTP %s)." % status)
+
+    def from_free(self, prompt, shape, seed, style, job):
+        """Pollinations without a key: one picture every 45 seconds per address, with its small logo in a corner."""
+        left = self.free_at - now()
+        if left > 0:
+            raise PictureError("سرویس رایگان هر ۴۵ ثانیه یک تصویر می‌دهد.", left)
+        w, h = PICTURE_SIZES[shape]
+        q = urllib.parse.urlencode({"width": w, "height": h, "seed": seed, "private": "true", "safe": "true"})
+        url = "%s/prompt/%s?%s" % (self.cfg.image_api, urllib.parse.quote(prompt[:700], safe=""), q)
+        status, headers, raw = self.fetch("GET", url)
+        if status == 200 and self.is_picture(raw):
+            self.free_at = now() + FREE_GAP
+            return raw
+        _, wait = self.refusal(headers, raw)
+        if status in (402, 429, 503):
+            wait = wait or (10 if status == 503 else FREE_GAP)
+            self.free_at = max(self.free_at, now() + wait)
+            raise PictureError("سرویس رایگان فعلاً نوبت نمی‌دهد.", wait)
+        raise PictureError("سرویس رایگان تصویر جواب نداد (HTTP %s)." % status)
+
+    def horde_headers(self, json_body=False):
+        h = {"apikey": "0000000000", "Client-Agent": HORDE_AGENT, "Accept": "application/json"}
+        if json_body:
+            h["Content-Type"] = "application/json"
+        return h
+
+    def horde_models(self, style):
+        """Which general-purpose models the volunteers serve right now (most of that network draws anime)."""
+        if self.models is None or now() - self.models_at > 1800:
+            self.models, self.models_at = [], now()
+            try:
+                status, _, raw = self.fetch("GET", self.cfg.horde_api + "/status/models?type=image", headers=self.horde_headers(), timeout=20)
+                rows = jload(raw.decode("utf-8", "replace"), None) if status == 200 else None
+                for m in (rows if isinstance(rows, list) else []):
+                    if isinstance(m, dict) and int(m.get("count") or 0) > 0:
+                        self.models.append((str(m.get("name")), int(m.get("count") or 0)))
+            except (PictureError, ValueError, TypeError):
+                pass
+        known = HORDE_MODELS["art" if style in ("art", "3d") else "photo"]
+        if not self.models:
+            return list(known)
+        live = dict(self.models)
+        want = [name for name in known if name in live]
+        if not want:
+            want = [name for name, _ in sorted(self.models, key=lambda x: -x[1]) if not HORDE_AVOID.search(name)][:4]
+        return want
+
+    def from_horde(self, prompt, shape, seed, style, job):
+        """AI Horde, a network of volunteers: free and without an account, but small pictures and sometimes a queue."""
+        base = self.cfg.horde_api
+        w, h = HORDE_SIZES[shape]
+        body = {"prompt": prompt[:900] + " ### text, letters, watermark, logo, blurry, deformed, low quality",
+                "params": {"width": w, "height": h, "steps": 24, "n": 1, "sampler_name": "k_euler_a", "cfg_scale": 6.5,
+                           "karras": True, "seed": str(seed)},
+                "nsfw": False, "censor_nsfw": True, "r2": False, "shared": False, "slow_workers": True, "trusted_workers": False}
+        models = self.horde_models(style)
+        if models:
+            body["models"] = models
+        status, headers, raw = self.fetch("POST", base + "/generate/async", jdump(body).encode("utf-8"), self.horde_headers(True), 30)
+        data = jload(raw.decode("utf-8", "replace"), None)
+        rid = data.get("id") if isinstance(data, dict) else None
+        if status not in (200, 202) or not rid:
+            rc = data.get("rc") if isinstance(data, dict) else ""
+            if status == 429 or rc == "TooManyPrompts":
+                raise PictureError("شبکهٔ داوطلبانه فعلاً درخواست تازه نمی‌پذیرد.", 20)
+            raise PictureError("شبکهٔ داوطلبانه (AI Horde) درخواست را نپذیرفت (%s)." % (rc or "HTTP %s" % status))
+        deadline = now() + HORDE_WAIT
+        try:
+            while True:
+                if job is not None and job["cancel"].wait(HORDE_POLL):
+                    raise PictureError("لغو شد.")
+                if job is None:
+                    time.sleep(HORDE_POLL)
+                status, _, raw = self.fetch("GET", base + "/generate/check/" + rid, headers=self.horde_headers(), timeout=20)
+                st = jload(raw.decode("utf-8", "replace"), None)
+                st = st if isinstance(st, dict) else {}
+                if st.get("done"):
+                    break
+                if st.get("faulted") or st.get("is_possible") is False:
+                    raise PictureError("شبکهٔ داوطلبانه نتوانست این تصویر را بسازد.")
+                if now() > deadline:
+                    raise PictureError("صف شبکهٔ داوطلبانه طولانی بود.")
+                if job is not None and st.get("queue_position"):
+                    job["step"] = "در صف شبکهٔ داوطلبانه (نفر %s)…" % fa(st["queue_position"])
+        except PictureError:
+            try:
+                self.fetch("DELETE", base + "/generate/status/" + rid, headers=self.horde_headers(), timeout=15)
+            except PictureError:
+                pass
+            raise
+        status, _, raw = self.fetch("GET", base + "/generate/status/" + rid, headers=self.horde_headers(), timeout=60)
+        data = jload(raw.decode("utf-8", "replace"), None)
+        gens = data.get("generations") if isinstance(data, dict) else None
+        if not gens or not isinstance(gens[0], dict):
+            raise PictureError("شبکهٔ داوطلبانه تصویری برنگرداند.")
+        if gens[0].get("censored"):
+            raise PictureError("شبکهٔ داوطلبانه این تصویر را نپذیرفت؛ توصیف دیگری امتحان کن.")
+        return self.unwrap(gens[0].get("img"))
+
+    def unwrap(self, value):
+        """A picture that came inside JSON: either a link or the file itself as base64."""
+        value = str(value or "")
+        if value.startswith(("http://", "https://")):
+            status, _, blob = self.fetch("GET", value)
+            if status != 200:
+                blob = b""
+        else:
+            try:
+                blob = base64.b64decode(value.split(",", 1)[-1], validate=False)
+            except ValueError:
+                blob = b""
+        if not self.is_picture(blob):
+            raise PictureError("فایلی که سرویس تصویر فرستاد عکس نبود.")
+        return blob
+
+    def from_custom(self, prompt, shape, seed, style, job):
+        """Any service that speaks OpenAI's "images/generations" (the owner's own address, key and model)."""
+        c = self.conf()
+        if not c["url"]:
+            raise PictureError("" if c["image"] != "custom" else "نشانی سرویس تصویر خودت را در تنظیمات ننوشته‌ای.")
+        url = c["url"] if c["url"].endswith("/images/generations") else c["url"] + "/images/generations"
+        body = {"model": c["model"] or "gpt-image-1", "prompt": prompt[:1500], "n": 1, "size": "1024x1024" if shape == "square" else "1024x1536"}
+        headers = {"Content-Type": "application/json"}
+        if c["key"]:
+            headers["Authorization"] = "Bearer " + c["key"]
+        status, _, raw = self.fetch("POST", url, jdump(body).encode("utf-8"), headers, 180)
+        data = jload(raw.decode("utf-8", "replace"), None)
+        try:
+            item = data["data"][0]
+            value = item.get("b64_json") or item.get("url")
+        except (TypeError, KeyError, IndexError, AttributeError):
+            value = None
+        if status >= 400 or not value:
+            raise PictureError("سرویس تصویر خودت جواب قابل‌استفاده‌ای نداد (HTTP %s)." % status, tell=True)
+        return self.unwrap(value)
+
+    SOURCES = {"key": "Pollinations (با کلید)", "free": "Pollinations (رایگان)", "horde": "AI Horde", "custom": "سرویس خودت"}
+    ORDER = {"auto": ("custom", "key", "free", "horde"), "pollinations": ("key", "free"), "horde": ("horde",), "custom": ("custom",)}
+
+    def picture(self, prompt, shape="post", style="photo", job=None):
+        """One picture from the first service that delivers. Returns (file row, name of the service)."""
+        mode = self.conf()["image"]
+        if mode == "off":
+            raise PictureError("ساخت تصویر با هوش مصنوعی در تنظیمات خاموش است.")
+        shape = shape if shape in PICTURE_SIZES else "post"
+        full = ", ".join(x for x in (shorten(prompt, 600), PICTURE_STYLES.get(style, PICTURE_STYLES["photo"]), NO_TEXT) if x)
+        seed = random.randint(1, 2 ** 31 - 1)
+        said = []
+        for attempt in (0, 1):
+            soonest = None
+            for name in self.ORDER[mode]:
+                if job is not None and job["cancel"].is_set():
+                    raise PictureError("لغو شد.")
+                try:
+                    raw = getattr(self, "from_" + name)(full, shape, seed, style, job)
+                    return self.agent.store.add_asset(raw, "studio:" + name), name
+                except PictureError as e:
+                    if e.message:
+                        said.append("%s: %s" % (self.SOURCES[name], e.message))
+                    if e.tell and job is not None and said[-1] not in job["notes"]:
+                        job["notes"].append(said[-1])
+                    if e.wait and (soonest is None or e.wait < soonest):
+                        soonest = e.wait
+            if attempt or soonest is None or soonest > PATIENCE:
+                break
+            if job is not None:
+                job["step"] = "سرویس تصویر نوبت نداد؛ %s ثانیهٔ دیگر دوباره می‌پرسم…" % fa(int(soonest + GRACE))
+                if job["cancel"].wait(soonest + GRACE):
+                    raise PictureError("لغو شد.")
+            else:
+                time.sleep(soonest + GRACE)
+            said = []
+        raise PictureError(" | ".join(said[-3:]) or "هیچ سرویس تصویری در دسترس نبود.")
+
+    # ── jobs: making takes a while, so the panel starts a job and asks how it is going ──
+    @staticmethod
+    def view(job):
+        return {k: job[k] for k in ("id", "kind", "status", "step", "plan", "pictures", "notes", "error")}
+
+    def job(self, jid):
+        with self.lock:
+            job = self.jobs.get(str(jid))
+        if not job:
+            raise UserError("این کار پیدا نشد (شاید ایجنت دوباره اجرا شده باشد). دوباره «بساز» را بزن.", 404)
+        return self.view(job)
+
+    def cancel(self, jid):
+        with self.lock:
+            job = self.jobs.get(str(jid))
+        if job:
+            job["cancel"].set()
+        return {"ok": True}
+
+    def start(self, kind, fn, *args):
+        with self.lock:
+            for old in [k for k, v in self.jobs.items() if v["created"] < now() - 3600]:
+                del self.jobs[old]
+            if sum(1 for v in self.jobs.values() if v["status"] == "running") >= 2:
+                raise UserError("ایجنت همین حالا مشغول ساختن است؛ صبر کن تمام شود.", 429)
+            job = {"id": secrets.token_hex(8), "kind": kind, "status": "running", "step": "", "plan": None, "pictures": [],
+                   "notes": [], "error": "", "created": now(), "cancel": threading.Event()}
+            self.jobs[job["id"]] = job
+        threading.Thread(target=self.run, args=(job, fn) + args, name="studio", daemon=True).start()
+        return self.view(job)
+
+    def run(self, job, fn, *args):
+        try:
+            fn(job, *args)
+            job["status"] = "canceled" if job["cancel"].is_set() else "done"
+        except UserError as e:
+            job["status"], job["error"] = "failed", e.message
+        except Exception:
+            log("studio:", traceback.format_exc())
+            job["status"], job["error"] = "failed", "خطای داخلی برنامه؛ جزئیات در ترمینال نوشته شد."
+        job["step"] = ""
+
+    def make(self, data):
+        idea = re.sub(r"[ \t]+", " ", str(data.get("idea") or "")).strip()[:600]
+        if len(idea) < 3:
+            raise UserError("ایده‌ات را در یک جمله بنویس.")
+        kind = "reel" if data.get("kind") == "reel" else "image"
+        n = clamp(data.get("scenes") or 4, 2, 6) if kind == "reel" else 1
+        style = data.get("style") if data.get("style") in PICTURE_STYLES else "photo"
+        return self.start("make", self.do_make, idea, kind, n, style, data.get("pictures") is not False)
+
+    def do_make(self, job, idea, kind, n, style, want):
+        job["step"] = "در حال نوشتن کپشن و چیدن صحنه‌ها…"
+        plan = self.plan(idea, kind, n, job)
+        plan.update(idea=idea, kind=kind, style=style)
+        prompts = [sc["image"] for sc in plan["scenes"]] if kind == "reel" else [plan["image"]]
+        job["pictures"] = [{"prompt": p, "file": "", "preview": "", "source": "", "why": ""} for p in prompts]
+        job["plan"] = plan
+        if not want:
+            return
+        letters = re.findall(r"[^\W\d_]", idea)
+        if plan["source"] != "ai" and sum(1 for ch in letters if ch.isascii()) < 0.6 * max(1, len(letters)):
+            # The picture services only understand English; without the assistant's description the picture would
+            # show something else than the idea, so a drawn background is the honest choice.
+            for pic in job["pictures"]:
+                pic["why"] = "دستیار در دسترس نبود تا ایده را برای تصویرساز توصیف کند؛ برای همین تصویر هوش مصنوعی ساخته نشد."
+            return
+        self.draw(job, "reel" if kind == "reel" else "post", style)
+
+    def redo(self, data):
+        prompt = str(data.get("prompt") or "").strip()[:600]
+        if len(prompt) < 3:
+            raise UserError("بنویس تصویر چه چیزی را نشان بدهد.")
+        shape = data.get("shape") if data.get("shape") in PICTURE_SIZES else "post"
+        style = data.get("style") if data.get("style") in PICTURE_STYLES else "photo"
+        return self.start("picture", self.do_redo, prompt, shape, style)
+
+    def do_redo(self, job, prompt, shape, style):
+        job["pictures"] = [{"prompt": prompt, "file": "", "preview": "", "source": "", "why": ""}]
+        self.draw(job, shape, style)
+
+    def draw(self, job, shape, style):
+        failed, total = 0, len(job["pictures"])
+        for i, pic in enumerate(job["pictures"]):
+            if job["cancel"].is_set():
+                return
+            job["step"] = "در حال کشیدن تصویر…" if total == 1 else "در حال کشیدن تصویر %s از %s…" % (fa(i + 1), fa(total))
+            try:
+                f, source = self.picture(pic["prompt"], shape, style, job)
+                pic.update(file=f["id"], preview="/api/file/" + f["id"], source=source, width=f["width"], height=f["height"])
+                failed = 0
+            except PictureError as e:
+                pic["why"] = e.message
+                failed += 1
+                if failed >= 2:                        # nothing answers: the remaining scenes get a drawn background at once
+                    for rest in job["pictures"][i + 1:]:
+                        rest["why"] = e.message
+                    return
 
 
 # ───────────────────────────── auto-reply rules ─────────────────────────────
@@ -2685,6 +3200,7 @@ class Agent:
         self.ai = AI(cfg, self.settings, self.graph, self.ig)
         self.rules = Rules(self.db)
         self.publisher, self.inbox, self.direct, self.analytics = Publisher(self), Inbox(self), Direct(self), Analytics(self)
+        self.studio = Studio(self)
         self.sim = None
         self.wake, self.stop_flag = threading.Event(), threading.Event()
         self.thread = None
@@ -3002,6 +3518,7 @@ class Agent:
             "next_post": self.publisher.view(nxt) if nxt else None, "quota": self.db.get("quota"),
             "daily_cap": s["limits"]["daily_posts"], "media": self.store.methods(), "ai": self.ai.mode(),
             "dm_blocked": self.db.get("dm.blocked") or "", "busy": self.graph.busy() or t < self.cool_until,
+            "studio": self.studio.state(),
         }
 
 
@@ -3042,6 +3559,14 @@ class Sim:
         self.lively = True
         self.quota_used, self.quota_total = 0, 50
         self.next_live, self.live_i = now() + 20, 0
+        # stand-ins for the text and picture services the studio talks to
+        self.ai_calls, self.ai_script, self.horde_jobs = [], {}, {}
+        self.ai_key = "sk_sim_demo_key"
+        self.ai_text = None                            # the text service's answer: a string, or a function of the request
+        self.ai_delay = 0.0                            # seconds every picture takes
+        self.free_gap, self.free_next = {"image": 0.0, "text": 0.0}, {"image": 0.0, "text": 0.0}
+        self.horde_polls = 1                           # looks at a queued picture until it is ready
+        self.horde_names = ["stable_diffusion", "Deliberate", "Dreamshaper", "AbsoluteReality", "WAI-NSFW-illustrious-SDXL"]
         self.seed()
 
     def nid(self, prefix):
@@ -3141,6 +3666,109 @@ class Sim:
         """Next matching call(s) fail. drop=True: the action happens but the answer is lost."""
         self.faults.append({"pattern": pattern, "method": method, "times": times, "drop": drop, "status": status,
                             "error": {"message": message, "type": "OAuthException", "code": code, "error_subcode": sub}})
+
+    def script(self, service, status, obj=None, headers=None, times=1):
+        """The next call(s) to one of the AI stand-ins ("pimg", "pgen", "horde", "oimg", "ptxt") get this answer."""
+        self.ai_script.setdefault(service, []).extend([(status, obj if obj is not None else {}, headers or {})] * times)
+
+    def free_turn(self, what):
+        """The free service serves one request every so often per address; the others are told how long to wait."""
+        with self.lock:
+            left = self.free_next[what] - now()
+            if left > 0:
+                return int(left + 0.999)
+            self.free_next[what] = now() + self.free_gap[what]
+            return 0
+
+    def ai(self, method, path, q, raw, headers):
+        """(status, content type, body, extra headers) of the simulated text and picture services."""
+        service, _, tail = path.partition("/")
+        body = jload(raw.decode("utf-8", "replace"), None) if raw else None
+
+        def answer(status, obj, extra=None):
+            return status, "application/json; charset=utf-8", jdump(obj).encode("utf-8"), extra or {}
+
+        def picture(text, width, height):
+            if self.ai_delay:
+                time.sleep(self.ai_delay)
+            return 200, "image/png", fake_picture(text, width, height), {"x-model-used": "sim"}
+
+        with self.lock:
+            self.ai_calls.append((service, method, tail, dict(q), body, {k.lower(): v for k, v in headers.items()}))
+            if len(self.ai_calls) > 2000:
+                del self.ai_calls[:1000]
+            queue = self.ai_script.get(service)
+            if queue:
+                status, obj, extra = queue.pop(0)
+                return answer(status, obj, extra)
+        limit = lambda what, left: answer(402, {"status": 402, "success": False, "error": {"code": "FREE_LIMIT", "message": (
+            "Free limit reached: 1 %s every 45 seconds per IP. Retry after %ds, or get unlimited %ss with a pollen key" % (what, left, what))}})
+        bearer = headers.get("Authorization") or ""
+        width, height = clamp(q.get("width") or 768, 64, 2048), clamp(q.get("height") or 960, 64, 2048)
+        if service == "pimg" and tail.startswith("prompt/"):
+            left = self.free_turn("image")
+            return limit("image", left) if left else picture(tail + str(q.get("seed")), width * 5 // 8, height * 5 // 8)
+        if service == "pgen":
+            if bearer != "Bearer " + self.ai_key:
+                return answer(401, {"success": False, "error": {"message": "A valid API key is required.", "code": "UNAUTHORIZED"}, "status": 401})
+            if tail.startswith("image/"):
+                return picture(tail + str(q.get("seed")), width, height)
+            if tail == "v1/chat/completions" and method == "POST":
+                said = self.ai_text(body or {}) if callable(self.ai_text) else self.ai_text
+                if said is None:
+                    return answer(500, {"error": {"message": "the simulated text service has nothing to say"}})
+                return answer(200, {"choices": [{"index": 0, "message": {"role": "assistant", "content": said}, "finish_reason": "stop"}],
+                                    "model": "openai/gpt-5.4-nano"})
+        if service == "oimg" and tail == "images/generations" and method == "POST":
+            if bearer != "Bearer " + self.ai_key:
+                return answer(401, {"error": {"message": "Incorrect API key provided", "type": "invalid_request_error"}})
+            w, _, h = str((body or {}).get("size") or "1024x1024").partition("x")
+            blob = picture(str((body or {}).get("prompt")), clamp(w, 64, 2048), clamp(h, 64, 2048))[2]
+            return answer(200, {"created": int(now()), "data": [{"b64_json": base64.b64encode(blob).decode("ascii")}]})
+        if service == "ptxt":
+            left = self.free_turn("text")
+            if left:
+                return limit("reply", left)
+            said = self.ai_text(body or dict(q, prompt=urllib.parse.unquote(tail))) if callable(self.ai_text) else self.ai_text
+            if said is None:
+                return answer(500, {"error": "the simulated text service has nothing to say"})
+            if method == "POST" and tail == "openai":
+                return answer(200, {"choices": [{"index": 0, "message": {"role": "assistant", "content": said}, "finish_reason": "stop"}]})
+            return 200, "text/plain; charset=utf-8", str(said).encode("utf-8"), {}
+        if service == "horde":
+            if headers.get("apikey") != "0000000000":
+                return answer(401, {"message": "No user matching sent API Key. Have you remembered to register at https://aihorde.net/register ?", "rc": "InvalidAPIKey"})
+            if tail == "status/models":
+                return answer(200, [{"name": n, "count": 3, "queued": 0, "eta": 5, "type": "image"} for n in self.horde_names])
+            if tail == "generate/async" and method == "POST":
+                params = (body or {}).get("params") or {}
+                if clamp(params.get("width") or 0, 0, 9999) * clamp(params.get("height") or 0, 0, 9999) > 576 * 576:
+                    return answer(403, {"message": "Due to heavy demand, for requests over 576x576 or over the applicable first-order-equivalent "
+                                                   "sampler work budget the client needs to already have the required kudos.", "rc": "KudosUpfront"})
+                rid = "%s-%s" % (secrets.token_hex(4), secrets.token_hex(6))
+                with self.lock:
+                    self.horde_jobs[rid] = {"left": self.horde_polls, "body": body or {}, "canceled": False}
+                return answer(202, {"id": rid, "kudos": 6.0})
+            m = re.fullmatch(r"generate/(check|status)/([\w-]+)", tail)
+            job = self.horde_jobs.get(m.group(2)) if m else None
+            if not job:
+                return answer(404, {"message": "Request not found", "rc": "RequestNotFound"})
+            if method == "DELETE":
+                job["canceled"] = True
+                return answer(200, {"done": False, "generations": []})
+            if m.group(1) == "check":
+                with self.lock:
+                    job["left"] -= 1
+                    done = job["left"] <= 0
+                return answer(200, {"done": done, "faulted": False, "is_possible": True, "wait_time": 0 if done else 8,
+                                    "queue_position": 0 if done else job["left"], "finished": int(done), "waiting": int(not done)})
+            params = job["body"].get("params") or {}
+            blob = picture(str(job["body"].get("prompt")) + str(params.get("seed")), clamp(params.get("width") or 512, 64, 1024),
+                           clamp(params.get("height") or 512, 64, 1024))[2]
+            return answer(200, {"done": True, "generations": [{"img": base64.b64encode(blob).decode("ascii"), "censored": False, "state": "ok",
+                                                               "model": (job["body"].get("models") or ["stable_diffusion"])[0],
+                                                               "seed": str(params.get("seed"))}]})
+        return answer(404, {"error": "not found"})
 
     @staticmethod
     def err(code, message, sub=0, status=400):
@@ -3512,6 +4140,41 @@ MANIFEST = {"name": "ایجنت اینستاگرام", "short_name": "ایجنت
                       {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png"}]}
 
 
+def png_file(width, height, rows):
+    """A PNG out of raw RGB rows (each row starts with a zero byte), so that no image library is needed."""
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(bytes(rows), 6)) + chunk(b"IEND", b""))
+
+
+def fake_picture(text, width, height):
+    """What the simulated picture services send (demo and tests): a sky, a sun and a table, coloured after the request."""
+    width, height = clamp(width, 64, 640), clamp(height, 64, 1136)
+    seed = zlib.crc32(str(text).encode("utf-8"))
+    top, bottom = [tuple(int(c[i:i + 2], 16) for i in (1, 3, 5)) for c in PALETTE[seed % len(PALETTE)]]
+    sun_x, sun_y, sun_r = int(width * (0.22 + (seed >> 8) % 56 / 100.0)), height * 0.3, width * 0.17
+    table = int(height * (0.68 + (seed >> 16) % 10 / 100.0))
+    rows = bytearray()
+    for y in range(height):
+        t = y / float(height - 1)
+        row = bytearray(bytes(int(top[i] + (bottom[i] - top[i]) * t) for i in range(3)) * width)
+        dy = y - sun_y
+        if abs(dy) < sun_r:
+            half = int((sun_r * sun_r - dy * dy) ** 0.5)
+            x0, x1 = max(0, sun_x - half), min(width, sun_x + half)
+            row[x0 * 3:x1 * 3] = bytes((255, 240, 205)) * (x1 - x0)
+        if y >= table:
+            shade = 0.55 - 0.25 * (y - table) / float(max(1, height - table))
+            row[:] = bytes(int(bottom[i] * shade) for i in range(3)) * width
+            edge = min(width, max(0, int(width * 0.18 + (y - table) * 0.9)))
+            row[:edge * 3] = bytes(int(top[i] * shade * 0.9) for i in range(3)) * edge
+        rows.append(0)
+        rows.extend(row)
+    return png_file(width, height, rows)
+
+
 def make_icon_png(size):
     """The home-screen icon, drawn by hand so that no image library is needed."""
     rows = bytearray()
@@ -3525,12 +4188,7 @@ def make_icon_png(size):
             if ring_in <= d <= ring_out or d <= dot:
                 col = (255, 255, 255)
             rows.extend(col)
-
-    def chunk(tag, data):
-        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
-
-    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
-            + chunk(b"IDAT", zlib.compress(bytes(rows), 9)) + chunk(b"IEND", b""))
+    return png_file(size, size, rows)
 
 
 class Web:
@@ -3815,6 +4473,9 @@ def make_handler(app, media_only=False):
                 return self.send_bytes(200, found[1], found[0], {"Cache-Control": "max-age=3600",
                                                                "Content-Security-Policy": "default-src 'none'"})
             raw = self.read_body(8 * 1024 * 1024) if method == "POST" else b""
+            if rest.startswith("ai/"):
+                status, ctype, blob, extra = sim.ai(method, rest[3:], q, raw, self.headers)
+                return self.send_bytes(status, blob, ctype, dict(extra, **{"Cache-Control": "no-store"}))
             form = dict(urllib.parse.parse_qsl(raw.decode("utf-8", "replace"))) if raw else {}
             if rest.startswith("tg/"):
                 sim.telegram.append(form)
@@ -4047,6 +4708,19 @@ def api_call(app, method, path, q, body):
         return {"items": made, "source": ideas["source"]}
     if path == "chat" and P:
         return agent.ai.chat(body.get("messages"), agent.facts())
+
+    # studio
+    if path == "studio" and G:
+        return agent.studio.state()
+    if path == "studio/make" and P:
+        return agent.studio.make(body)
+    if path == "studio/picture" and P:
+        return agent.studio.redo(body)
+    m = re.fullmatch(r"studio/job/([0-9a-f]{16})(/cancel)?", path)
+    if m and m.group(2) and P:
+        return agent.studio.cancel(m.group(1))
+    if m and not m.group(2) and G:
+        return agent.studio.job(m.group(1))
     raise UserError("چنین نشانی‌ای در برنامه نیست.", 404)
 
 
@@ -4097,6 +4771,7 @@ class App:
             self.agent.sim = Sim()
             base = "http://127.0.0.1:%d/_sim" % self.port
             cfg.ig_graph, cfg.fb_graph, cfg.telegram_api = base + "/ig", base + "/fb", base + "/tg"
+            cfg.image_api, cfg.gen_api, cfg.horde_api = base + "/ai/pimg", base + "/ai/pgen", base + "/ai/horde"
         for srv in (self.httpd, self.media_httpd):     # the servers answer first: the simulator is reached over HTTP
             threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True).start()
         if cfg.demo:
