@@ -50,6 +50,7 @@ DEFAULT_PORT = 8787
 API_VERSIONS = ["v26.0", "v27.0", "v25.0", ""]
 KINDS = ("image", "carousel", "reel", "story")
 IMAGE_MODES = ("auto", "pollinations", "horde", "custom", "off")       # where the studio gets its pictures from
+FREE_GAP = 46                   # Pollinations without a key: one picture and one text every 45 seconds per address
 KIND_FA = {"image": "پست", "carousel": "پست چندتایی", "reel": "ریل", "story": "استوری"}
 IMAGE_MAX = 8 * 1024 * 1024
 VIDEO_MAX = 300 * 1024 * 1024
@@ -244,6 +245,7 @@ class Config:
         self.image_api = (env.get("AGENT_IMAGE_URL") or "https://image.pollinations.ai").rstrip("/")
         self.gen_api = (env.get("AGENT_GEN_URL") or "https://gen.pollinations.ai").rstrip("/")
         self.horde_api = (env.get("AGENT_HORDE_URL") or "https://aihorde.net/api/v2").rstrip("/")
+        self.free_gap = float(env.get("AGENT_FREE_GAP") or (8 if self.demo else FREE_GAP))
         self.api_version = env.get("IG_API_VERSION") or API_VERSIONS[0]
         self.ig_graph = (env.get("IG_GRAPH_URL") or "https://graph.instagram.com").rstrip("/")
         self.fb_graph = (env.get("FB_GRAPH_URL") or "https://graph.facebook.com").rstrip("/")
@@ -1343,7 +1345,7 @@ class AI:
         if status in (402, 429, 503) and kind == "free":
             m = re.search(r"(?:retry after|wait)\s+(\d+)\s*s", raw, re.I)
             after = str(hdrs.get("retry-after") or "")
-            wait = int(m.group(1)) if m else int(after) if after.isdigit() else FREE_GAP
+            wait = int(m.group(1)) if m else int(after) if after.isdigit() else self.cfg.free_gap
             self.free_at = now() + wait
             raise AIDown("limit", wait)
         try:
@@ -1356,7 +1358,7 @@ class AI:
         if not text:
             raise AIDown("empty answer")
         if kind == "free":
-            self.free_at = now() + FREE_GAP
+            self.free_at = now() + self.cfg.free_gap
         return text
 
     @staticmethod
@@ -1511,7 +1513,6 @@ HORDE_AVOID = re.compile(r"nsfw|pony|anime|furry|hentai|illustrious|noob|waifu|a
 HORDE_AGENT = "insta-agent:%s:github.com/afshinrahimi109/Najibrahimi" % VERSION
 HORDE_POLL = 3.0                # seconds between two looks at a queued picture
 HORDE_WAIT = 150                # how long a picture may sit in the volunteers' queue
-FREE_GAP = 46                   # the free service gives one picture (and one text) every 45 seconds per address
 PATIENCE = 60                   # the longest the studio waits for a service that says "come back in N seconds"
 GRACE = 1.0                     # ...plus this much, so the service's clock has surely moved on
 PICTURE_MAX = 15 * 1024 * 1024
@@ -1686,11 +1687,11 @@ class Studio:
         url = "%s/prompt/%s?%s" % (self.cfg.image_api, urllib.parse.quote(prompt[:700], safe=""), q)
         status, headers, raw = self.fetch("GET", url)
         if status == 200 and self.is_picture(raw):
-            self.free_at = now() + FREE_GAP
+            self.free_at = now() + self.cfg.free_gap
             return raw
         _, wait = self.refusal(headers, raw)
         if status in (402, 429, 503):
-            wait = wait or (10 if status == 503 else FREE_GAP)
+            wait = wait or (10 if status == 503 else self.cfg.free_gap)
             self.free_at = max(self.free_at, now() + wait)
             raise PictureError("سرویس رایگان فعلاً نوبت نمی‌دهد.", wait)
         raise PictureError("سرویس رایگان تصویر جواب نداد (HTTP %s)." % status)
@@ -3501,6 +3502,7 @@ class Agent:
         nxt = self.db.one("SELECT * FROM posts WHERE status='scheduled' ORDER BY scheduled_at LIMIT 1")
         return {
             "version": VERSION, "demo": self.cfg.demo, "connected": self.ig.connected, "manual": self.hand(), "now": t,
+            "handle": s["brand"]["handle"],
             "account": {k: a.get(k) for k in ("username", "name", "picture", "followers", "follows", "media_count", "bio",
                                               "login", "invalid", "token_expires", "connected_at", "last_username")},
             "autopilot": s["autopilot"], "auto": s["auto"], "quiet": self.quiet(),
@@ -3666,6 +3668,21 @@ class Sim:
         """Next matching call(s) fail. drop=True: the action happens but the answer is lost."""
         self.faults.append({"pattern": pattern, "method": method, "times": times, "drop": drop, "status": status,
                             "error": {"message": message, "type": "OAuthException", "code": code, "error_subcode": sub}})
+
+    def demo_plan(self, body):
+        """Demo only: the studio's question gets a made-up but sensible answer. Every other question gets none, so
+        the assistant falls back to its templates, exactly as it does without internet."""
+        ask = str((((body or {}).get("messages") or [{}])[-1]).get("content") or "")
+        m = re.match(r"ایده: «(.*?)»\n", ask, re.S)
+        if not m or "JSON" not in ask:
+            return None
+        idea, n = m.group(1).strip(), re.search(r"ریل (\d+) صحنه", ask)
+        head = shorten(idea, 44)
+        lines = [head, "همین هفته", "با بهترین کیفیت", "منتظرتان هستیم", "همین حالا پیام بده", "جزئیات در کپشن"]
+        scenes = [{"text": lines[i % len(lines)], "image": "scene %d of a short video about a small business offer, warm light" % (i + 1)}
+                  for i in range(int(n.group(1)) if n else 0)]
+        return jdump({"caption": "%s ✨\nهمین امروز سر بزنید؛ منتظرتان هستیم 🌿" % idea, "hashtags": ["#پیشنهاد_ویژه", "#کسب_و_کار", "#اینستاگرام"],
+                      "headline": head, "sub": "همین حالا پیام بده", "image": "a warm, inviting photo that shows the offer", "scenes": scenes})
 
     def script(self, service, status, obj=None, headers=None, times=1):
         """The next call(s) to one of the AI stand-ins ("pimg", "pgen", "horde", "oimg", "ptxt") get this answer."""
@@ -4258,6 +4275,11 @@ class Web:
             self.icons[size] = make_icon_png(size)
         return self.icons[size]
 
+    def font(self):
+        if "font" not in self.icons:
+            self.icons["font"] = base64.b64decode(FONT_WOFF2)
+        return self.icons["font"]
+
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
@@ -4434,6 +4456,8 @@ def make_handler(app, media_only=False):
                     return self.send_bytes(200, jdump(MANIFEST).encode("utf-8"), "application/manifest+json")
                 if path == "/icon.svg":
                     return self.send_bytes(200, ICON_SVG.encode("utf-8"), "image/svg+xml", {"Cache-Control": "max-age=86400"})
+                if path == "/font/vazirmatn.woff2":
+                    return self.send_bytes(200, web.font(), "font/woff2", {"Cache-Control": "max-age=31536000, immutable"})
                 m = re.fullmatch(r"/icon-(192|512)\.png", path)
                 if m:
                     return self.send_bytes(200, web.icon(int(m.group(1))), "image/png", {"Cache-Control": "max-age=86400"})
@@ -4789,6 +4813,9 @@ class App:
         agent = self.agent
         agent.wipe_page()
         agent.connect(SIM_TOKEN)
+        agent.ai.FREE_URL = "http://127.0.0.1:%d/_sim/ai/ptxt/openai" % self.port
+        agent.sim.ai_text, agent.sim.ai_delay = agent.sim.demo_plan, 0.8
+        agent.sim.free_gap.update(image=self.cfg.free_gap - 1, text=self.cfg.free_gap - 1)
         if not agent.db.get("demo.ready"):
             agent.settings.patch({"auto": {"comment_reply": True, "spam_hide": True, "dm_reply": True},
                                   "brand": {"about": "کافهٔ کوچک محلی با قهوهٔ تازه و کیک خانگی"}})
@@ -4865,7 +4892,7 @@ def main(argv=None):
 
 
 # ───────────────────────────── web panel (the page itself) ─────────────────────────────
-# One self-contained Persian, right-to-left, phone-first page. No outside files, fonts or scripts.
+# One self-contained Persian, right-to-left, phone-first page. No outside files or scripts; its font is embedded below.
 
 UI_HTML = r'''<!doctype html>
 <html lang="fa" dir="rtl">
@@ -4878,6 +4905,7 @@ UI_HTML = r'''<!doctype html>
 <link rel="icon" href="/icon.svg">
 <link rel="apple-touch-icon" href="/icon-192.png">
 <style nonce="__NONCE__">
+@font-face{font-family:Vazirmatn;src:url(/font/vazirmatn.woff2) format("woff2");font-weight:100 900;font-display:swap}
 :root{--bg:#f3f5fa;--card:#fff;--ink:#111827;--mut:#6b7280;--line:#e2e6ee;--soft:#eef1f6;--pri:#ec4899;--ok:#10b981;--warn:#d97706;--bad:#ef4444;--info:#3b82f6;--grad:linear-gradient(135deg,#f59e0b,#ec4899 55%,#8b5cf6)}
 @media (prefers-color-scheme:dark){:root{--bg:#0b0f1a;--card:#141a29;--ink:#f1f5f9;--mut:#94a3b8;--line:#263044;--soft:#1b2335}}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -4999,6 +5027,11 @@ details.box>.col{gap:8px}
 .logline .dot{margin-top:10px}
 .bar{height:8px;border-radius:99px;background:var(--soft);overflow:hidden}
 .bar i{display:block;height:100%;background:var(--grad);border-radius:99px}
+.stage{width:100%;height:auto;border-radius:16px;display:block;background:var(--soft)}
+.stage.tall{width:auto;max-width:100%;max-height:56vh;margin:0 auto}
+.spin{width:30px;height:30px;border:3px solid var(--line);border-top-color:var(--pri);border-radius:50%;display:inline-block;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.empty .bar{width:100%}
 .spark{width:100%;height:70px;direction:ltr}
 .spark polyline{fill:none;stroke:var(--pri);stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round}
 </style>
@@ -5038,7 +5071,10 @@ const ICONS = {
   help: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3 M12 17h.01', calendar: 'M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M16 2v4 M8 2v4 M3 10h18'
 };
 const KIND = {image: ['پست', 'image'], carousel: ['چندتایی', 'layers'], reel: ['ریل', 'film'], story: ['استوری', 'story']};
-const STATUS = {draft: ['پیش‌نویس', ''], scheduled: ['زمان‌بندی‌شده', 'info'], publishing: ['در حال انتشار', 'warn'], published: ['منتشرشده', 'ok'], failed: ['ناموفق', 'bad'], missed: ['جامانده', 'warn'], canceled: ['لغوشده', '']};
+const STATUS = {draft: ['پیش‌نویس', ''], scheduled: ['زمان‌بندی‌شده', 'info'], publishing: ['در حال انتشار', 'warn'], published: ['منتشرشده', 'ok'], failed: ['ناموفق', 'bad'], missed: ['جامانده', 'warn'], canceled: ['لغوشده', ''], due: ['وقت انتشار', 'pri']};
+/* without a connected page the owner posts by hand: a scheduled post is a reminder, a published one was posted by the owner */
+const statusOf = p => (p.status === 'scheduled' && !S.st.connected ? ['یادآوری', 'info'] : p.status === 'published' && p.by_hand ? ['منتشرشده (خودت)', 'ok'] : STATUS[p.status]);
+const live = () => S.st.connected || S.st.manual;
 
 /* ───── tiny DOM helpers: every piece of text goes in as a text node, never as HTML ───── */
 function svg(tag) { return D.createElementNS('http://www.w3.org/2000/svg', tag); }
@@ -5118,7 +5154,7 @@ async function loadStatus() {
   stShown = n; S.st = st;
   return true;
 }
-async function refresh() { if (await loadStatus() && S.st.connected) { paintTop(); paintNav(); } }
+async function refresh() { if (await loadStatus() && live()) { paintTop(); paintNav(); } }
 
 /* ───── bottom sheets ───── */
 function sheet(title, o) {
@@ -5163,14 +5199,16 @@ async function saveSettings(patch, msg) { await POST('/api/settings', patch); aw
 const TABS = [['home', 'خانه', 'home'], ['content', 'محتوا', 'grid'], ['inbox', 'گفتگوها', 'chat'], ['stats', 'آمار', 'bars'], ['agent', 'ایجنت', 'bot']];
 function paintTop() {
   const st = S.st, a = st.account;
-  const state = a.invalid ? ['bad', 'اتصال پیج قطع است'] : !st.autopilot ? ['off', 'ایجنت متوقف است'] : st.busy ? ['warn', 'اینستاگرام موقتاً محدود کرده؛ کمی صبر'] : ['', 'ایجنت روشن است'];
+  const state = !st.connected ? ['', 'بدون اتصال؛ انتشار با خودت'] : a.invalid ? ['bad', 'اتصال پیج قطع است'] : !st.autopilot ? ['off', 'ایجنت متوقف است'] : st.busy ? ['warn', 'اینستاگرام موقتاً محدود کرده؛ کمی صبر'] : ['', 'ایجنت روشن است'];
   fill($('#top'), h('img', {src: '/icon.svg', alt: ''}),
-    h('div', {class: 'grow'}, h('h1', null, '@' + a.username), h('div', {class: 'sub'}, h('i', {class: 'dot ' + state[0]}), (st.demo ? 'حالت نمایشی — ' : '') + state[1])),
+    h('div', {class: 'grow'}, h('h1', null, st.connected ? '@' + a.username : st.handle ? '@' + st.handle : 'ایجنت پیج'), h('div', {class: 'sub'}, h('i', {class: 'dot ' + state[0]}), (st.demo ? 'حالت نمایشی — ' : '') + state[1])),
     h('button', {class: 'iconbtn', 'aria-label': 'اعلان‌ها', onclick: notesSheet}, icon('bell'), st.counts.unseen ? h('span', {class: 'badge'}, fa(st.counts.unseen)) : null));
 }
 function paintNav() {
-  const c = S.st.counts, n = c.open_comments + c.open_dms;
-  fill($('#nav'), TABS.map(t => h('button', {class: S.tab === t[0] ? 'on' : '', 'data-tab': t[0], onclick: () => go(t[0])}, icon(t[2]), t[1], t[0] === 'inbox' && n ? h('span', {class: 'badge'}, fa(n)) : null)));
+  const c = S.st.counts, n = {inbox: c.open_comments + c.open_dms, content: c.due};
+  const tabs = TABS.filter(t => S.st.connected || !['inbox', 'stats'].includes(t[0]));      /* no page: nothing to read from Instagram */
+  if (!tabs.some(t => t[0] === S.tab)) S.tab = 'home';
+  fill($('#nav'), tabs.map(t => h('button', {class: S.tab === t[0] ? 'on' : '', 'data-tab': t[0], onclick: () => go(t[0])}, icon(t[2]), t[1], n[t[0]] ? h('span', {class: 'badge'}, fa(n[t[0]])) : null)));
   $('#fab').classList.toggle('hide', S.tab !== 'content' || !!S.st.account.invalid);
   document.body.classList.toggle('hasfab', !$('#fab').classList.contains('hide'));
 }
@@ -5181,8 +5219,8 @@ async function render(fresh) {
   S.seq++;
   if (!S.authed) { chrome(false); return fill(view, loginView()); }
   if (!st) { chrome(false); return fill(view, h('div', {class: 'empty'}, 'در حال اتصال به ایجنت…')); }
-  if (!st.connected) { chrome(false); return fill(view, connectView()); }
-  chrome(true); paintTop(); paintNav();
+  if (!live()) { chrome(false); return fill(view, connectView()); }
+  chrome(true); paintNav(); paintTop();
   const my = S.seq;
   if (fresh) fill(view, h('div', {class: 'empty'}, 'در حال بارگذاری…'));
   try { const kids = await VIEWS[S.tab](); if (my === S.seq) fill(view, kids); }
@@ -5192,8 +5230,8 @@ async function poll() {
   if (D.hidden || !S.authed) return;
   const prev = S.st;
   try { if (!await loadStatus()) return; } catch (e) { return; }
-  if (!prev || prev.connected !== S.st.connected) return render(true);
-  if (!S.st.connected) return;
+  if (!prev || prev.connected !== S.st.connected || prev.manual !== S.st.manual) return render(true);
+  if (!live()) return;
   paintTop(); paintNav();
   const sig = s => JSON.stringify([s.counts, s.autopilot, s.auto, s.account.invalid, s.account.followers, s.next_post && s.next_post.id]);
   const typing = /INPUT|TEXTAREA|SELECT/.test((D.activeElement || {}).tagName || '');
@@ -5226,11 +5264,16 @@ function tokenBox(done) {
 function connectView() {
   const a = (S.st.account || {}), proxy = h('input', {class: 'in ltr', placeholder: 'http://127.0.0.1:10809', 'aria-label': 'پروکسی'});
   GET('/api/settings').then(s => { proxy.value = s.network.proxy; }).catch(() => {});
-  return [h('div', {class: 'hero'}, h('img', {src: '/icon.svg', alt: ''}), h('h2', null, 'پیج را یک بار وصل کن'),
-      h('p', {class: 'muted'}, 'ایجنت فقط از راه رسمی اینستاگرام (توکن) وصل می‌شود و هیچ‌وقت رمز پیج را نمی‌خواهد.')),
-    a.last_username ? h('div', {class: 'card sm'}, 'آخرین پیج وصل‌شده: ', h('b', {class: 'ltr'}, '@' + a.last_username)) : null,
-    h('div', {class: 'card col'}, tokenBox(() => { S.tab = 'home'; render(true); })),
-    h('details', {class: 'box', open: true}, h('summary', null, icon('help'), 'توکن را از کجا بیاورم؟ (حدود ۵ دقیقه، فقط یک بار)'), guide(),
+  const byHand = h('button', {class: 'btn pri block', 'data-manual': '1', onclick: e => run(e.currentTarget, async () => { await POST('/api/settings', {manual: true}); await loadStatus(); S.tab = 'home'; render(true); })}, icon('spark'), 'بدون اتصال شروع کن');
+  return [h('div', {class: 'hero'}, h('img', {src: '/icon.svg', alt: ''}), h('h2', null, 'ایجنت اینستاگرام'),
+      h('p', {class: 'muted'}, 'دو راه برای شروع هست؛ بعداً هم می‌توانی عوضش کنی.')),
+    h('div', {class: 'card col'}, h('b', null, '۱. بدون اتصال: خودم پست می‌کنم'),
+      h('p', {class: 'muted sm'}, 'ایده‌ات را می‌نویسی؛ ایجنت عکس یا ویدیوی کوتاه، کپشن و هشتگ می‌سازد و سر وقت یادآوری می‌کند. انتشار را خودت در اپ اینستاگرام انجام می‌دهی. نه توکن می‌خواهد، نه سایت متا.'), byHand),
+    h('div', {class: 'card col'}, h('b', null, '۲. اتصال با توکن متا: انتشار و پاسخ خودکار'),
+      h('p', {class: 'muted sm'}, 'ایجنت خودش منتشر می‌کند، کامنت و دایرکت را می‌خواند و آمار می‌دهد. فقط از راه رسمی اینستاگرام (توکن) وصل می‌شود و هیچ‌وقت رمز پیج را نمی‌خواهد. سایت توسعه‌دهندگان متا در بعضی کشورها (از جمله ایران) باز نمی‌شود.'),
+      a.last_username ? h('div', {class: 'sm'}, 'آخرین پیج وصل‌شده: ', h('b', {class: 'ltr'}, '@' + a.last_username)) : null,
+      tokenBox(() => { S.tab = 'home'; render(true); })),
+    h('details', {class: 'box'}, h('summary', null, icon('help'), 'توکن را از کجا بیاورم؟ (حدود ۵ دقیقه، فقط یک بار)'), guide(),
       h('p', {class: 'muted sm'}, 'توکن ۶۰ روز اعتبار دارد و ایجنت خودش تمدیدش می‌کند. توکن فقط روی همین دستگاه نگه داشته می‌شود.')),
     h('details', {class: 'box'}, h('summary', null, icon('settings'), 'اینستاگرام بدون فیلترشکن باز نمی‌شود؟'),
       h('div', {class: 'col'}, h('p', {class: 'muted sm'}, 'نشانی پروکسی HTTP فیلترشکن را بنویس (در v2rayNG معمولاً http://127.0.0.1:10809).'),
@@ -5249,7 +5292,28 @@ function logLine(l) {
   return h('div', {class: 'logline'}, h('i', {class: 'dot ' + ({alert: 'bad', warn: 'warn', ok: ''}[l.level] != null ? {alert: 'bad', warn: 'warn', ok: ''}[l.level] : 'off')}),
     h('div', {class: 'grow'}, h('div', {class: 'pre'}, l.text), h('small', {class: 'muted'}, ago(l.ts))));
 }
+async function homeByHand() {
+  const c = S.st.counts, idea = h('textarea', {class: 'in', rows: 2, placeholder: 'مثلاً: تخفیف ۲۰٪ لاتهٔ پاییزی تا آخر هفته', 'aria-label': 'ایده', value: S.typed.idea || ''});
+  idea.addEventListener('input', () => { S.typed.idea = idea.value; });
+  const make = kind => studio({idea: idea.value, kind}, r => { delete S.typed.idea; composer(null, r); });
+  const out = [h('div', {class: 'card col'}, h('h2', null, 'چه چیزی بسازم؟'),
+    h('p', {class: 'muted sm'}, 'ایده‌ات را در یک جمله بنویس؛ ایجنت تصویر یا ویدیوی کوتاه، کپشن و هشتگ را آماده می‌کند.'), idea,
+    h('div', {class: 'row'}, h('button', {class: 'btn pri grow', 'data-make': 'image', onclick: () => make('image')}, icon('image'), 'عکس بساز'),
+      h('button', {class: 'btn pri grow', 'data-make': 'reel', onclick: () => make('reel')}, icon('film'), 'ویدیو بساز')))];
+  const [queue, log] = await Promise.all([GET('/api/posts?group=queue'), GET('/api/log?limit=4')]);
+  const due = queue.items.filter(p => p.status === 'due'), soon = queue.items.filter(p => p.status === 'scheduled');
+  if (due.length) out.push(h('h3', null, 'وقت انتشار این‌ها رسیده'), due.map(postCard));
+  if (soon.length) out.push(h('h3', null, 'یادآوری‌های پیش رو'), soon.slice(0, 3).map(postCard));
+  out.push(h('div', {class: 'card col'}, h('div', {class: 'chips'}, h('span', {class: 'pill info'}, icon('clock'), fa(c.scheduled) + ' یادآوری'), h('span', {class: 'pill'}, icon('edit'), fa(c.drafts) + ' پیش‌نویس'),
+      h('span', {class: 'pill ok'}, icon('check'), fa(c.published_today) + ' انتشار امروز')),
+    h('button', {class: 'btn', onclick: () => composer()}, icon('upload'), 'پست با عکس یا ویدیوی خودم')));
+  out.push(h('div', {class: 'card col'}, h('b', null, 'پیج وصل نیست'), h('div', {class: 'muted sm'}, 'ایجنت محتوا را آماده و یادآوری می‌کند؛ انتشار، کامنت‌ها و آمار در اپ اینستاگرام با خودت است.'),
+    h('button', {class: 'btn sm', onclick: tokenSheet}, icon('link'), 'اتصال با توکن متا')));
+  if (log.items.length) out.push(h('h3', null, 'آخرین رویدادها'), h('div', {class: 'card'}, log.items.map(logLine)));
+  return out;
+}
 VIEWS.home = async () => {
+  if (!S.st.connected) return homeByHand();
   const st = S.st, a = st.account, c = st.counts, au = st.auto, out = [];
   if (a.invalid) out.push(h('div', {class: 'card bad col'}, h('b', null, 'اتصال پیج قطع شده است'), h('div', {class: 'sm'}, a.invalid), h('button', {class: 'btn pri', onclick: tokenSheet}, 'دادن توکن تازه')));
   out.push(h('div', {class: 'card'}, h('div', {class: 'row'}, a.picture ? h('img', {class: 'avatar', src: a.picture, alt: ''}) : h('span', {class: 'avatar'}),
@@ -5262,6 +5326,7 @@ VIEWS.home = async () => {
   if (c.open_comments) todo.push(navRow('chat', fa(c.open_comments) + ' کامنت منتظر پاسخ', () => go('inbox', 'comments')));
   if (c.open_dms) todo.push(navRow('send', fa(c.open_dms) + ' دایرکت منتظر پاسخ', () => go('inbox', 'dm')));
   if (c.failed) todo.push(navRow('alert', fa(c.failed) + ' پست منتشرنشده', () => go('content', 'queue')));
+  if (c.due) todo.push(navRow('send', fa(c.due) + ' پست منتظر انتشار به دست خودت', () => go('content', 'queue')));
   out.push(h('h3', null, 'کارهای منتظر تو'), todo.length ? todo : h('div', {class: 'card muted'}, icon('check'), ' همه‌چیز رسیدگی شده است.'));
   out.push(h('h3', null, 'انتشار'), st.next_post ? postCard(st.next_post) : null,
     h('div', {class: 'card col'}, h('div', {class: 'chips'}, h('span', {class: 'pill info'}, icon('clock'), fa(c.scheduled) + ' در صف'), h('span', {class: 'pill'}, icon('edit'), fa(c.drafts) + ' پیش‌نویس'),
@@ -5288,9 +5353,9 @@ async function notesSheet() {
 
 /* ───── content: queue, drafts, page ───── */
 function postCard(p) {
-  const m = p.media[0], st = STATUS[p.status];
+  const m = p.media[0], st = statusOf(p);
   const sub = p.status === 'scheduled' ? when(p.scheduled_at) : p.status === 'publishing' ? (p.progress || 'در حال انتشار…') : p.status === 'published' ? ago(p.published_at)
-    : (p.status === 'failed' || p.status === 'missed') ? p.error : 'آخرین تغییر: ' + ago(p.updated_at);
+    : p.status === 'due' ? 'آماده است؛ بازش کن و در اینستاگرام بگذار' : (p.status === 'failed' || p.status === 'missed') ? p.error : 'آخرین تغییر: ' + ago(p.updated_at);
   return h('button', {class: 'card row', 'data-post': p.id, onclick: () => postSheet(p.id)}, thumb(m && !m.missing ? m.preview : '', m ? m.type : 'image'),
     h('div', {class: 'grow'}, h('div', {class: 'chips'}, h('span', {class: 'pill ' + st[1]}, st[0]), h('span', {class: 'pill'}, icon(KIND[p.kind][1]), KIND[p.kind][0])),
       h('div', {class: 'clamp'}, p.caption || '— بدون کپشن —'), h('div', {class: 'muted sm clamp'}, sub)));
@@ -5302,17 +5367,20 @@ function tile(m) {
   return add(t, k ? h('span', {class: 'kind'}, icon(k)) : null, h('span', {class: 'meta'}, icon('heart'), fa(m.like_count), icon('chat'), fa(m.comments_count)));
 }
 VIEWS.content = async () => {
-  const c = S.st.counts, sub = S.sub.content;
-  const seg = segment([['queue', 'صف انتشار', c.scheduled + c.publishing + c.failed], ['drafts', 'پیش‌نویس‌ها'], ['page', 'صفحهٔ من']], sub, v => { S.sub.content = v; render(true); });
+  const c = S.st.counts, hand = !S.st.connected;
+  if (hand && S.sub.content === 'page') S.sub.content = 'queue';
+  const sub = S.sub.content;
+  const seg = segment([['queue', hand ? 'برنامه' : 'صف انتشار', c.due + c.scheduled + c.publishing + c.failed], ['drafts', 'پیش‌نویس‌ها']].concat(hand ? [] : [['page', 'صفحهٔ من']]), sub, v => { S.sub.content = v; render(true); });
   if (sub === 'page') {
     const d = await GET('/api/media');
     return [seg, d.items.length ? h('div', {class: 'grid'}, d.items.map(tile)) : empty('grid', 'هنوز پستی در پیج نیست.')];
   }
   const [d, done] = await Promise.all([GET('/api/posts?group=' + sub), sub === 'queue' ? GET('/api/posts?group=published') : {items: []}]);
-  const fresh = h('button', {class: 'btn pri', onclick: () => composer()}, icon('plus'), 'پست جدید');
+  const fresh = h('div', {class: 'row'}, h('button', {class: 'btn pri', 'data-studio': '1', onclick: () => studio({}, r => composer(null, r))}, icon('spark'), 'بساز'),
+    h('button', {class: 'btn', onclick: () => composer()}, icon('plus'), 'پست جدید'));
   return [seg, sub === 'drafts' ? h('button', {class: 'btn', onclick: planSheet}, icon('spark'), 'چیدن برنامهٔ محتوایی') : null,
-    d.items.length ? d.items.map(postCard) : empty('calendar', sub === 'queue' ? 'چیزی در صف انتشار نیست.' : 'پیش‌نویسی نداری.', fresh),
-    done.items.length ? [h('h3', null, 'منتشرشده از همین پنل'), done.items.slice(0, 6).map(postCard)] : null];
+    d.items.length ? d.items.map(postCard) : empty('calendar', sub === 'queue' ? (hand ? 'چیزی در برنامه نیست.' : 'چیزی در صف انتشار نیست.') : 'پیش‌نویسی نداری.', fresh),
+    done.items.length ? [h('h3', null, hand ? 'منتشرشده' : 'منتشرشده از همین پنل'), done.items.slice(0, 6).map(postCard)] : null];
 };
 async function mediaSheet(id) {
   const s = sheet('پست پیج');
@@ -5332,6 +5400,52 @@ async function threadsSheet(mediaId) {
     fill(s.body, d.items.length ? d.items.map(t => threadCard(t, true)) : empty('chat', 'کامنتی برای این پست ثبت نشده است.'));
   } catch (e) { fill(s.body, h('div', {class: 'card bad'}, e.message)); }
 }
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return; } catch (e) { /* not allowed here: the old way */ }
+  const ta = h('textarea', {class: 'in', value: text});
+  ta.style.position = 'fixed'; ta.style.opacity = '0';
+  D.body.appendChild(ta); ta.select();
+  const ok = D.execCommand('copy');
+  ta.remove();
+  if (!ok) throw new Err('کپی نشد؛ متن را خودت انتخاب و کپی کن.');
+}
+function saveFile(file) {
+  const url = URL.createObjectURL(file), a = h('a', {href: url, download: file.name, class: 'hide'});
+  D.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+/* Posting by hand: the file goes to the Instagram app (or to the gallery), the caption to the clipboard. */
+function handKit(p, again) {
+  const files = p.media.filter(m => m.file && !m.missing), links = p.media.filter(m => m.url);
+  let ready = null;                                    /* fetched ahead, so that "share" still happens right on the tap */
+  const load = () => ready || (ready = Promise.all(files.map(async (m, i) => {
+    const res = await fetch(m.preview, {credentials: 'same-origin'});
+    if (!res.ok) throw new Err('فایل این پست خوانده نشد.');
+    const blob = await res.blob(), ext = {'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov', 'image/jpeg': 'jpg'}[blob.type] || 'bin';
+    return new File([blob], 'insta-' + p.id + (files.length > 1 ? '-' + (i + 1) : '') + '.' + ext, {type: blob.type});
+  })));
+  if (files.length) load().catch(() => { ready = null; });
+  const canShare = !!(navigator.share && navigator.canShare) && files.length > 0;
+  const save = async () => { for (const f of await load()) saveFile(f); toast('در پوشهٔ Download گوشی ذخیره شد'); };
+  const share = async () => {
+    const list = await load();
+    if (!navigator.canShare({files: list})) return save();
+    let copied = false;
+    if (p.caption) { try { await copyText(p.caption); copied = true; } catch (e) { /* the caption can still be copied by its own button */ } }
+    try { await navigator.share({files: list}); }
+    catch (e) { if (e && e.name === 'AbortError') return; throw new Err('این مرورگر نتوانست فایل را به اپ دیگری بدهد؛ «ذخیره» را بزن و از گالری انتخابش کن.'); }
+    if (copied) toast('کپشن کپی شده است؛ در اینستاگرام بچسبانش');
+  };
+  const btn = (label, ic, fn, cls, mark) => h('button', {class: 'btn ' + (cls || ''), 'data-kit': mark, onclick: e => run(e.currentTarget, fn)}, icon(ic), label);
+  return h('div', {class: 'card col', 'data-kit': 'box'}, h('b', null, 'انتشار با خودت'),
+    h('div', {class: 'muted sm'}, !files.length ? (links.length ? 'فایل این پست یک لینک است؛ بازش کن و ذخیره کن.' : 'این یادآوری فایل ندارد؛ عکس یا ویدیو را در خود اینستاگرام انتخاب کن.')
+      : canShare ? 'با «ارسال به اینستاگرام» فایل مستقیم به اپ می‌رود و کپشن کپی می‌شود؛ آنجا بچسبانش.' : 'فایل را ذخیره کن، کپشن را کپی کن و در اپ اینستاگرام بگذار.'),
+    canShare ? btn('ارسال به اینستاگرام', 'send', share, 'pri block', 'share') : null,
+    h('div', {class: 'row'}, files.length ? btn('ذخیره در گوشی', 'upload', save, 'grow', 'save') : null,
+      links.map(m => h('a', {class: 'btn grow', href: m.url, target: '_blank', rel: 'noopener'}, icon('external'), 'باز کردن فایل')),
+      p.caption ? btn('کپی کپشن', 'layers', async () => { await copyText(p.caption); toast('کپشن کپی شد ✓'); }, 'grow', 'copy') : null),
+    btn('منتشر کردم', 'check', async () => { await POST('/api/posts/' + p.id + '/done'); toast('ثبت شد ✓'); await again(); }, 'block', 'done'));
+}
 function postSheet(id) {
   let timer = 0, last = '';
   const s = sheet('پست', {onclose: () => clearTimeout(timer)});
@@ -5340,14 +5454,17 @@ function postSheet(id) {
     try { p = await GET('/api/posts/' + id); } catch (e) { s.close(); return; }
     if (last && last !== p.status) render(false);
     last = p.status;
-    const st = STATUS[p.status], again = async () => { await refresh(); render(false); await load(); };
-    fill(s.body, p.media.length ? h('div', {class: 'strip'}, p.media.map(m => thumb(m.missing ? '' : m.preview, m.type, 'mitem'))) : null,
+    const st = statusOf(p), again = async () => { await refresh(); render(false); await load(); };
+    const one = p.media.length === 1 && p.media[0].file && !p.media[0].missing ? p.media[0] : null;
+    const byHand = !['published', 'publishing'].includes(p.status) && (!S.st.connected || p.status === 'due');
+    fill(s.body, one ? (one.type === 'video' ? h('video', {class: 'big', src: one.preview, controls: true, playsinline: true, preload: 'metadata'}) : h('img', {class: 'big', src: one.preview, alt: ''}))
+        : p.media.length ? h('div', {class: 'strip'}, p.media.map(m => thumb(m.missing ? '' : m.preview, m.type, 'mitem'))) : null,
       h('div', {class: 'chips'}, h('span', {class: 'pill ' + st[1]}, st[0]), h('span', {class: 'pill'}, icon(KIND[p.kind][1]), KIND[p.kind][0])),
       p.status === 'scheduled' ? h('div', {class: 'row'}, icon('clock'), when(p.scheduled_at)) : null,
       p.status === 'publishing' ? h('div', {class: 'card'}, p.progress || 'در حال انتشار…', p.error ? h('div', {class: 'muted sm'}, 'آخرین مشکل: ' + p.error) : null) : null,
       (p.status === 'failed' || p.status === 'missed') && p.error ? h('div', {class: 'card bad'}, p.error) : null,
-      p.status === 'published' ? h('div', {class: 'card ok'}, 'منتشر شد ✓ — ' + ago(p.published_at)) : null,
-      h('div', {class: 'pre'}, p.caption || '— بدون کپشن —'));
+      p.status === 'published' ? h('div', {class: 'card ok'}, (p.by_hand ? 'خودت منتشرش کردی ✓ — ' : 'منتشر شد ✓ — ') + ago(p.published_at)) : null,
+      byHand ? handKit(p, again) : null, h('div', {class: 'pre', dir: 'auto'}, p.caption || '— بدون کپشن —'));
     const act = (label, fn, cls, ic) => h('button', {class: 'btn ' + (cls || ''), onclick: e => run(e.currentTarget, fn)}, ic ? icon(ic) : null, label);
     const kids = [];
     if (p.status === 'publishing') {
@@ -5359,8 +5476,8 @@ function postSheet(id) {
     } else {
       kids.push(act('حذف', async () => { if (await ask('این پست حذف شود؟', 'حذف', true)) { await DEL('/api/posts/' + id); s.close(); await refresh(); render(false); } }, 'danger', 'trash'));
       kids.push(act('ویرایش', async () => { s.close(); composer(p); }, '', 'edit'));
-      if (p.status === 'scheduled') kids.push(act('لغو زمان', async () => { await POST('/api/posts/' + id + '/cancel'); toast('به پیش‌نویس‌ها برگشت'); await again(); }));
-      kids.push(act(p.status === 'failed' ? 'تلاش دوباره' : 'انتشار الان', async () => { await POST('/api/posts/' + id + '/publish'); await again(); }, 'pri', 'send'));
+      if (p.status === 'scheduled' || p.status === 'due') kids.push(act(p.status === 'due' ? 'به پیش‌نویس' : S.st.connected ? 'لغو زمان' : 'لغو یادآوری', async () => { await POST('/api/posts/' + id + '/cancel'); toast('به پیش‌نویس‌ها برگشت'); await again(); }));
+      if (S.st.connected) kids.push(act(p.status === 'failed' ? 'تلاش دوباره' : 'انتشار الان', async () => { await POST('/api/posts/' + id + '/publish'); await again(); }, 'pri', 'send'));
     }
     if (kids.length) s.setFoot(kids); else s.foot.classList.add('hide');
   };
@@ -5401,10 +5518,11 @@ async function prepImage(file, kind) {
   if (!blob) throw new Error('تبدیل عکس انجام نشد.');
   return {blob, cropped};
 }
-function composer(post) {
+function composer(post, seed) {
+  const hand = !S.st.connected;
   const p = post ? {id: post.id, kind: post.kind, caption: post.caption, opts: Object.assign({}, post.opts), mode: post.status === 'scheduled' ? 'later' : 'now', at: post.status === 'scheduled' ? post.scheduled_at : 0,
       media: post.media.filter(m => !m.missing).map(m => m.file ? {file: m.file, type: m.type, preview: m.preview} : {url: m.url, type: m.type, preview: m.url})}
-    : {kind: 'image', caption: '', media: [], opts: {share_to_feed: true}, mode: 'now', at: 0};
+    : Object.assign({kind: 'image', caption: '', media: [], opts: {share_to_feed: true}, mode: 'now', at: 0}, seed || {});
   const s = sheet(post ? 'ویرایش پست' : 'پست جدید');
   const file = h('input', {type: 'file', class: 'hide'}), cap = h('textarea', {class: 'in', rows: 5, placeholder: 'کپشن…', 'aria-label': 'کپشن', value: p.caption});
   const counter = h('div', {class: 'muted sm row'}), strip = h('div', {class: 'strip'}), kinds = h('div', {class: 'kinds'}), hint = h('div', {class: 'muted sm'}), timing = h('div', {class: 'card col'});
@@ -5426,6 +5544,13 @@ function composer(post) {
     add(u.body, h('p', {class: 'muted sm'}, 'لینک باید مستقیم و عمومی باشد (اینستاگرام خودش فایل را از این نشانی برمی‌دارد).'), field('لینک فایل', inp), field('نوع فایل', typ));
     u.setFoot(h('button', {class: 'btn pri', onclick: () => { const v = inp.value.trim(); if (!/^https:\/\/\S+$/.test(v)) return toast('لینک باید با https:// شروع شود', 'bad'); p.media.push({url: v, type: typ.value, preview: v}); u.close(); paint(); }}, 'افزودن'));
   };
+  /* the studio makes the picture or the reel from an idea; what it made lands here */
+  const fromStudio = () => studio({kind: p.kind === 'reel' ? 'reel' : 'image', idea: cap.value.split('\n')[0].replace(/#\S+/g, '').trim()}, r => {
+    if (p.kind === 'carousel' && r.kind === 'image') p.media.push(r.media[0]);
+    else { p.kind = r.kind; p.media = r.media.slice(); }
+    if (!cap.value.trim()) cap.value = r.caption;
+    count(); paint();
+  });
   const paintOpts = () => {
     const txt = (key, label, ph, rows) => { const el = h(rows ? 'textarea' : 'input', {class: 'in', placeholder: ph, rows, value: p.opts[key] || ''}); el.addEventListener('input', () => { p.opts[key] = el.value; }); return field(label, el); };
     const sw = (key, label, def) => h('div', {class: 'row'}, h('span', {class: 'grow'}, label), toggle(p.opts[key] == null ? def : p.opts[key], async v => { p.opts[key] = v; }, label));
@@ -5435,7 +5560,7 @@ function composer(post) {
       p.kind !== 'story' ? sw('comments_off', 'بستن کامنت‌های این پست', false) : h('div', {class: 'muted sm'}, 'استوری گزینهٔ دیگری ندارد.'));
   };
   const paintTiming = () => {
-    fill(timing, h('b', null, 'چه زمانی منتشر شود؟'), segment([['now', 'همین حالا'], ['later', 'زمان‌بندی']], p.mode, v => {
+    fill(timing, h('b', null, hand ? 'کی می‌خواهی پستش کنی؟' : 'چه زمانی منتشر شود؟'), segment([['now', 'همین حالا'], ['later', hand ? 'یادآوری کن' : 'زمان‌بندی']], p.mode, v => {
       p.mode = v; if (v === 'later' && !p.at) p.at = Math.ceil((Date.now() / 1000 + 3600) / 900) * 900; paintTiming(); paintFoot(); }));
     if (p.mode !== 'later') return;
     const d = new Date(p.at * 1000), t0 = new Date(), dsel = h('select', {class: 'in', 'aria-label': 'روز'}), time = h('input', {class: 'in ltr', type: 'time', 'aria-label': 'ساعت', value: two(d.getHours()) + ':' + two(d.getMinutes())});
@@ -5450,7 +5575,7 @@ function composer(post) {
     const sync = () => { const t = (time.value || '12:00').split(':'), x = new Date(t0.getFullYear(), t0.getMonth(), t0.getDate() + Number(dsel.value), Number(t[0]), Number(t[1])); p.at = x.getTime() / 1000; fill(label, when(p.at)); };
     dsel.addEventListener('change', sync); time.addEventListener('change', sync);
     GET('/api/slots').then(r => fill(chips, r.items.map(ts => h('button', {class: 'chip', onclick: () => { p.at = ts; paintTiming(); }}, when(ts))))).catch(() => {});
-    add(timing, h('div', {class: 'row when'}, h('div', {class: 'grow'}, dsel), h('div', {class: 'fix'}, time)), label, h('div', {class: 'muted sm'}, 'پیشنهاد ایجنت (ساعت‌هایی که پست‌هایت بهتر دیده شده):'), chips);
+    add(timing, h('div', {class: 'row when'}, h('div', {class: 'grow'}, dsel), h('div', {class: 'fix'}, time)), label, h('div', {class: 'muted sm'}, hand ? 'ساعت‌های پیشنهادی:' : 'پیشنهاد ایجنت (ساعت‌هایی که پست‌هایت بهتر دیده شده):'), chips);
   };
   const paint = () => {
     fill(kinds, Object.keys(KIND).map(k => h('button', {class: p.kind === k ? 'on' : '', 'data-kind': k, onclick: () => { p.kind = k; p.media = p.media.slice(0, max()); paint(); }}, icon(KIND[k][1]), KIND[k][0])));
@@ -5460,7 +5585,8 @@ function composer(post) {
     fill(strip, p.media.map((m, i) => h('div', {class: 'mitem'}, thumb(m.preview, m.type, 'fit'), h('span', {class: 'tag'}, m.type === 'video' ? 'ویدیو' : 'عکس'),
         h('button', {class: 'rm', 'aria-label': 'برداشتن', onclick: () => { p.media.splice(i, 1); paint(); }}, icon('x')))),
       more ? h('button', {class: 'mitem add', 'data-add': 'file', onclick: () => file.click()}, icon('upload'), 'از گالری') : null,
-      more ? h('button', {class: 'mitem add', 'data-add': 'url', onclick: addUrl}, icon('link'), 'با لینک') : null);
+      more && p.kind !== 'story' ? h('button', {class: 'mitem add', 'data-add': 'ai', onclick: fromStudio}, icon('spark'), 'بساز') : null,
+      more && !hand ? h('button', {class: 'mitem add', 'data-add': 'url', onclick: addUrl}, icon('link'), 'با لینک') : null);
     fill(hint, {image: 'یک عکس. خودکار به JPEG تبدیل و اگر لازم باشد به نسبت مجاز (۴:۵ تا ۱٫۹۱:۱) بریده می‌شود.', carousel: '۲ تا ۲۰ عکس یا ویدیو؛ مخاطب ورق می‌زند.',
       reel: 'یک ویدیوی MP4 (عمودی ۹:۱۶ بهتر دیده می‌شود)؛ از ۳ ثانیه تا ۱۵ دقیقه و حداکثر ۳۰۰ مگابایت.', story: 'یک عکس یا ویدیو (۹:۱۶)؛ ویدیو حداکثر ۶۰ ثانیه و ۱۰۰ مگابایت. بدون کپشن فرستاده می‌شود و بعد از ۲۴ ساعت پاک می‌شود.'}[p.kind]);
     capBox.classList.toggle('hide', p.kind === 'story');
@@ -5505,19 +5631,387 @@ function composer(post) {
     add(a.body, field(label, h('div', {class: 'row'}, topic, go_)), list);
   };
   const paintFoot = () => s.setFoot(h('button', {class: 'btn', onclick: e => save(e.currentTarget, 'draft')}, 'پیش‌نویس'),
-    h('button', {class: 'btn pri', 'data-go': '1', onclick: e => save(e.currentTarget, p.mode === 'later' ? 'schedule' : 'now')}, icon(p.mode === 'later' ? 'clock' : 'send'), p.mode === 'later' ? 'زمان‌بندی' : 'انتشار'));
+    h('button', {class: 'btn pri', 'data-go': '1', onclick: e => save(e.currentTarget, p.mode === 'later' ? 'schedule' : 'now')}, icon(p.mode === 'later' ? 'clock' : 'send'),
+      p.mode === 'later' ? (hand ? 'یادآوری' : 'زمان‌بندی') : (hand ? 'آماده کن' : 'انتشار')));
   const save = (btn, action) => run(btn, async () => {
     const body = {kind: p.kind, caption: p.kind === 'story' ? '' : cap.value, media: p.media.map(m => (m.file ? {file: m.file} : {url: m.url, type: m.type})), opts: p.opts, action, scheduled_at: p.at};
     const r = await POST(p.id ? '/api/posts/' + p.id : '/api/posts', body);
     s.close();
-    toast(action === 'draft' ? 'در پیش‌نویس‌ها ذخیره شد' : action === 'schedule' ? 'زمان‌بندی شد ✓' : 'انتشار شروع شد…');
+    toast(action === 'draft' ? 'در پیش‌نویس‌ها ذخیره شد' : action === 'schedule' ? (hand ? 'یادآوری تنظیم شد ✓' : 'زمان‌بندی شد ✓') : hand ? 'آماده است ✓' : 'انتشار شروع شد…');
     await refresh(); S.tab = 'content'; S.sub.content = action === 'draft' ? 'drafts' : 'queue'; render(true);
     if (action === 'now') postSheet(r.id);
   });
   add(capBox, field('کپشن', cap), counter, tagNote, h('div', {class: 'row'}, h('button', {class: 'btn sm grow', onclick: () => helper('کپشن پیشنهادی', 'این پست دربارهٔ چیست؟', '/api/ai/captions', true)}, icon('spark'), 'کپشن پیشنهادی'),
     h('button', {class: 'btn sm grow', onclick: () => helper('هشتگ پیشنهادی', 'موضوع پست', '/api/ai/hashtags', false)}, icon('hash'), 'هشتگ پیشنهادی')));
-  add(s.body, kinds, strip, hint, file, capBox, h('details', {class: 'box'}, h('summary', null, icon('settings'), 'گزینه‌های بیشتر'), optBox), timing);
+  add(s.body, kinds, strip, hint, file, capBox, hand ? null : h('details', {class: 'box'}, h('summary', null, icon('settings'), 'گزینه‌های بیشتر'), optBox), timing);
   count(); paint();
+}
+
+/* ───── studio: a picture or a reel out of one idea ─────
+   The agent writes the words and fetches the pictures; everything is then drawn here, on the phone, so a result
+   exists even when no picture service answered. */
+const FACE = '"Vazirmatn", "Vazir", Tahoma, system-ui, sans-serif';
+const LOOKS = [['#f97316', '#db2777'], ['#0ea5e9', '#4338ca'], ['#10b981', '#065f46'], ['#111827', '#4b5563'], ['#8b5cf6', '#4c1d95'], ['#fde68a', '#fca5a5'], ['#f59e0b', '#b45309'], ['#e0f2fe', '#a5b4fc']];
+const SCENE_SEC = 3.2, FADE_SEC = 0.5, REEL_FPS = 30;
+const PIC_FROM = {key: 'Pollinations', free: 'Pollinations رایگان', horde: 'AI Horde', custom: 'سرویس خودت'};
+const NO_PLAN = {off: 'دستیار در تنظیمات خاموش است', limit: 'سرویس رایگان متن نوبت نداد', down: 'به سرویس متن دسترسی نبود', format: 'پاسخ سرویس متن قابل‌استفاده نبود'};
+const blank = (w, ht) => Object.assign(D.createElement('canvas'), {width: w, height: ht});
+const pause = ms => new Promise(r => setTimeout(r, ms || 0));
+function loadPic(src) {
+  return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Err('تصویر باز نشد.')); i.src = src; });
+}
+async function faceReady() {
+  if (!D.fonts || !D.fonts.load) return;
+  try { await Promise.all([D.fonts.load('800 80px Vazirmatn'), D.fonts.load('500 40px Vazirmatn')]); } catch (e) { /* the phone's own font is used */ }
+}
+function cover(ctx, img, w, ht, zoom, cx, cy) {
+  const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, s = Math.max(w / iw, ht / ih) * (zoom || 1), dw = iw * s, dh = ih * s;
+  ctx.drawImage(img, (w - dw) * (cx == null ? 0.5 : cx), (ht - dh) * (cy == null ? 0.5 : cy), dw, dh);
+}
+function wrapText(ctx, text, maxW) {
+  const out = [];
+  for (const para of String(text || '').split('\n')) {
+    let line = '';
+    for (const word of para.split(/\s+/).filter(Boolean)) {
+      const next = line ? line + ' ' + word : word;
+      if (line && ctx.measureText(next).width > maxW) { out.push(line); line = word; } else line = next;
+    }
+    if (line) out.push(line);
+  }
+  return out;
+}
+/* the largest size at which the text fits its box */
+function fitText(ctx, text, o) {
+  let size = o.max, lines = [];
+  const set = () => { ctx.font = o.weight + ' ' + Math.round(size) + 'px ' + FACE; lines = wrapText(ctx, text, o.w); };
+  for (set(); size > o.min && (lines.length > o.lines || lines.some(l => ctx.measureText(l).width > o.w)); set()) size -= Math.max(2, size * 0.06);
+  if (lines.length > o.lines) { lines = lines.slice(0, o.lines); lines[o.lines - 1] = lines[o.lines - 1].replace(/\s*\S*$/, '') + '…'; }
+  return {size, lines};
+}
+function paintLines(ctx, lines, cx, top, size, o) {
+  ctx.save();
+  ctx.font = o.weight + ' ' + Math.round(size) + 'px ' + FACE; ctx.direction = 'rtl'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = o.ink;
+  if (o.glow) { ctx.shadowColor = 'rgba(0,0,0,.6)'; ctx.shadowBlur = size * 0.22; ctx.shadowOffsetY = size * 0.04; }
+  lines.forEach((l, i) => ctx.fillText(l, cx, top + size * 1.5 * (i + 0.5)));
+  ctx.restore();
+  return top + size * 1.5 * lines.length;
+}
+/* a drawn background for when there is no picture; returns true when it is a light one (dark words then) */
+function backdrop(ctx, w, ht, look, t) {
+  const pair = LOOKS[look % LOOKS.length], g = ctx.createLinearGradient(0, 0, w, ht), m = Math.min(w, ht), d = Math.sin((t || 0) * 0.7) * m * 0.025;
+  const tone = c => { const n = parseInt(c.slice(1), 16); return (0.2126 * (n >> 16 & 255) + 0.7152 * (n >> 8 & 255) + 0.0722 * (n & 255)) / 255; };
+  const light = tone(pair[0]) + tone(pair[1]) > 1.3, disc = (x, y, r) => { ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill(); };
+  g.addColorStop(0, pair[0]); g.addColorStop(1, pair[1]);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, w, ht);
+  ctx.fillStyle = light ? 'rgba(255,255,255,.35)' : 'rgba(255,255,255,.10)';
+  disc(w * 0.86 + d, ht * 0.11, m * 0.34); disc(w * 0.08 - d, ht * 0.93, m * 0.42);
+  ctx.fillStyle = light ? 'rgba(0,0,0,.05)' : 'rgba(0,0,0,.12)';
+  disc(w * 0.5, ht * 1.08 + d, m * 0.62);
+  return light;
+}
+/* a dark veil, so that words stay readable on any picture */
+function veil(ctx, w, ht, place) {
+  if (place === 'middle') { ctx.fillStyle = 'rgba(0,0,0,.42)'; ctx.fillRect(0, 0, w, ht); return; }
+  const g = place === 'top' ? ctx.createLinearGradient(0, 0, 0, ht * 0.58) : ctx.createLinearGradient(0, ht, 0, ht * 0.38);
+  g.addColorStop(0, 'rgba(0,0,0,.8)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, w, ht);
+}
+/* the words of one picture or one scene: a big line, an optional small one, and the name of the page */
+function words(ctx, w, ht, o) {
+  const u = w / 1080, gap = 20 * u;
+  const head = o.head ? fitText(ctx, o.head, {w: w * 0.84, lines: o.lines, max: o.big * u, min: 50 * u, weight: 800}) : null;
+  const sub = o.sub ? fitText(ctx, o.sub, {w: w * 0.8, lines: 2, max: 54 * u, min: 36 * u, weight: 500}) : null;
+  const all = (head ? head.lines.length * head.size * 1.5 : 0) + (sub ? sub.lines.length * sub.size * 1.5 + gap : 0);
+  let y = o.place === 'top' ? ht * 0.085 : o.place === 'middle' ? (ht - all) / 2 : ht * o.floor - all;
+  const a = o.rise == null ? 1 : o.rise;
+  ctx.save(); ctx.globalAlpha *= a; ctx.translate(0, (1 - a) * 40 * u);
+  if (head) y = paintLines(ctx, head.lines, w / 2, y, head.size, {ink: o.ink, glow: o.glow, weight: 800});
+  if (sub) paintLines(ctx, sub.lines, w / 2, y + gap, sub.size, {ink: o.ink, glow: o.glow, weight: 500});
+  ctx.restore();
+  if (!o.handle) return;
+  ctx.save();
+  ctx.font = '600 ' + Math.round(34 * u) + 'px ' + FACE; ctx.direction = 'ltr'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = o.ink; ctx.globalAlpha *= 0.85 * a;
+  if (o.glow) { ctx.shadowColor = 'rgba(0,0,0,.6)'; ctx.shadowBlur = 8 * u; }
+  ctx.fillText('@' + o.handle, w / 2, ht * o.tag);
+  ctx.restore();
+}
+/* a feed picture. m: {img, head, sub, handle, look, words} */
+function paintPost(cv, m) {
+  const ctx = cv.getContext('2d'), w = cv.width, ht = cv.height;
+  ctx.imageSmoothingQuality = 'high';
+  let ink = '#fff', glow = true, place = ['bottom', 'top', 'middle'][m.look % 3];
+  if (m.img) { cover(ctx, m.img, w, ht); if (m.words && (m.head || m.sub)) veil(ctx, w, ht, place); }
+  else { const light = backdrop(ctx, w, ht, m.look, 0); ink = light ? '#111827' : '#fff'; glow = !light; place = 'middle'; }
+  const show = m.words || !m.img;
+  words(ctx, w, ht, {head: show ? m.head : '', sub: show ? m.sub : '', handle: m.handle, place, floor: 0.9, tag: place === 'bottom' || !m.img ? 0.95 : 0.955, ink, glow, big: m.img ? 104 : 128, lines: m.img ? 3 : 4});
+}
+/* one frame of a reel at second t. m: {scenes: [{img, text}], sub, handle, look} */
+function paintReel(cv, m, t) {
+  const ctx = cv.getContext('2d'), w = cv.width, ht = cv.height, n = m.scenes.length, at = Math.min(n - 1, Math.floor(t / SCENE_SEC));
+  ctx.imageSmoothingQuality = 'medium';
+  const one = (k, alpha) => {
+    const sc = m.scenes[k], since = t - k * SCENE_SEC + FADE_SEC, p = Math.max(0, Math.min(1, since / (SCENE_SEC + FADE_SEC)));
+    let ink = '#fff', glow = true;
+    ctx.save(); ctx.globalAlpha = alpha;
+    if (sc.img) { cover(ctx, sc.img, w, ht, k % 2 ? 1.16 - 0.1 * p : 1.05 + 0.1 * p, 0.5 + (k % 2 ? 0.08 : -0.08) * (p - 0.5), 0.5); veil(ctx, w, ht, 'bottom'); }
+    else { const light = backdrop(ctx, w, ht, m.look + k, since); ink = light ? '#111827' : '#fff'; glow = !light; }
+    const rise = Math.max(0, Math.min(1, (since - FADE_SEC - 0.1) / 0.45));
+    words(ctx, w, ht, {head: sc.text, sub: k === n - 1 ? m.sub : '', handle: k === n - 1 ? m.handle : '', place: sc.img ? 'bottom' : 'middle', floor: 0.74, tag: 0.79,
+      ink, glow, big: sc.img ? 92 : 112, lines: 3, rise: 1 - Math.pow(1 - rise, 3)});
+    ctx.restore();
+  };
+  one(at, 1);
+  const into = t - ((at + 1) * SCENE_SEC - FADE_SEC);
+  if (at < n - 1 && into > 0) one(at + 1, Math.min(1, into / FADE_SEC));
+}
+const reelSeconds = m => m.scenes.length * SCENE_SEC + 0.2;
+
+/* A plain MP4 (video only) out of H.264 samples. The index comes first, so the file plays while it still loads.
+   turned: the frames lie on their side, the way phone cameras store upright video; the track says "turn me back". */
+function mp4File(samples, avcC, w, ht, fps, turned, space) {
+  const be = (v, n) => { const a = new Uint8Array(n); for (let i = n - 1; i >= 0; i--) { a[i] = v % 256; v = Math.floor(v / 256); } return a; };
+  const u16 = v => be(v, 2), u32 = v => be(v, 4), txt = s => Uint8Array.from(s, c => c.charCodeAt(0)), zero = n => new Uint8Array(n);
+  const join = parts => { const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; } return out; };
+  const box = (type, ...parts) => { const body = join(parts); return join([u32(body.length + 8), txt(type), body]); };
+  const full = (type, flags, ...parts) => box(type, u32(flags), ...parts);
+  const n = samples.length, tick = 1000, ms = Math.round(n * 1000 / fps);
+  /* B-frames are shown later than they are decoded. Offsets may not be negative, so all shift and an edit list takes it back. */
+  const shown = samples.map(s => Math.round(s.ts * fps / 1e6));
+  let lead = 0;
+  shown.forEach((p, i) => { lead = Math.max(lead, i - p); });
+  const late = shown.map((p, i) => (p + lead - i) * tick), mixed = lead > 0 || late.some(v => v !== 0);
+  const runs = []; for (const v of late) { if (runs.length && runs[runs.length - 1][1] === v) runs[runs.length - 1][0]++; else runs.push([1, v]); }
+  const keys = []; samples.forEach((s, i) => { if (s.key) keys.push(i + 1); });
+  const chunks = []; for (let i = 0; i < n; i += fps) chunks.push(Math.min(fps, n - i));
+  const stsc = [[1, chunks[0]]]; if (chunks.length > 1 && chunks[chunks.length - 1] !== chunks[0]) stsc.push([chunks.length, chunks[chunks.length - 1]]);
+  const flat = [u32(0x10000), u32(0), u32(0), u32(0), u32(0x10000), u32(0), u32(0), u32(0), u32(0x40000000)];
+  const side = [u32(0), u32(0x10000), u32(0), u32(0xffff0000), u32(0), u32(0), u32(ht * 0x10000), u32(0), u32(0x40000000)];
+  const colr = space && space.matrix ? box('colr', txt('nclx'), u16({bt709: 1, bt470bg: 5, smpte170m: 6}[space.primaries] || 1),
+    u16({bt709: 1, smpte170m: 6, 'iec61966-2-1': 13}[space.transfer] || 1), u16({bt709: 1, bt470bg: 5, smpte170m: 6}[space.matrix] || 1), Uint8Array.of(space.fullRange ? 0x80 : 0)) : zero(0);
+  const avc1 = box('avc1', zero(6), u16(1), zero(16), u16(w), u16(ht), u32(0x480000), u32(0x480000), u32(0), u16(1), zero(32), u16(24), u16(0xffff), box('avcC', avcC), colr);
+  const moov = offsets => box('moov',
+    full('mvhd', 0, u32(0), u32(0), u32(1000), u32(ms), u32(0x10000), u16(0x100), zero(10), ...flat, zero(24), u32(2)),
+    box('trak',
+      full('tkhd', 3, u32(0), u32(0), u32(1), u32(0), u32(ms), zero(8), u16(0), u16(0), u16(0), u16(0), ...(turned ? side : flat), u32(w * 0x10000), u32(ht * 0x10000)),
+      mixed ? box('edts', full('elst', 0, u32(1), u32(ms), u32(lead * tick), u16(1), u16(0))) : zero(0),
+      box('mdia',
+        full('mdhd', 0, u32(0), u32(0), u32(fps * tick), u32(n * tick), u16(0x55c4), u16(0)),
+        full('hdlr', 0, u32(0), txt('vide'), zero(12), txt('VideoHandler\0')),
+        box('minf', full('vmhd', 1, zero(8)), box('dinf', full('dref', 0, u32(1), full('url ', 1))),
+          box('stbl', full('stsd', 0, u32(1), avc1),
+            full('stts', 0, u32(1), u32(n), u32(tick)),
+            mixed ? full('ctts', 0, u32(runs.length), join(runs.map(r => join([u32(r[0]), u32(r[1])])))) : zero(0),
+            keys.length < n ? full('stss', 0, u32(keys.length), join(keys.map(u32))) : zero(0),
+            full('stsc', 0, u32(stsc.length), join(stsc.map(r => join([u32(r[0]), u32(r[1]), u32(1)])))),
+            full('stsz', 0, u32(0), u32(n), join(samples.map(s => u32(s.data.length)))),
+            full('stco', 0, u32(chunks.length), join(offsets.map(u32))))))));
+  const ftyp = box('ftyp', txt('isom'), u32(512), txt('isomiso2avc1mp41'));
+  const lay = start => { const out = []; let at = start, i = 0; for (const c of chunks) { out.push(at); for (let k = 0; k < c; k++) at += samples[i++].data.length; } return out; };
+  const head = ftyp.length + moov(lay(0)).length + 8, total = samples.reduce((sum, x) => sum + x.data.length, 0);
+  return new Blob([ftyp, moov(lay(head)), u32(total + 8), txt('mdat')].concat(samples.map(x => x.data)), {type: 'video/mp4'});
+}
+async function avcConfig(w, ht, fps) {
+  if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') return null;
+  for (const codec of ['avc1.640028', 'avc1.4d0028', 'avc1.42e028', 'avc1.42001f']) {
+    const cfg = {codec, width: w, height: ht, bitrate: Math.round(w * ht * fps * 0.1), framerate: fps, avc: {format: 'avc'}};
+    try { if ((await VideoEncoder.isConfigSupported(cfg)).supported) return cfg; } catch (e) { /* try the next profile */ }
+  }
+  return null;
+}
+/* Frame by frame through the device's own H.264 encoder; null when this browser has none for that size. */
+async function encodeFrames(stage, paint, seconds, fps, turned, onStep, stop) {
+  const cw = turned ? stage.height : stage.width, ch = turned ? stage.width : stage.height, cfg = await avcConfig(cw, ch, fps);
+  if (!cfg) return null;
+  const lay = turned ? blank(cw, ch) : stage, lctx = turned ? lay.getContext('2d') : null, samples = [], frames = Math.round(seconds * fps);
+  let desc = null, space = null, failed = null;
+  const enc = new VideoEncoder({error: e => { failed = e; }, output: (chunk, meta) => {
+    const dc = meta && meta.decoderConfig;
+    if (dc && dc.description) { desc = new Uint8Array(dc.description.buffer ? dc.description.buffer.slice(dc.description.byteOffset, dc.description.byteOffset + dc.description.byteLength) : dc.description); space = dc.colorSpace || null; }
+    const data = new Uint8Array(chunk.byteLength);
+    chunk.copyTo(data);
+    samples.push({data, key: chunk.type === 'key', ts: chunk.timestamp});
+  }});
+  enc.configure(cfg);
+  try {
+    for (let i = 0; i < frames; i++) {
+      if (stop.on) throw new Err('لغو شد.', 0, true);
+      if (failed) throw failed;
+      paint(i / fps);
+      if (turned) { lctx.setTransform(0, -1, 1, 0, 0, ch); lctx.drawImage(stage, 0, 0); }
+      const frame = new VideoFrame(lay, {timestamp: Math.round(i * 1e6 / fps), duration: Math.round(1e6 / fps)});
+      enc.encode(frame, {keyFrame: i % (fps * 2) === 0});
+      frame.close();
+      while (enc.encodeQueueSize > 4 && !failed) await pause();
+      if (i % 6 === 0) { onStep(i / frames); await pause(); }
+    }
+    await enc.flush();
+    if (failed) throw failed;
+  } finally { try { enc.close(); } catch (e) { /* closed already */ } }
+  if (!desc || samples.length !== frames) throw new Error('the encoder returned ' + samples.length + ' of ' + frames + ' frames');
+  return mp4File(samples, desc, cw, ch, fps, turned, space);
+}
+/* The fallback: play the reel once on a canvas and let the browser record it (takes as long as the reel itself). */
+function recordLive(stage, paint, seconds, fps, onStep, stop) {
+  return new Promise((res, rej) => {
+    const kinds = ['video/mp4;codecs=avc1.640028', 'video/mp4;codecs=avc1.4d0028', 'video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+    const type = typeof MediaRecorder === 'undefined' || !stage.captureStream ? '' : kinds.find(k => MediaRecorder.isTypeSupported(k));
+    if (!type) return rej(new Err('این مرورگر نمی‌تواند ویدیو بسازد؛ با Chrome امتحان کن.'));
+    paint(0);
+    const stream = stage.captureStream(fps), rec = new MediaRecorder(stream, {mimeType: type, videoBitsPerSecond: Math.round(stage.width * stage.height * fps * 0.1)}), parts = [], t0 = performance.now();
+    let broke = null;
+    rec.ondataavailable = e => { if (e.data && e.data.size) parts.push(e.data); };
+    rec.onerror = () => { broke = new Err('ضبط ویدیو متوقف شد.'); };
+    rec.onstop = () => { stream.getTracks().forEach(tr => tr.stop()); if (broke) rej(broke); else res(new Blob(parts, {type: type.split(';')[0]})); };
+    const tick = () => {
+      const t = (performance.now() - t0) / 1000;
+      if (stop.on || D.hidden) broke = stop.on ? new Err('لغو شد.', 0, true) : new Err('صفحه بسته شد و ضبط ناتمام ماند. دوباره بساز و تا پایان، همین صفحه را باز نگه دار.');
+      if (broke || t >= seconds + 0.15) return rec.stop();
+      paint(Math.min(t, seconds)); onStep(Math.min(1, t / seconds));
+      requestAnimationFrame(tick);
+    };
+    rec.start();
+    requestAnimationFrame(tick);
+  });
+}
+/* Full size first; then the same lying on its side (older phones only encode wide pictures); then smaller; then recording. */
+async function renderReel(m, onStep, stop) {
+  const seconds = reelSeconds(m), ways = S.video ? [S.video] : [[1080, false], [1080, true], [720, false], [720, true], 'live'];
+  let last = null;
+  for (const way of ways) {
+    const width = way === 'live' ? 720 : way[0], stage = blank(width, width * 16 / 9), paint = t => paintReel(stage, m, t);
+    try {
+      const blob = way === 'live' ? await recordLive(stage, paint, seconds, REEL_FPS, onStep, stop) : await encodeFrames(stage, paint, seconds, REEL_FPS, way[1], onStep, stop);
+      if (blob) return {blob, way: way === 'live' ? 'live' : width + (way[1] ? ' turned' : ''), seconds};
+    } catch (e) { if (e && e.silent) throw e; last = e; }
+  }
+  throw last instanceof Err ? last : new Err('ساخت ویدیو روی این دستگاه انجام نشد' + (last && last.message ? ' (' + last.message + ')' : '') + '.');
+}
+
+function studio(init, done) {
+  init = init || {};
+  const m = {kind: init.kind === 'reel' ? 'reel' : 'image', style: 'photo', scenes: 4, pics: S.st.studio.image !== 'off', look: Math.floor(Math.random() * LOOKS.length), words: true, shots: []};
+  const stop = {on: false}, handle = () => (S.st.connected ? S.st.account.username : S.st.handle) || '';
+  let timer = 0, anim = 0, jobId = '';
+  const quit = () => { clearTimeout(timer); cancelAnimationFrame(anim); if (jobId) { POST('/api/studio/job/' + jobId + '/cancel').catch(() => {}); jobId = ''; } };
+  const s = sheet('بساز', {onclose: () => { stop.on = true; quit(); }});
+  const idea = h('textarea', {class: 'in', rows: 3, placeholder: 'مثلاً: تخفیف ۲۰٪ لاتهٔ پاییزی تا آخر هفته', 'aria-label': 'ایدهٔ پست', value: init.idea || ''});
+  const demo = () => (S.st.demo ? h('div', {class: 'muted sm'}, 'حالت نمایشی: متن‌ها و تصویرها ساختگی‌اند؛ در اجرای واقعی از سرویس‌های هوش مصنوعی می‌آیند.') : null);
+
+  const form = () => {
+    quit();
+    const styles = [['photo', 'عکس واقعی'], ['art', 'تصویرسازی'], ['minimal', 'مینیمال'], ['3d', 'سه‌بعدی']];
+    const off = S.st.studio.image === 'off';
+    fill(s.body, field('ایده‌ات را بنویس', idea),
+      segment([['image', 'عکس'], ['reel', 'ویدیو (ریل)']], m.kind, v => { m.kind = v; form(); }),
+      m.kind === 'reel' ? [h('label', {class: 'f'}, 'چند صحنه؟'), segment([[3, '۳'], [4, '۴'], [5, '۵']], m.scenes, v => { m.scenes = v; form(); })] : null,
+      h('label', {class: 'f'}, 'سبک تصویر'), h('div', {class: 'chips'}, styles.map(x => h('button', {class: 'chip' + (m.style === x[0] ? ' on' : ''), 'data-style': x[0], onclick: () => { m.style = x[0]; form(); }}, x[1]))),
+      h('div', {class: 'row'}, h('div', {class: 'grow'}, h('b', null, 'تصویر با هوش مصنوعی'),
+          h('div', {class: 'muted sm'}, off ? 'در تنظیمات خاموش است؛ طرح‌های خود برنامه استفاده می‌شود.' : S.st.studio.pollen || S.st.studio.custom ? 'با کلید خودت ساخته می‌شود.'
+            : m.kind === 'reel' ? 'سرویس‌های رایگان کند و کوچک‌اند؛ برای ریل یکی دو دقیقه صبر لازم است.' : 'از سرویس رایگان می‌آید؛ چند ثانیه تا یک دقیقه طول می‌کشد.')),
+        off ? null : toggle(m.pics, async v => { m.pics = v; }, 'تصویر با هوش مصنوعی')), demo());
+    s.setFoot(h('button', {class: 'btn pri', 'data-studio-go': '1', onclick: e => run(e.currentTarget, start)}, icon('spark'), m.kind === 'reel' ? 'ویدیو را بساز' : 'عکس را بساز'));
+  };
+  const working = job => {
+    const got = job.pictures.filter(p => p.file).length;
+    fill(s.body, h('div', {class: 'empty'}, h('i', {class: 'spin'}), h('b', null, job.step || 'در حال ساختن…'),
+      job.pictures.length > 1 ? h('div', {class: 'muted sm'}, fa(got) + ' از ' + fa(job.pictures.length) + ' تصویر آماده است') : null,
+      h('div', {class: 'muted sm'}, 'همین صفحه را باز نگه دار.')),
+      got ? h('div', {class: 'strip'}, job.pictures.filter(p => p.file).map(p => thumb(p.preview, 'image', 'mitem'))) : null);
+    s.setFoot(h('button', {class: 'btn', onclick: form}, icon('x'), 'لغو'));
+  };
+  const watch = (job, then) => {
+    jobId = job.id; working(job);
+    const look = async () => {
+      if (stop.on || jobId !== job.id) return;
+      try { job = await GET('/api/studio/job/' + job.id); } catch (e) { jobId = ''; toast(e.message, 'bad'); return form(); }
+      if (stop.on || jobId !== job.id) return;
+      if (job.status === 'running') { working(job); timer = setTimeout(look, 900); return; }
+      jobId = '';
+      if (job.status !== 'done') { if (job.status === 'failed') toast(job.error || 'ساخته نشد', 'bad'); return form(); }
+      try { await then(job); } catch (e) { toast((e && e.message) || 'خطا', 'bad'); form(); }
+    };
+    timer = setTimeout(look, 500);
+  };
+  const start = async () => {
+    const text = idea.value.trim();
+    if (text.length < 3) { toast('ایده‌ات را در یک جمله بنویس', 'bad'); return; }
+    watch(await POST('/api/studio/make', {idea: text, kind: m.kind, scenes: m.scenes, style: m.style, pictures: m.pics}), async job => {
+      const plan = job.plan;
+      Object.assign(m, {plan, notes: job.notes, head: plan.headline, sub: plan.sub, caption: (plan.caption + '\n\n' + plan.hashtags.join(' ')).trim()});
+      m.shots = job.pictures.map((p, i) => ({prompt: p.prompt, src: p.preview, from: p.source, why: p.why, img: null, text: plan.scenes[i] ? plan.scenes[i].text : ''}));
+      await Promise.all(m.shots.map(async sh => { if (sh.src) { try { sh.img = await loadPic(sh.src); } catch (e) { sh.src = ''; sh.why = 'تصویر باز نشد.'; } } }));
+      await faceReady();
+      result();
+    });
+  };
+  /* one more picture for shot i, from the description as it stands now */
+  const redo = (i, prompt) => run(null, async () => {
+    watch(await POST('/api/studio/picture', {prompt, shape: m.kind === 'reel' ? 'reel' : 'post', style: m.style}), async job => {
+      const p = job.pictures[0], sh = m.shots[i];
+      sh.prompt = prompt;
+      if (p.file) Object.assign(sh, {src: p.preview, from: p.source, why: '', img: await loadPic(p.preview)});
+      else toast(p.why || 'تصویر ساخته نشد', 'bad');
+      m.notes = (m.notes || []).concat(job.notes.filter(x => !(m.notes || []).includes(x)));
+      result();
+    });
+  });
+  const facts = () => {
+    const drawn = m.shots.filter(x => x.img).length, why = (m.shots.find(x => !x.img && x.why) || {}).why;
+    return [m.plan.source === 'offline' ? h('div', {class: 'sm amber'}, 'متن‌ها الگوی آماده‌اند (' + (NO_PLAN[m.plan.why] || 'دستیار جواب نداد') + '). می‌توانی خودت عوضشان کنی.') : null,
+      h('div', {class: 'muted sm', 'data-pics': drawn}, m.shots.length === 1 ? (drawn ? 'تصویر: هوش مصنوعی (' + (PIC_FROM[m.shots[0].from] || '') + ')' : 'تصویر: طرح خود برنامه')
+        : drawn === m.shots.length ? 'هر ' + fa(drawn) + ' تصویر را هوش مصنوعی ساخته است.' : !drawn ? 'زمینه‌ها طرح خود برنامه‌اند.'
+        : fa(drawn) + ' از ' + fa(m.shots.length) + ' تصویر را هوش مصنوعی ساخته؛ بقیه طرح خود برنامه‌اند.'),
+      !drawn || drawn < m.shots.length ? (why ? h('div', {class: 'muted sm'}, why) : null) : null,
+      (m.notes || []).map(x => h('div', {class: 'sm amber'}, x)), demo()];
+  };
+  const describe = i => {
+    const sh = m.shots[i], ta = h('textarea', {class: 'in ltr', rows: 3, 'aria-label': 'توصیف تصویر', value: sh.prompt});
+    return h('details', {class: 'box'}, h('summary', null, icon('image'), m.shots.length > 1 ? 'تصویر صحنهٔ ' + fa(i + 1) : 'تصویر دیگر'),
+      h('div', {class: 'col'}, h('div', {class: 'muted sm'}, 'تصویرساز انگلیسی را بهتر می‌فهمد. بنویس تصویر چه چیزی را نشان بدهد.'), ta,
+        h('button', {class: 'btn', 'data-redo': i, onclick: () => redo(i, ta.value.trim())}, icon('refresh'), 'تصویر تازه بساز')));
+  };
+  const result = () => {
+    cancelAnimationFrame(anim);
+    const text = (label, key, obj) => { const el = h('input', {class: 'in', 'aria-label': label, value: obj[key] || ''}); el.addEventListener('input', () => { obj[key] = el.value; paint(); }); return field(label, el); };
+    const stage = m.kind === 'reel' ? blank(540, 960) : blank(1080, 1350), t0 = performance.now();
+    stage.className = 'stage' + (m.kind === 'reel' ? ' tall' : '');
+    const reel = () => ({scenes: m.shots.map(x => ({img: x.img, text: x.text})), sub: m.sub, handle: handle(), look: m.look});
+    const paint = () => { if (m.kind === 'image') paintPost(stage, {img: m.shots[0].img, head: m.head, sub: m.sub, handle: handle(), look: m.look, words: m.words}); };
+    const loop = () => { if (!stage.isConnected) return; paintReel(stage, reel(), ((performance.now() - t0) / 1000) % reelSeconds(reel())); anim = requestAnimationFrame(loop); };
+    const next = h('button', {class: 'btn sm', 'data-look': '1', onclick: () => { m.look++; paint(); }}, icon('refresh'), m.kind === 'reel' || m.shots[0].img ? 'چیدمان دیگر' : 'رنگ دیگر');
+    fill(s.body, stage, facts(),
+      m.kind === 'image' ? [text('نوشتهٔ روی تصویر', 'head', m), text('خط دوم (اختیاری)', 'sub', m),
+          h('div', {class: 'row'}, m.shots[0].img ? [h('span', {class: 'grow'}, 'نوشته روی تصویر باشد'), toggle(m.words, async v => { m.words = v; paint(); }, 'نوشته روی تصویر')] : h('span', {class: 'grow'}), next), describe(0)]
+        : [m.shots.map((sh, i) => text('نوشتهٔ صحنهٔ ' + fa(i + 1), 'text', sh)), text('خط آخر (اختیاری)', 'sub', m), h('div', {class: 'row'}, h('span', {class: 'grow muted sm'}, 'ویدیو بی‌صداست؛ آهنگ را موقع انتشار در اینستاگرام اضافه کن.'), next),
+          m.shots.map((sh, i) => describe(i))],
+      h('label', {class: 'f'}, 'کپشن (در مرحلهٔ بعد می‌توانی عوضش کنی)'), h('div', {class: 'card pre sm', dir: 'auto', 'data-caption': '1'}, m.caption));
+    s.setFoot(h('button', {class: 'btn', onclick: form}, 'از نو'), h('button', {class: 'btn pri', 'data-studio-done': '1', onclick: e => run(e.currentTarget, m.kind === 'reel' ? () => film(reel()) : finish)}, icon('check'), m.kind === 'reel' ? 'ساخت ویدیو' : 'ادامه'));
+    if (m.kind === 'reel') loop(); else paint();
+  };
+  const finish = async () => {
+    const cv = $('canvas.stage', s.body), blob = await new Promise(r => cv.toBlob(r, 'image/jpeg', 0.92));
+    if (!blob) throw new Err('تصویر ساخته نشد.');
+    const up = await api('POST', '/api/upload?name=studio.jpg', blob, true);
+    s.close();
+    done({kind: 'image', caption: m.caption, media: [{file: up.id, type: up.type, preview: up.preview}]});
+  };
+  const film = async model => {
+    cancelAnimationFrame(anim);
+    const bar = h('i'), pct = h('b', null, '۰٪'), halt = {on: false};
+    fill(s.body, h('div', {class: 'empty'}, h('i', {class: 'spin'}), h('div', null, 'در حال ساخت ویدیو… ', pct), h('div', {class: 'bar grow'}, bar), h('div', {class: 'muted sm'}, 'همین صفحه را باز و روشن نگه دار.')));
+    s.setFoot(h('button', {class: 'btn', onclick: () => { halt.on = true; }}, icon('x'), 'لغو'));
+    let made;
+    try { made = await renderReel(model, p => { bar.style.width = Math.round(p * 100) + '%'; fill(pct, fa(Math.round(p * 100)) + '٪'); }, {get on() { return halt.on || stop.on; }}); }
+    catch (e) { if (!stop.on) result(); if (e && e.silent) return; throw e; }
+    fill(pct, '۱۰۰٪');
+    const mp4 = made.blob.type === 'video/mp4', up = await api('POST', '/api/upload?name=studio.' + (mp4 ? 'mp4' : 'webm'), made.blob, true);
+    S.made = {way: made.way, type: made.blob.type, size: made.blob.size, seconds: made.seconds, file: up.id};
+    s.close();
+    if (!mp4) toast('این مرورگر ویدیو را به شکل WebM ساخت و اینستاگرام شاید آن را نپذیرد؛ با Chrome دوباره بساز.', 'bad');
+    done({kind: 'reel', caption: m.caption, media: [{file: up.id, type: up.type, preview: up.preview}]});
+  };
+  form();
+  if (idea.value.trim().length >= 3 && init.kind) run(null, start);
 }
 
 /* ───── comments & direct ───── */
@@ -5666,6 +6160,12 @@ function ruleSheet(r) {
   s.setFoot(r.id ? h('button', {class: 'btn danger', onclick: async e => { const b = e.currentTarget; if (await ask('این قانون حذف شود؟', 'حذف', true)) run(b, async () => { await DEL('/api/rules/' + r.id); s.close(); render(false); }); }}, icon('trash'), 'حذف') : null, save);
 }
 VIEWS.agent = async () => {
+  if (!S.st.connected) return [
+    h('div', {class: 'card col'}, h('b', null, 'بدون اتصال به پیج'), h('div', {class: 'muted sm'}, 'ایجنت عکس، ویدیو و کپشن را می‌سازد و سر وقت یادآوری می‌کند؛ انتشار با خودت است. خواندن کامنت و دایرکت، پاسخ خودکار و آمار به اتصال پیج (توکن متا) نیاز دارد.'),
+      h('div', {class: 'row wrap'}, h('button', {class: 'btn sm', onclick: tokenSheet}, icon('link'), 'اتصال با توکن متا'))),
+    h('div', {class: 'row'}, h('button', {class: 'btn grow', onclick: assistantSheet}, icon('spark'), 'دستیار'), h('button', {class: 'btn grow', id: 'open-settings', onclick: settingsSheet}, icon('settings'), 'تنظیمات'),
+      h('button', {class: 'btn grow', onclick: helpSheet}, icon('help'), 'راهنما')),
+    h('p', {class: 'muted sm center'}, 'ایجنت اینستاگرام — نسخهٔ __VERSION__')];
   const [set, rules] = await Promise.all([GET('/api/settings'), GET('/api/rules')]), st = S.st, au = set.auto, lim = set.limits;
   const sw = (key, title, desc) => h('div', {class: 'row line'}, h('div', {class: 'grow'}, h('b', null, title), h('div', {class: 'muted sm'}, desc)), toggle(au[key], v => saveSettings({auto: {[key]: v}}, false), title));
   const ruleCard = r => h('button', {class: 'card row' + (r.enabled ? '' : ' off'), 'data-rule': r.id, onclick: () => ruleSheet(r)}, h('div', {class: 'grow'}, h('b', null, r.name),
@@ -5715,10 +6215,23 @@ async function settingsSheet() {
   let tempOk = set.media.temp_ok;
   const tgToken = inp('', {class: 'in ltr', type: 'password', autocomplete: 'off', placeholder: set.telegram.token_set ? '•••••• (ذخیره شده)' : '123456:ABC…'}), tgChat = inp(set.telegram.chat_id, {class: 'in ltr', placeholder: '123456789'});
   const proxy = inp(set.network.proxy, {class: 'in ltr', placeholder: 'http://127.0.0.1:10809'});
+  const handle = inp(set.brand.handle, {class: 'in ltr', placeholder: 'my.page', 'aria-label': 'نام کاربری پیج'});
+  const picMode = sel(set.studio.image, [['auto', 'خودکار (رایگان‌ها به نوبت)'], ['pollinations', 'فقط Pollinations'], ['horde', 'فقط AI Horde'], ['custom', 'فقط سرویس خودم'], ['off', 'خاموش (طرح‌های خود برنامه)']]);
+  const pollen = inp('', {class: 'in ltr', type: 'password', autocomplete: 'off', 'aria-label': 'کلید Pollinations', placeholder: set.studio.pollen_set ? '•••••• (ذخیره شده)' : 'sk_…'});
+  const picUrl = inp(set.studio.url, {class: 'in ltr', placeholder: 'https://…/v1'}), picModel = inp(set.studio.model, {class: 'in ltr', placeholder: 'gpt-image-1'});
+  const picKey = inp('', {class: 'in ltr', type: 'password', autocomplete: 'off', placeholder: set.studio.key_set ? '•••••• (ذخیره شده)' : 'کلید API'});
   const state = (on, text) => h('div', {class: 'row sm'}, h('i', {class: 'dot ' + (on ? '' : 'off')}), h('span', {class: 'grow'}, text));
   add(s.body,
-    box('brand', 'home', 'معرفی پیج (برای کپشن‌ها و پاسخ‌ها)', [field('پیج دربارهٔ چیست؟', about), field('لحن نوشتن', tone), field('هشتگ‌های همیشگی پیج', tags)], () => ({brand: {about: about.value, tone: tone.value, hashtags: tags.value}})),
-    box('ai', 'spark', 'هوش مصنوعی', [field('سرویس', aiMode, 'در حالت رایگان، متن کامنت/موضوع برای نوشتن پاسخ به یک سرویس عمومی فرستاده می‌شود.'), field('نشانی سرویس خودم', aiUrl), field('نام مدل', aiModel), field('کلید', aiKey)],
+    box('brand', 'home', 'معرفی پیج (برای کپشن‌ها و پاسخ‌ها)', [field('پیج دربارهٔ چیست؟', about), field('لحن نوشتن', tone), field('هشتگ‌های همیشگی پیج', tags),
+        field('نام کاربری پیج (اختیاری)', handle, 'بدون @. زیر عکس‌ها و در پایان ویدیوهایی که ایجنت می‌سازد نوشته می‌شود.')],
+      () => ({brand: {about: about.value, tone: tone.value, hashtags: tags.value, handle: handle.value}})),
+    box('studio', 'image', 'ساخت عکس و ویدیو', [h('p', {class: 'muted sm'}, 'ایجنت تصویر را از سرویس‌های هوش مصنوعی می‌گیرد و عکس نهایی و ویدیو را روی همین دستگاه می‌سازد. بدون ثبت‌نام از دو سرویس رایگان استفاده می‌کند: Pollinations (هر ۴۵ ثانیه یک تصویر، با نشان کوچک خودش در گوشه) و AI Horde (تصویر کوچک‌تر، گاهی با صف). اگر هیچ‌کدام جواب ندهند، طرح خود برنامه کشیده می‌شود.'),
+        field('سرویس تصویر', picMode),
+        field('کلید Pollinations (اختیاری)', pollen, 'با کلید خودت (از enter.pollinations.ai) تصویرها بزرگ‌تر، بدون انتظار و بدون نشان می‌شوند و متن‌ها را هم مدل بهتری می‌نویسد.'),
+        h('details', {class: 'box'}, h('summary', null, icon('link'), 'سرویس تصویر خودم (سازگار با OpenAI)'), h('div', {class: 'col'}, field('نشانی', picUrl), field('نام مدل', picModel), field('کلید', picKey)))],
+      () => ({studio: {image: picMode.value, pollen: pollen.value, url: picUrl.value, model: picModel.value, key: picKey.value}}),
+      set.studio.pollen_set ? h('button', {class: 'btn danger', onclick: e => run(e.currentTarget, async () => { await saveSettings({studio: {pollen_clear: true}}, 'کلید برداشته شد'); pollen.placeholder = 'sk_…'; e.target.remove(); })}, 'حذف کلید') : null),
+    box('ai', 'spark', 'هوش مصنوعی (متن)', [field('سرویس', aiMode, 'در حالت رایگان، متن کامنت/موضوع برای نوشتن پاسخ به یک سرویس عمومی فرستاده می‌شود و هر ۴۵ ثانیه یک پاسخ می‌دهد (با کلید Pollinations در بخش «ساخت عکس و ویدیو» این محدودیت نیست).'), field('نشانی سرویس خودم', aiUrl), field('نام مدل', aiModel), field('کلید', aiKey)],
       () => ({ai: {mode: aiMode.value, url: aiUrl.value, model: aiModel.value, key: aiKey.value}})),
     box('media', 'upload', 'انتشار از گالری (لینک عمومی)', [h('p', {class: 'muted sm'}, 'اینستاگرام فایل را خودش از یک نشانی اینترنتی برمی‌دارد. برای عکس و ویدیویی که از گالری انتخاب می‌کنی، ایجنت باید چند دقیقه یک لینک عمومی برایش بسازد:'),
         state(m.tunnel, m.tunnel ? 'تونل cloudflared: آماده است (فایل از خود گوشی و فقط در لحظهٔ انتشار در دسترس قرار می‌گیرد؛ پنل هیچ‌وقت بیرون نمی‌آید).' : 'تونل cloudflared: نصب نیست. در ترموکس یک بار بزن: pkg install cloudflared و ایجنت را دوباره اجرا کن.'),
@@ -5747,7 +6260,12 @@ function assistantSheet() {
 function helpSheet() {
   const s = sheet('راهنما'), sec = (title, ...lines) => h('div', {class: 'card col'}, h('b', null, title), lines.map(l => h('div', {class: 'sm'}, l)));
   add(s.body,
-    sec('ایجنت چه کارهایی می‌کند؟', 'پست، پست چندتایی، ریل و استوری را همین حالا یا در زمان دلخواه منتشر می‌کند.', 'کامنت‌ها و دایرکت‌ها را در یک صندوق نشان می‌دهد و می‌توانی از همین‌جا جواب بدهی، مخفی یا حذف کنی.',
+    sec('ساختن پست از روی یک ایده', 'در «بساز» ایده‌ات را بنویس: ایجنت کپشن و هشتگ می‌نویسد، تصویر را از سرویس هوش مصنوعی می‌گیرد و عکس نهایی یا ریل را روی همین دستگاه می‌سازد.',
+      'سرویس‌های رایگان تصویر کند و کوچک‌اند و گاهی جواب نمی‌دهند؛ آن وقت ایجنت طرح خودش را می‌کشد. با کلید Pollinations (در تنظیمات) نتیجه بهتر و سریع‌تر است.',
+      'ریل از چند تصویر با حرکت و نوشته ساخته می‌شود و صدا ندارد؛ آهنگ را موقع انتشار در اینستاگرام اضافه کن. فیلم‌سازی کامل با هوش مصنوعی فقط در سرویس‌های پولی هست.'),
+    sec('انتشار با خودت (بدون اتصال پیج)', 'پست آماده را باز کن: «ارسال به اینستاگرام» فایل را به اپ می‌دهد و کپشن را کپی می‌کند؛ آنجا بچسبانش. اگر این دکمه نبود، «ذخیره در گوشی» و «کپی کپشن» را بزن.',
+      'برای هر پست می‌توانی یادآوری بگذاری؛ سر وقت در پنل (و در تلگرام، اگر وصلش کرده باشی) خبر می‌دهد. بعد از انتشار «منتشر کردم» را بزن.'),
+    sec('ایجنت چه کارهایی می‌کند؟', 'با اتصال پیج: پست، پست چندتایی، ریل و استوری را همین حالا یا در زمان دلخواه منتشر می‌کند.', 'کامنت‌ها و دایرکت‌ها را در یک صندوق نشان می‌دهد و می‌توانی از همین‌جا جواب بدهی، مخفی یا حذف کنی.',
       'طبق قانون‌هایی که می‌نویسی خودش جواب می‌دهد و کامنت‌های تبلیغاتی را مخفی می‌کند.', 'آمار پیج و بهترین ساعت انتشار را نشان می‌دهد و در نوشتن کپشن و هشتگ کمک می‌کند.'),
     sec('چه چیزهایی شدنی نیست؟', 'اینستاگرام از راه رسمی اجازهٔ فالو/آنفالو، دیدن فهرست دنبال‌کننده‌ها، ویرایش کپشن یا بیو و گذاشتن استیکر و لینک روی استوری را نمی‌دهد؛ ایجنت هم سراغ راه‌های غیررسمی (که پیج را در خطر بسته‌شدن می‌گذارد) نمی‌رود.',
       'لایک‌کردن و حذف پست هم در این ایجنت نیست (متا برای این دو مجوز جداگانه می‌خواهد)؛ این دو را از خود اپ اینستاگرام انجام بده.',
@@ -5770,6 +6288,568 @@ $('#fab').addEventListener('click', () => composer());
 </body>
 </html>
 '''
+
+
+# ───────────────────────────── the typeface ─────────────────────────────
+# Vazirmatn 33.0.3, the Persian typeface of the panel and of the pictures and reels it draws: the variable-weight
+# (100-900) Persian/Arabic subset as WOFF2, embedded unchanged.
+# Copyright 2015 The Vazirmatn Project Authors (https://github.com/rastikerdar/vazirmatn).
+# Licensed under the SIL Open Font License, Version 1.1 (see OFL-Vazirmatn.txt next to this file, or
+# https://openfontlicense.org); the font file itself also carries this notice.
+FONT_WOFF2 = (
+    "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"
+)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,205 @@
+// No page connected: the owner chooses to post by hand, lets the studio make a picture and a reel from an idea,
+// and takes file and caption out of the panel.     Run with:  python3 serve.py byhand.mjs hand
+import {start, BASE, out, sleep} from './lib.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+const t = await start();
+const {page, browser} = t;
+const downloads = path.join(out, 'downloads');
+fs.rmSync(downloads, {recursive: true, force: true});
+fs.mkdirSync(downloads, {recursive: true});
+const idea = 'تخفیف ۲۰٪ لاتهٔ پاییزی <b onmouseover="window.__xss=7">تا آخر هفته</b>';
+const stageInk = () => page.evaluate(() => {          // a rough fingerprint of what is drawn on the studio's canvas
+  const cv = document.querySelector('.sheet canvas.stage'), d = cv.getContext('2d').getImageData(0, 0, cv.width, cv.height).data;
+  let sum = 0, seen = new Set();
+  for (let i = 0; i < d.length; i += 4 * 997) { sum = (sum * 31 + d[i] + d[i + 1] * 3 + d[i + 2] * 7) % 1000000007; seen.add(d[i] >> 4 << 8 | d[i + 1] >> 4 << 4 | d[i + 2] >> 4); }
+  return {sum, colours: seen.size, w: cv.width, h: cv.height};
+});
+const saveFile = async (id, name) => {
+  const b64 = await page.evaluate(async id => { const b = await (await fetch('/api/file/' + id)).arrayBuffer(); let s = ''; const u = new Uint8Array(b); for (let i = 0; i < u.length; i += 32768) s += String.fromCharCode.apply(null, u.subarray(i, i + 32768)); return btoa(s); }, id);
+  fs.writeFileSync(path.join(out, name), Buffer.from(b64, 'base64'));
+  return fs.statSync(path.join(out, name)).size;
+};
+try {
+  await browser.defaultBrowserContext().overridePermissions(BASE, ['clipboard-read', 'clipboard-write']);
+  const cdp = await page.createCDPSession();
+  await cdp.send('Browser.setDownloadBehavior', {behavior: 'allow', downloadPath: downloads});
+  await page.evaluateOnNewDocument(() => {            // a phone has a share sheet; this browser has not, so one is put in its place
+    navigator.canShare = d => !!(d && d.files && d.files.length);
+    navigator.share = async d => { window.__shared = d.files.map(f => [f.name, f.type, f.size]); };
+  });
+
+  // 1. two ways to start; without a token the owner posts by hand
+  await page.goto(BASE + '/', {waitUntil: 'networkidle0'});
+  await page.waitForSelector('[data-manual]', {timeout: 15000});
+  t.check('the start screen offers both ways', (await page.$('textarea[aria-label="توکن"]')) !== null && await t.waitText('بدون اتصال', 3000));
+  const face = await page.evaluate(async () => { await document.fonts.load('800 40px Vazirmatn'); return document.fonts.check('800 40px Vazirmatn'); });
+  t.check('the Persian typeface is loaded from the agent itself', face);
+  await t.shot('90-start');
+  await page.click('[data-manual]');
+  await page.waitForSelector('#nav button[data-tab="home"]', {visible: true, timeout: 15000});
+  const tabs = await page.$$eval('#nav button', els => els.map(e => e.dataset.tab));
+  t.check('only the tabs that work without a page', JSON.stringify(tabs) === '["home","content","agent"]', tabs);
+  t.check('the header says who posts', (await page.$eval('#top', e => e.textContent)).includes('انتشار با خودت'));
+  const st0 = await t.api('/api/status');
+  t.check('status: not connected, by hand', st0.connected === false && st0.manual === true);
+  await sleep(600);
+  await t.shot('91-home');
+
+  // 2. a picture out of one idea
+  await t.type('textarea[aria-label="ایده"]', idea);
+  await page.click('[data-make="image"]');
+  await page.waitForSelector('.sheet canvas.stage', {timeout: 60000});
+  await sleep(500);
+  const first = await stageInk();
+  t.check('the picture is drawn at feed size', first.w === 1080 && first.h === 1350 && first.colours > 20, first);
+  t.check('it was made from an AI picture', (await page.$eval('.sheet [data-pics]', e => e.dataset.pics)) === '1');
+  const cap = await page.$eval('.sheet [data-caption]', e => e.textContent);
+  t.check('caption and hashtags are written', cap.includes('لاتهٔ پاییزی') && /#\S+/.test(cap), cap);
+  const head = await page.$eval('.sheet input[aria-label="نوشتهٔ روی تصویر"]', e => e.value);
+  t.check('a headline is proposed', head.length > 3, head);
+  await t.shot('92-studio-picture');
+  await t.type('input[aria-label="نوشتهٔ روی تصویر"]', 'فقط همین هفته ☕️');
+  await sleep(200);
+  const second = await stageInk();
+  t.check('changing the words redraws the picture', second.sum !== first.sum);
+  await page.click('.sheet [data-look]'); await sleep(200);
+  const third = await stageInk();
+  t.check('another layout is one tap away', third.sum !== second.sum);
+  await t.shot('92b-studio-layout');
+  await page.click('.sheet [data-studio-done]');
+  await page.waitForSelector('.sheet .kinds', {timeout: 20000});
+  await sleep(500);
+
+  // 3. the composer speaks of posting by hand
+  const comp = await t.inTop(s => ({tag: (s.querySelector('.mitem .tag') || {}).textContent, caption: s.querySelector('textarea[aria-label="کپشن"]').value,
+    go: s.querySelector('[data-go]').textContent, link: !!s.querySelector('[data-add="url"]'), more: s.textContent.includes('گزینه‌های بیشتر'), kind: s.querySelector('.kinds .on').dataset.kind}));
+  t.check('the picture and the caption arrive in the composer', comp.tag === 'عکس' && comp.caption.includes('لاتهٔ پاییزی') && comp.kind === 'image', comp);
+  t.check('no API-only choices without a page', comp.go.includes('آماده کن') && !comp.link && !comp.more, comp);
+  await t.shot('93-composer');
+  await page.click('.sheet [data-go]');
+  await page.waitForSelector('.sheet [data-kit="box"]', {timeout: 15000});
+  await page.waitForFunction(() => { const i = document.querySelector('.sheet img.big'); return i && i.complete && i.naturalWidth > 0; }, {timeout: 15000});
+  const img = await page.$eval('.sheet img.big', e => [e.naturalWidth, e.naturalHeight]);
+  t.check('the finished picture is a 1080×1350 file', img[0] === 1080 && img[1] === 1350, img);
+  const posts = (await t.api('/api/posts?group=queue')).items;
+  t.check('the post waits for the owner', posts.length === 1 && posts[0].status === 'due' && posts[0].media[0].width === 1080, posts.map(p => p.status));
+  await t.shot('94-ready');
+  await saveFile(posts[0].media[0].file, 'made-picture.jpg');
+
+  // 4. file and caption leave the panel: copy, share, save
+  await page.click('.sheet [data-kit="copy"]');
+  await sleep(400);
+  const clip = await page.evaluate(() => navigator.clipboard.readText());
+  t.check('copy puts the caption on the clipboard', clip === posts[0].caption && clip.length > 10 && (await page.$eval('#toasts', e => e.textContent)).includes('کپشن کپی شد'), clip.slice(0, 60));
+  await page.click('.sheet [data-kit="share"]');
+  await page.waitForFunction(() => window.__shared, {timeout: 10000});
+  const shared = await page.evaluate(() => window.__shared);
+  t.check('share hands the JPEG to the phone', shared.length === 1 && /^insta-\d+\.jpg$/.test(shared[0][0]) && shared[0][1] === 'image/jpeg' && shared[0][2] > 20000, shared);
+  await sleep(300);
+  t.check('and says that the caption is ready to paste', (await page.$eval('#toasts', e => e.textContent)).includes('در اینستاگرام بچسبانش'));
+  await page.click('.sheet [data-kit="save"]');
+  let saved = [];
+  for (let i = 0; i < 40 && !saved.length; i++) { await sleep(250); saved = fs.readdirSync(downloads).filter(f => f.endsWith('.jpg')); }
+  const bytes = saved.length ? fs.readFileSync(path.join(downloads, saved[0])) : Buffer.alloc(0);
+  t.check('save puts the file in the downloads folder', saved.length === 1 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes.length > 20000, saved);
+  await page.click('.sheet [data-kit="done"]');
+  await page.waitForFunction(() => [...document.querySelectorAll('.sheet .pill')].some(e => e.textContent.includes('منتشرشده (خودت)')), {timeout: 10000});
+  const after = await t.api('/api/status');
+  t.check('"I posted it" is recorded', after.counts.due === 0 && after.counts.published_today === 1, after.counts);
+  t.check('the kit is gone once posted', (await page.$('.sheet [data-kit="box"]')) === null);
+  await t.shot('95-posted');
+  await t.closeSheet();
+
+  // 5. a reminder for later, with only a caption
+  await t.tab('content');
+  await page.click('#fab'); await sleep(400);
+  await t.type('textarea[aria-label="کپشن"]', 'یادآوری: عکس ویترین تازه #ویترین');
+  await page.click('.sheet button[data-seg="later"]'); await sleep(300);
+  t.check('the button says "remind"', (await page.$eval('.sheet [data-go]', e => e.textContent)).includes('یادآوری'));
+  await page.click('.sheet [data-go]');
+  await page.waitForFunction(() => !document.querySelector('.sheet'), {timeout: 10000});
+  await sleep(800);
+  const pills = await page.$$eval('#view .card .pill', els => els.map(e => e.textContent));
+  t.check('the reminder is listed as one', pills.includes('یادآوری'), pills);
+  await t.shot('96-plan');
+
+  // 6. a reel out of one idea: words, a picture per scene, rendered on the device
+  await t.tab('home');
+  await t.type('textarea[aria-label="ایده"]', 'معرفی کیک هویج خانگی');
+  await page.click('[data-make="reel"]');
+  await page.waitForSelector('.sheet canvas.stage.tall', {timeout: 120000});
+  await sleep(1200);
+  const pics = await page.$eval('.sheet [data-pics]', e => e.dataset.pics);
+  t.check('every scene got a picture', pics === '4', pics);
+  const lines = await page.$$eval('.sheet input[aria-label^="نوشتهٔ صحنهٔ"]', els => els.map(e => e.value));
+  t.check('every scene got its words', lines.length === 4 && lines.every(x => x.length > 2), lines);
+  await t.shot('97-studio-reel');
+  await page.click('.sheet [data-studio-done]');
+  await page.waitForSelector('.sheet .kinds', {timeout: 300000});
+  const made = await page.evaluate(() => S.made);
+  t.check('the reel was encoded frame by frame into MP4', made && made.type === 'video/mp4' && made.way === '1080' && made.size > 300000, made);
+  const comp2 = await t.inTop(s => ({tag: (s.querySelector('.mitem .tag') || {}).textContent, kind: s.querySelector('.kinds .on').dataset.kind}));
+  t.check('the composer holds a reel', comp2.tag === 'ویدیو' && comp2.kind === 'reel', comp2);
+  await page.click('.sheet [data-go]');
+  await page.waitForSelector('.sheet video.big', {timeout: 15000});
+  await page.waitForFunction(() => { const v = document.querySelector('.sheet video.big'); return v && v.readyState >= 1; }, {timeout: 20000});
+  const vid = await page.$eval('.sheet video.big', v => [v.videoWidth, v.videoHeight, Math.round(v.duration * 10) / 10]);
+  t.check('it plays as an upright 1080×1920 video of the right length', vid[0] === 1080 && vid[1] === 1920 && Math.abs(vid[2] - 13) < 0.2, vid);
+  await t.shot('98-reel-ready');
+  console.log('reel file:', await saveFile(made.file, 'made-reel.mp4'), 'bytes');
+  await page.click('.sheet [data-kit="share"]');
+  await page.waitForFunction(() => window.__shared && window.__shared[0][1] === 'video/mp4', {timeout: 20000});
+  t.check('share hands over the MP4', (await page.evaluate(() => window.__shared[0][0])).endsWith('.mp4'));
+  await t.closeSheet();
+
+  // 7. the other ways of encoding, each forced once (older phones, browsers without an encoder)
+  const quick = async (way, name) => {
+    await page.evaluate(w => { S.video = w; }, way);
+    await page.click('#fab'); await sleep(400);
+    await page.click('.sheet [data-add="ai"]'); await sleep(400);
+    await t.type('textarea[aria-label="ایدهٔ پست"]', 'ساعت کاری تازه');
+    await t.inTop(s => { s.querySelector('button[data-seg="reel"]').click(); }); await sleep(200);
+    await t.inTop(s => { s.querySelector('button[data-seg="3"]').click(); }); await sleep(200);
+    await t.inTop(s => { s.querySelector('.sw').click(); }); await sleep(300);        // no AI pictures: drawn backgrounds, fast
+    await page.click('.sheet [data-studio-go]');
+    await page.waitForSelector('.sheet canvas.stage.tall', {timeout: 60000});
+    await sleep(300);
+    if (name === 'turned') await t.shot('99-studio-drawn-reel');
+    await page.click('.sheet [data-studio-done]');
+    await page.waitForFunction(() => !document.querySelector('.sheet canvas.stage') && document.querySelector('.sheet .mitem .tag'), {timeout: 300000});
+    const m = await page.evaluate(() => S.made);
+    await saveFile(m.file, 'made-reel-' + name + '.' + (m.type === 'video/mp4' ? 'mp4' : 'webm'));
+    const probe = await page.evaluate(id => new Promise(res => { const v = document.createElement('video'); v.muted = true; v.onloadedmetadata = () => res([v.videoWidth, v.videoHeight, Math.round(v.duration * 10) / 10]); v.onerror = () => res(['error']); v.src = '/api/file/' + id; }), m.file);
+    await t.closeSheet();
+    return {m, probe};
+  };
+  const turned = await quick([1080, true], 'turned');
+  t.check('lying on its side, it still plays upright', turned.m.way === '1080 turned' && turned.probe[0] === 1080 && turned.probe[1] === 1920 && Math.abs(turned.probe[2] - 9.8) < 0.2, turned);
+  const small = await quick([720, false], 'small');
+  t.check('the smaller size works too', small.m.way === '720' && small.probe[0] === 720 && small.probe[1] === 1280, small);
+  const live = await quick('live', 'live');
+  t.check('recording is the last resort', live.m.way === 'live' && live.m.size > 50000 && live.probe[0] === 720 && live.probe[1] === 1280, live);
+  await page.evaluate(() => { S.video = null; });
+
+  // 8. settings of the studio; nothing hostile ran
+  await t.tab('agent');
+  await page.click('#open-settings');
+  await page.waitForSelector('.sheet details[data-sec="studio"]', {timeout: 8000});
+  await page.evaluate(() => document.querySelector('.sheet details[data-sec="studio"] summary').click());
+  await sleep(300);
+  await t.shot('99b-settings-studio');
+  await page.evaluate(() => { const d = document.querySelector('.sheet details[data-sec="studio"]'); d.querySelector('select').value = 'off'; d.querySelector('input[aria-label="کلید Pollinations"]').value = 'sk_test_123'; d.querySelector('.btn.pri').click(); });
+  await sleep(800);
+  const set = await t.api('/api/settings');
+  t.check('the picture service and the key are saved; the key is not sent back', set.studio.image === 'off' && set.studio.pollen === '' && set.studio.pollen_set === true, set.studio);
+  await t.closeSheet();
+  t.check('no script from the idea ran', (await page.evaluate(() => window.__xss)) === undefined);
+} catch (e) {
+  t.fail();
+  console.log('EXCEPTION', e.message);
+  if (process.env.GITHUB_ACTIONS) console.log('::error title=Panel script stopped::' + String(e.message).replace(/\r?\n/g, ' '));
+  await page.screenshot({path: out + '/99-exception.png'});
+}
+// a video thumbnail that is redrawn while it still loads shows up as an aborted request: that is not a fault
+await t.finish('BY HAND', /status of 4\d\d|\/api\/file\/\w+(#t=0\.1)? net::ERR_ABORTED/);

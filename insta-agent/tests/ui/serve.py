@@ -2,6 +2,7 @@
 
     python3 serve.py flows.mjs demo      the fake page, no login (what `--demo` shows)
     python3 serve.py connect.mjs sim     an empty agent with login, talking to the built-in simulator
+    python3 serve.py byhand.mjs hand     no page and no login; simulated text and picture services for the studio
 
 Hostile text is planted in a comment, a message and a caption; the scripts check that none of it runs.
 """
@@ -47,9 +48,16 @@ def main():
         argv += ["--demo", "--no-auth"]
     else:
         env["AGENT_SIM"] = "1"
+    if mode == "hand":
+        argv += ["--no-auth"]
+        env["AGENT_FREE_GAP"] = "2"
     app = ia.App(argv, env)
     app.start()
     sim = app.agent.sim
+    if mode == "hand":                                 # the studio gets made-up words and drawn stand-in pictures
+        app.agent.ai.FREE_URL = "http://127.0.0.1:%d/_sim/ai/ptxt/openai" % app.port
+        sim.ai_text, sim.ai_delay = sim.demo_plan, 0.3
+        sim.free_gap.update(image=1.5, text=1.5)
     sim.video_seconds = 2
     sim.lively = False
     evil = '<img src=x onerror="window.__xss=1"><script>window.__xss=2</script> سلام'

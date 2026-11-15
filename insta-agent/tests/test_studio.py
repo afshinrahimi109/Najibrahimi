@@ -278,8 +278,7 @@ class StudioTests(Base):
     def test_waiting_for_the_free_turn_when_it_is_the_only_service(self):
         self.text_ai(PLAN)
         self.rig.ok("POST", "/api/settings", {"studio": {"image": "pollinations"}})
-        old, ia.FREE_GAP = ia.FREE_GAP, 1.2
-        self.addCleanup(setattr, ia, "FREE_GAP", old)
+        self.rig.app.cfg.free_gap = 1.2
         self.sim.free_gap["image"] = 1.2
         started = time.time()
         job = self.make(idea="لاتهٔ پاییزی", kind="reel", scenes=2)
