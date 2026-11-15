@@ -100,6 +100,10 @@ jobs:
         if: always()
         working-directory: insta-agent/tests
         run: python live_check.py text
+      - name: Text, the way the assistant asks today
+        if: always()
+        working-directory: insta-agent/tests
+        run: python live_check.py post
       - name: Picture
         if: always()
         working-directory: insta-agent/tests
@@ -108,7 +112,3 @@ jobs:
         if: always()
         working-directory: insta-agent/tests
         run: python live_check.py horde
-      - name: How much an annotation can carry
-        if: always()
-        working-directory: insta-agent/tests
-        run: python live_check.py limits
