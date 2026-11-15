@@ -17,6 +17,7 @@ import re
 import sys
 import time
 import traceback
+import wave
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
@@ -55,22 +56,32 @@ def recogniser():
     return None, ""
 
 
+def samples(path):
+    """The WAV that check_made.py wrote (16 kHz, one channel, 16 bit) as numbers between -1 and 1."""
+    import numpy
+    with wave.open(path, "rb") as fh:
+        if (fh.getframerate(), fh.getnchannels(), fh.getsampwidth()) != (16000, 1, 2):
+            raise ValueError("%s is not 16 kHz mono 16 bit" % path)
+        return numpy.frombuffer(fh.readframes(fh.getnframes()), dtype="<i2").astype("float32") / 32768.0
+
+
 def main():
     folder = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "shots")
     with open(os.path.join(folder, "made-real.json"), encoding="utf-8") as fh:
         made = json.load(fh)
+    sounds = {name: samples(os.path.join(folder, name + ".wav")) for name in made if os.path.exists(os.path.join(folder, name + ".wav"))}
+    print("sound to listen to: %s" % {n: "%.1f s" % (len(a) / 16000.0) for n, a in sounds.items()}, flush=True)
     model, model_name = recogniser()
     if model is None:
         print("::warning title=speech recogniser::no model could be loaded, so nobody listened to the narrator in this run")
         return 0
     good = True
     for name, m in sorted(made.items()):
-        wav = os.path.join(folder, name + ".wav")
-        if not os.path.exists(wav):
+        if name not in sounds:
             good &= note(False, name, "no sound file; run check_made.py --real first")
             continue
         t0 = time.time()
-        segments, _ = model.transcribe(wav, language="fa", beam_size=5)
+        segments, _ = model.transcribe(sounds[name], language="fa", beam_size=5)
         parts = [(s.start, s.end, s.text.strip()) for s in segments]
         took = time.time() - t0
         heard, asked = " ".join(p[2] for p in parts), " ".join(m["says"])
