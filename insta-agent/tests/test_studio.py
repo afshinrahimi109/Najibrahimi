@@ -646,6 +646,14 @@ class VoiceTests(Base):
         rig.agent.pack.files = {}                                          # ... and once it is there, it is the one that reads
         self.assertEqual(rig.ok("GET", "/api/status")["studio"]["speaker"], "device")
 
+    def test_the_templates_give_the_narrator_whole_sentences(self):
+        self.rig.ok("POST", "/api/settings", {"ai": {"mode": "off"}, "brand": {"handle": "demo.cafe"}})
+        job = self.make(idea="تخفیف ۲۰٪ لاتهٔ پاییزی", kind="reel", scenes=5, voice=True, pictures=False)
+        self.assertEqual(job["plan"]["source"], "offline")
+        self.assertEqual([sc["text"] for sc in job["plan"]["scenes"]], ["تخفیف ۲۰٪ لاتهٔ پاییزی", "@demo.cafe", "جزئیات بیشتر در کپشن 👇", "همین حالا پیام بده", "برای دوستانت هم بفرست"])
+        self.assertEqual([v["say"] for v in job["voices"]], ["تخفیف بیست درصد لاتهٔ پاییزی", "ما را در اینستاگرام دنبال کنید.", "جزئیات بیشتر را در کپشن بخوانید.",
+                                                             "همین حالا به ما پیام بدهید.", "این ویدیو را برای دوستانتان هم بفرستید."])
+
     def test_a_narration_clip_is_not_a_post(self):
         self.key()
         job = self.wait(self.rig.ok("POST", "/api/studio/voice", {"texts": ["سلام دنیا"]}))

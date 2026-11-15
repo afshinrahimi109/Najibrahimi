@@ -1645,17 +1645,19 @@ async function voice(tell) {                           /* the voice itself: by f
   if (!res.ok) throw new Error('voice file: HTTP ' + res.status);
   var total = +res.headers.get('Content-Length') || 0;
   if (!res.body || !res.body.getReader) return new Uint8Array(await res.arrayBuffer());
-  var parts = [], got = 0, reader = res.body.getReader();
-  for (;;) {
+  var reader = res.body.getReader(), all = total ? new Uint8Array(total) : null, parts = [], got = 0;
+  for (;;) {                                           /* straight into one block when the size is known: phones have little memory */
     var part = await reader.read();
     if (part.done) break;
-    parts.push(part.value);
+    if (all && got + part.value.length <= total) all.set(part.value, got);
+    else { if (all) { parts.push(all.slice(0, got)); all = null; } parts.push(part.value); }
     got += part.value.length;
     if (total) tell(Math.min(99, Math.floor(got * 100 / total)));
   }
-  var all = new Uint8Array(got), at = 0;
-  parts.forEach(function (x) { all.set(x, at); at += x.length; });
-  return all;
+  if (all) return got === total ? all : all.subarray(0, got);
+  var out = new Uint8Array(got), at = 0;
+  parts.forEach(function (x) { out.set(x, at); at += x.length; });
+  return out;
 }
 async function read(id, texts) {
   var pct = 0, beat = setInterval(function () { self.postMessage({id: id, kind: 'step', i: -1, pct: pct}); }, 3000);
@@ -1678,6 +1680,8 @@ async function read(id, texts) {
 self.onmessage = function (ev) { line = line.then(function () { return read(ev.data.id, ev.data.texts); }); };
 """
 SCENE_LINES = ["جزئیات بیشتر در کپشن 👇", "همین حالا پیام بده", "برای دوستانت هم بفرست", "ما را دنبال کن"]
+SCENE_SAYS = {"جزئیات بیشتر در کپشن 👇": "جزئیات بیشتر را در کپشن بخوانید.", "همین حالا پیام بده": "همین حالا به ما پیام بدهید.",
+              "برای دوستانت هم بفرست": "این ویدیو را برای دوستانتان هم بفرستید.", "ما را دنبال کن": "ما را دنبال کنید تا خبرهای بعدی را از دست ندهید."}
 
 
 class PictureError(Exception):
@@ -1887,7 +1891,8 @@ class Studio:
             lines.append(extra[(len(lines) - 1) % len(extra)] if lines else headline)
         return {"source": "offline", "why": "", "caption": "%s ✨\n\nنظر شما چیه؟ توی کامنت‌ها برامون بنویسید 👇" % idea, "hashtags": tags,
                 "headline": headline, "sub": "", "image": idea,
-                "scenes": [{"text": t, "say": t, "image": idea} for t in lines[:n]] if kind == "reel" else []}
+                "scenes": [{"text": t, "image": idea, "say": SCENE_SAYS.get(t) or ("ما را در اینستاگرام دنبال کنید." if t.startswith("@") else t)}
+                           for t in lines[:n]] if kind == "reel" else []}
 
     # ── pictures ──
     def fetch(self, method, url, data=None, headers=None, timeout=120, what="تصویر"):
@@ -2412,6 +2417,7 @@ class VoicePack:
         self.files, self.sources = dict(VOICE_FILES), list(VOICE_SOURCES)
         self.lock, self.stop = threading.Lock(), threading.Event()
         self.busy, self.why, self.part, self.thread = False, "", 0, None
+        self.shown = 0                                 # the progress told so far: it does not go backwards while loading
         self.sure = set()                              # files whose content was checked since the agent started
 
     def have(self, name):
@@ -2427,8 +2433,10 @@ class VoicePack:
         total = sum(v[0] for v in self.files.values())
         done = sum(self.files[n][0] for n in self.files if self.have(n))
         state = "loading" if self.busy else "ready" if done == total else "failed" if self.why else "none"
-        return {"state": state, "pct": 100 if state == "ready" else min(99, int((done + self.part) * 100 // max(1, total))),
-                "why": self.why if state == "failed" else "", "mb": int(round(total / 1e6)), "fetch_mb": VOICE_FETCH_MB}
+        pct = 100 if state == "ready" else min(99, int((done + self.part) * 100 // max(1, total)))
+        if state == "loading":
+            pct = self.shown = max(self.shown, pct)
+        return {"state": state, "pct": pct, "why": self.why if state == "failed" else "", "mb": int(round(total / 1e6)), "fetch_mb": VOICE_FETCH_MB}
 
     def path(self, name):
         return os.path.join(self.dir, name) if name in self.files and self.ready() else None
@@ -2436,7 +2444,7 @@ class VoicePack:
     def start(self):
         with self.lock:
             if not self.busy and not all(self.have(n) and n in self.sure for n in self.files):
-                self.busy, self.why, self.part = True, "", 0
+                self.busy, self.why, self.part, self.shown = True, "", 0, 0
                 self.stop.clear()
                 self.thread = threading.Thread(target=self.run, name="voice-pack", daemon=True)
                 self.thread.start()
@@ -2511,11 +2519,11 @@ class VoicePack:
         if not self.agent.graph.reachable(base):       # a blocked address often just hangs; this finds out in seconds
             raise PackError("به سرور دانلود (%s) دسترسی نبود." % host, net=True)
 
-        def moved(frac, before=0, share=weight):
-            self.part = before + int(frac * share)
+        def moved(frac, share):                        # what is on its way counts as much as the files it will become
+            self.part = int(frac * share)
 
         if archive:                                    # one archive carries them all
-            tmp = self.download(base, archive, moved)
+            tmp = self.download(base, archive, lambda f: moved(f, weight))
             try:
                 with tarfile.open(tmp, "r:gz") as tar:
                     for name in need:
@@ -2525,6 +2533,7 @@ class VoicePack:
                         new = os.path.join(self.dir, name + ".new")
                         with member, open(new, "wb") as fh:
                             shutil.copyfileobj(member, fh, 1 << 16)
+                        self.part = max(0, self.part - self.files[name][0])
                         self.accept(new, name)
             except (tarfile.TarError, KeyError, EOFError, OSError, zlib.error):
                 raise PackError("بستهٔ دانلودشده باز نشد.")
@@ -2534,12 +2543,11 @@ class VoicePack:
                 except OSError:
                     pass
             return
-        before = 0
         for name in need:
             size = self.files[name][0]
-            tmp = self.download(base + name if base.endswith("/") else base, size, lambda f, b=before, sz=size: moved(f, b, sz))
+            tmp = self.download(base + name if base.endswith("/") else base, size, lambda f, sz=size: moved(f, sz))
+            self.part = 0
             self.accept(tmp, name)
-            before += size
 
     def accept(self, path, name):
         """Keeps the file only if it is, byte for byte, the one this agent was written for."""
@@ -4910,7 +4918,7 @@ self.ort = {env: {wasm: {}},
   InferenceSession: {create: async function (model) {
     if (!model || model.length < 8) throw new Error('no voice model');
     var bin = await fetch(self.ort.env.wasm.wasmPaths + 'ort-wasm-simd.wasm');
-    if (!bin.ok) throw new Error('runtime: HTTP ' + bin.status);
+    if (!bin.ok || !(await bin.arrayBuffer()).byteLength) throw new Error('runtime: HTTP ' + bin.status);
     return {inputNames: ['input', 'input_lengths', 'scales'], run: async function (feeds) {
       var n = feeds.input.data.length, rate = 22050, len = Math.round(rate * (0.3 + 0.03 * n)), out = new Float32Array(len);
       if (Number(feeds.input_lengths.data[0]) !== n || feeds.scales.data.length !== 3) throw new Error('bad input');
@@ -4927,6 +4935,7 @@ self.ort = {env: {wasm: {}},
 self.createPiperPhonemize = async function (opts) {
   var data = await fetch(opts.locateFile('piper_phonemize.data')), code = await fetch(opts.locateFile('piper_phonemize.wasm'));
   if (!data.ok || !code.ok) throw new Error('phonemizer files: HTTP ' + data.status + ' ' + code.status);
+  if (!(await data.arrayBuffer()).byteLength || !(await code.arrayBuffer()).byteLength) throw new Error('phonemizer files are empty');
   return {callMain: function (args) {
     JSON.parse(args[args.indexOf('--input') + 1]).forEach(function (item) {
       var ids = [1];
@@ -7175,6 +7184,7 @@ function studio(init, done) {
     cancelAnimationFrame(anim); hush();
     const stale = m.voice === 'ai' ? m.shots.map((x, i) => i).filter(i => m.shots[i].say && (!m.shots[i].clip || m.shots[i].clip.text !== m.shots[i].say)) : [];
     if (stale.length) return readScenes(stale, film);                   /* lines that were changed are read first */
+    devQuit();                                                          /* the narrator has done its part; encoding the video needs the memory */
     const model = reel(), sound = clipsOf(model), bar = h('i'), pct = h('b', null, '۰٪'), halt = {on: false};
     fill(s.body, h('div', {class: 'empty'}, h('i', {class: 'spin'}), h('div', null, 'در حال ساخت ویدیو… ', pct), h('div', {class: 'bar grow'}, bar), h('div', {class: 'muted sm'}, 'همین صفحه را باز و روشن نگه دار.')));
     s.setFoot(h('button', {class: 'btn', onclick: () => { halt.on = true; }}, icon('x'), 'لغو'));
