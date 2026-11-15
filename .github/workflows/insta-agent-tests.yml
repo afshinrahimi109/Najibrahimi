@@ -81,11 +81,12 @@ jobs:
           path: insta-agent/tests/ui/shots
           if-no-files-found: ignore
 
-  # Only when the workflow is started by hand: asks the real AI services for text and a picture. The tests above
-  # never leave the machine, so this is the one place that shows whether those services still answer as expected.
+  # Only on request: asks the real AI services for text and a picture. The tests above never leave the machine,
+  # so this is the one place that shows whether those services still answer as expected. It runs when the workflow
+  # is started by hand, or when the pushed commit's message contains [live-check].
   live:
-    name: Live check of the AI services (manual)
-    if: github.event_name == 'workflow_dispatch'
+    name: Live check of the AI services (on request)
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[live-check]'))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
