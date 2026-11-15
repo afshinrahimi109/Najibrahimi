@@ -85,6 +85,8 @@ try {
   const posts = (await t.api('/api/posts?group=queue')).items;
   t.check('the post waits for the owner', posts.length === 1 && posts[0].status === 'due' && posts[0].media[0].width === 1080, posts.map(p => p.status));
   await t.shot('94-ready');
+  await t.inTop(s => { s.querySelector('[data-kit="box"]').scrollIntoView(); });
+  await t.shot('94b-kit');
   await saveFile(posts[0].media[0].file, 'made-picture.jpg');
 
   // 4. file and caption leave the panel: copy, share, save

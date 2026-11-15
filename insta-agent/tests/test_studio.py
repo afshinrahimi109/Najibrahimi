@@ -384,6 +384,35 @@ class StudioTests(Base):
         self.assertEqual(job["pictures"][0]["file"], "")
         self.assertIn("سرویس تصویر خودت", job["notes"][0])
 
+    def test_descriptions_are_cleaned_and_a_missing_one_costs_only_its_own_picture(self):
+        plan = dict(PLAN, scenes=[{"text": "یک", "image": 'A sign that reads "20% OFF" beside a latte, cozy café'},
+                                  {"text": "دو", "image": "تصویر یک فنجان قهوه"}, {"text": "سه"}],
+                    image="نمی‌دانم")
+        self.text_ai(plan)
+        job = self.make(idea="لاتهٔ پاییزی", kind="reel", scenes=3)
+        self.assertEqual(job["pictures"][0]["prompt"], "A sign beside a latte, cozy cafe")          # no writing asked for
+        self.assertTrue(job["pictures"][0]["file"])
+        for pic in job["pictures"][1:]:                                    # Persian or absent: not sent to an English-only service
+            self.assertEqual((pic["file"], pic["prompt"]), ("", ""))
+            self.assertIn("دستیار برای این تصویر توصیفی نداد", pic["why"])
+        self.assertEqual(len(self.calls("pimg")) + len(self.calls("horde", "generate/async")), 1)
+
+    def test_a_persian_description_is_put_into_english_first(self):
+        self.text_ai(lambda body: '"A slice of carrot cake on a white plate, top view."')
+        job = self.wait(self.rig.ok("POST", "/api/studio/picture", {"prompt": "یک برش کیک هویج روی بشقاب سفید"}))
+        pic = job["pictures"][0]
+        self.assertEqual((pic["prompt"], pic["source"]), ("A slice of carrot cake on a white plate, top view", "free"))
+        asked = self.calls("ptxt")[0][4]["messages"]
+        self.assertEqual(asked[-1]["content"], "یک برش کیک هویج روی بشقاب سفید")
+        self.assertIn("A slice of carrot cake on a white plate", urllib.parse.unquote(self.calls("pimg")[0][2]))
+        # without the assistant nothing is drawn from a description the services cannot read
+        self.sim.ai_text = None
+        self.rig.agent.ai.free_at = 0
+        job = self.wait(self.rig.ok("POST", "/api/studio/picture", {"prompt": "یک برش کیک هویج روی بشقاب سفید"}))
+        self.assertEqual(job["pictures"][0]["file"], "")
+        self.assertIn("تصویرسازها فقط انگلیسی می‌فهمند", job["pictures"][0]["why"])
+        self.assertEqual(len(self.calls("pimg")), 1)
+
     def test_one_more_picture(self):
         job = self.wait(self.rig.ok("POST", "/api/studio/picture", {"prompt": "a red bicycle in the rain", "shape": "square", "style": "3d"}))
         self.assertEqual((job["kind"], job["status"], job["plan"], len(job["pictures"])), ("picture", "done", None, 1))

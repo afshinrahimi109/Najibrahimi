@@ -37,6 +37,7 @@ import sys
 import threading
 import time
 import traceback
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -1542,6 +1543,19 @@ def shorten(text, limit):
     return (cut[:cut.rfind(" ")] if " " in cut[limit // 2:] else text[:limit]).rstrip(" ،,.؛:-") + "…"
 
 
+def no_writing(prompt):
+    """Takes requests for written words out of a picture description: picture models turn them into scribble, and the
+    panel writes the real words on the picture itself."""
+    quoted, verbs = r"[\"“”«»][^\"“”«»]{0,80}[\"“”«»]", r"(?:that |which )?(?:reads?|reading|says?|saying|labell?ed|titled|written)\b"
+    text = re.sub(r"\b%s:?\s*%s" % (verbs, quoted), " ", str(prompt or ""), flags=re.I)      # ... that reads "20% OFF"
+    text = re.sub(quoted, " ", text)
+    text = re.sub(r"\b%s[^,.;]*" % verbs, " ", text, flags=re.I)                              # ... saying Welcome
+    text = re.sub(r"\bwith (?:the )?(?:words?|text|letters|caption|inscription|slogan)\b[^,.;]*", " ", text, flags=re.I)
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")       # café → cafe; English only
+    text = re.sub(r"\s+([,.;])", r"\1", re.sub(r"\s+", " ", text))
+    return re.sub(r"(?:[,.;]\s*){2,}", ", ", text).strip(" ,.;")
+
+
 def loose_json(text):
     """The first JSON object inside an answer that may carry a code fence or a few words around it."""
     text = str(text or "")
@@ -1585,15 +1599,15 @@ class Studio:
                     "و \"image\" (توصیف انگلیسی تصویر همان صحنه، با همان قاعده‌ها). صحنهٔ اول توجه را جلب کند و صحنهٔ آخر دعوت به اقدام باشد.\n" % n)
         return ai.persona() + " هر چه می‌نویسی فقط یک شیء JSON معتبر باشد.", ask
 
-    def plan(self, idea, kind, n, job=None):
-        """Caption, hashtags, headline and one picture description per scene: from the assistant, or from templates."""
+    def ask(self, system, question, job=None):
+        """Asks the assistant and, inside a job, waits for the free service's turn. Returns (answer, why there is none)."""
         ai, text, why = self.agent.ai, "", ""
-        reel = kind == "reel"
-        system, ask = self.question(idea, kind, n)
+        busy = job["step"] if job else ""
         for attempt in (0, 1, 2):
             try:
-                # the free model needs 20 to 40 seconds for this much; the job runs in the background anyway
-                text = ai.ask(system, ask, max_tokens=1500, timeout=PLAN_TIMEOUT)
+                # the free model needs 20 to 40 seconds for a whole post; the job runs in the background anyway
+                text = ai.ask(system, question, max_tokens=1500, timeout=PLAN_TIMEOUT)
+                why = ""
                 break
             except AIDown as e:
                 wait = e.wait
@@ -1604,7 +1618,20 @@ class Studio:
                 job["step"] = "سرویس رایگان متن هر ۴۵ ثانیه یک پاسخ می‌دهد؛ %s ثانیهٔ دیگر…" % fa(int(wait + GRACE))
                 if job["cancel"].wait(wait + GRACE):
                     break
-                job["step"] = "در حال نوشتن کپشن و چیدن صحنه‌ها…"
+                job["step"] = busy
+        return text, why
+
+    @staticmethod
+    def readable(prompt):
+        """Can a picture service make sense of this description? They read English only."""
+        letters = re.findall(r"[^\W\d_]", str(prompt or ""))
+        return len(letters) >= 3 and sum(1 for ch in letters if ch.isascii()) >= 0.6 * len(letters)
+
+    def plan(self, idea, kind, n, job=None):
+        """Caption, hashtags, headline and one picture description per scene: from the assistant, or from templates."""
+        reel = kind == "reel"
+        system, ask = self.question(idea, kind, n)
+        text, why = self.ask(system, ask, job)
         base = self.offline_plan(idea, kind, n)
         data = loose_json(text)
         if not data:
@@ -1622,14 +1649,18 @@ class Studio:
             t = "#" + re.sub(r"[\s#]+", "_", str(t).strip().lstrip("#")).strip("_")
             if len(t) > 1 and norm(t) not in [norm(x) for x in tags]:
                 tags.append(t[:60])
+
+        def pic(value):
+            return shorten(no_writing(value), 500) if isinstance(value, str) else ""
+
         out.update(caption=caption or base["caption"], hashtags=tags[:GOOD_HASHTAGS] or base["hashtags"],
                    headline=s(data.get("headline"), 70) or base["headline"], sub=s(data.get("sub"), 90),
-                   image=s(data.get("image"), 500) or base["image"])
+                   image=pic(data.get("image")))
         if reel:
             scenes = []
             for i, sc in enumerate(data.get("scenes") if isinstance(data.get("scenes"), list) else []):
                 if isinstance(sc, dict) and len(scenes) < n:
-                    scenes.append({"text": s(sc.get("text"), 80) or base["scenes"][i]["text"], "image": s(sc.get("image"), 500) or out["image"]})
+                    scenes.append({"text": s(sc.get("text"), 80) or base["scenes"][i]["text"], "image": pic(sc.get("image")) or out["image"]})
             out["scenes"] = scenes + base["scenes"][len(scenes):]
         return out
 
@@ -1927,13 +1958,12 @@ class Studio:
         job["plan"] = plan
         if not want:
             return
-        letters = re.findall(r"[^\W\d_]", idea)
-        if plan["source"] != "ai" and sum(1 for ch in letters if ch.isascii()) < 0.6 * max(1, len(letters)):
-            # The picture services only understand English; without the assistant's description the picture would
-            # show something else than the idea, so a drawn background is the honest choice.
-            for pic in job["pictures"]:
-                pic["why"] = "دستیار در دسترس نبود تا ایده را برای تصویرساز توصیف کند؛ برای همین تصویر هوش مصنوعی ساخته نشد."
-            return
+        # The picture services only understand English. Without a description from the assistant the picture would
+        # show something else than the idea, so a drawn background is the honest choice.
+        for pic in job["pictures"]:
+            if not self.readable(pic["prompt"]):
+                pic["why"] = ("دستیار در دسترس نبود تا ایده را برای تصویرساز توصیف کند؛ برای همین تصویر هوش مصنوعی ساخته نشد."
+                              if plan["source"] != "ai" else "دستیار برای این تصویر توصیفی نداد؛ در «تصویر دیگر» خودت بنویس چه چیزی را نشان بدهد.")
         self.draw(job, "reel" if kind == "reel" else "post", style)
 
     def redo(self, data):
@@ -1945,7 +1975,18 @@ class Studio:
         return self.start("picture", self.do_redo, prompt, shape, style)
 
     def do_redo(self, job, prompt, shape, style):
-        job["pictures"] = [{"prompt": prompt, "file": "", "preview": "", "source": "", "why": ""}]
+        pic = {"prompt": prompt, "file": "", "preview": "", "source": "", "why": ""}
+        job["pictures"] = [pic]
+        if not self.readable(prompt):                  # written in Persian: the assistant puts it into English first
+            job["step"] = "در حال برگرداندن توصیف به انگلیسی…"
+            text, why = self.ask("You translate picture descriptions into English for an image generator. Answer with the English "
+                                 "description only: one or two sentences, no quotes, no explanation.", prompt, job)
+            english = shorten(no_writing(text.strip().strip("\"'«»")), 500)
+            if not self.readable(english):
+                pic["why"] = ("تصویرسازها فقط انگلیسی می‌فهمند و دستیار الان در دسترس نبود تا توصیف را برگرداند. "
+                              "کمی بعد دوباره بزن یا توصیف را انگلیسی بنویس.")
+                return
+            pic["prompt"] = english
         self.draw(job, shape, style)
 
     def draw(self, job, shape, style):
@@ -1953,6 +1994,8 @@ class Studio:
         for i, pic in enumerate(job["pictures"]):
             if job["cancel"].is_set():
                 return
+            if pic["why"]:
+                continue                               # already known to be undrawable
             job["step"] = "در حال کشیدن تصویر…" if total == 1 else "در حال کشیدن تصویر %s از %s…" % (fa(i + 1), fa(total))
             try:
                 f, source = self.picture(pic["prompt"], shape, style, job)
@@ -3471,7 +3514,7 @@ class Agent:
         if not (t["token"] and t["chat_id"]):
             return False
         if f["size"] > 50 * 1024 * 1024:
-            raise UserError("این فایل برای ربات تلگرام بزرگ است (بیش از ۵۰ مگابایت)؛ «ذخیره در گوشی» را بزن.")
+            raise UserError("این فایل برای ربات تلگرام بزرگ است (بیش از ۵۰ مگابایت)؛ «ذخیره» را بزن.")
         method, field = ("sendVideo", "video") if f["kind"] == "video" and f["ext"] in ("mp4", "mov") else ("sendDocument", "document")
         boundary = "----ia" + secrets.token_hex(12)
         with open(self.store.path(f), "rb") as fh:
@@ -5159,7 +5202,8 @@ const ICONS = {
   hash: 'M4 9h16 M4 15h16 M10 3L8 21 M16 3l-2 18', external: 'M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14L21 3',
   alert: 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z M12 9v4 M12 17h.01',
   spark: 'M12 3l1.8 5.6L19.5 10l-5.7 1.6L12 17l-1.8-5.4L4.5 10l5.7-1.4z M19 16v4 M17 18h4', link: 'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71 M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71',
-  help: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3 M12 17h.01', calendar: 'M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M16 2v4 M8 2v4 M3 10h18'
+  help: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3 M12 17h.01',
+  download: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3', copy: 'M11 9h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2z M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1', calendar: 'M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M16 2v4 M8 2v4 M3 10h18'
 };
 const KIND = {image: ['پست', 'image'], carousel: ['چندتایی', 'layers'], reel: ['ریل', 'film'], story: ['استوری', 'story']};
 const STATUS = {draft: ['پیش‌نویس', ''], scheduled: ['زمان‌بندی‌شده', 'info'], publishing: ['در حال انتشار', 'warn'], published: ['منتشرشده', 'ok'], failed: ['ناموفق', 'bad'], missed: ['جامانده', 'warn'], canceled: ['لغوشده', ''], due: ['وقت انتشار', 'pri']};
@@ -5533,9 +5577,9 @@ function handKit(p, again) {
     h('div', {class: 'muted sm'}, !files.length ? (links.length ? 'فایل این پست یک لینک است؛ بازش کن و ذخیره کن.' : 'این یادآوری فایل ندارد؛ عکس یا ویدیو را در خود اینستاگرام انتخاب کن.')
       : canShare ? 'با «ارسال به اینستاگرام» فایل مستقیم به اپ می‌رود و کپشن کپی می‌شود؛ آنجا بچسبانش.' : 'فایل را ذخیره کن، کپشن را کپی کن و در اپ اینستاگرام بگذار.'),
     canShare ? btn('ارسال به اینستاگرام', 'send', share, 'pri block', 'share') : null,
-    h('div', {class: 'row'}, files.length ? btn('ذخیره در گوشی', 'upload', save, 'grow', 'save') : null,
+    h('div', {class: 'row'}, files.length ? btn('ذخیره', 'download', save, 'grow', 'save') : null,
       links.map(m => h('a', {class: 'btn grow', href: m.url, target: '_blank', rel: 'noopener'}, icon('external'), 'باز کردن فایل')),
-      p.caption ? btn('کپی کپشن', 'layers', async () => { await copyText(p.caption); toast('کپشن کپی شد ✓'); }, 'grow', 'copy') : null),
+      p.caption ? btn('کپی کپشن', 'copy', async () => { await copyText(p.caption); toast('کپشن کپی شد ✓'); }, 'grow', 'copy') : null),
     S.st.telegram && (files.length || p.caption) ? btn('بفرست به تلگرام خودم', 'send', async () => { await POST('/api/posts/' + p.id + '/telegram'); toast('فایل و کپشن در تلگرام توست ✓'); }, 'block', 'telegram') : null,
     btn('منتشر کردم', 'check', async () => { await POST('/api/posts/' + p.id + '/done'); toast('ثبت شد ✓'); await again(); }, 'block', 'done'));
 }
@@ -6041,7 +6085,7 @@ function studio(init, done) {
   const redo = (i, prompt) => run(null, async () => {
     watch(await POST('/api/studio/picture', {prompt, shape: m.kind === 'reel' ? 'reel' : 'post', style: m.style}), async job => {
       const p = job.pictures[0], sh = m.shots[i];
-      sh.prompt = prompt;
+      sh.prompt = p.prompt || prompt;
       if (p.file) Object.assign(sh, {src: p.preview, from: p.source, why: '', img: await loadPic(p.preview)});
       else toast(p.why || 'تصویر ساخته نشد', 'bad');
       m.notes = (m.notes || []).concat(job.notes.filter(x => !(m.notes || []).includes(x)));
@@ -6058,9 +6102,9 @@ function studio(init, done) {
       (m.notes || []).map(x => h('div', {class: 'sm amber'}, x)), demo()];
   };
   const describe = i => {
-    const sh = m.shots[i], ta = h('textarea', {class: 'in ltr', rows: 3, 'aria-label': 'توصیف تصویر', value: sh.prompt});
+    const sh = m.shots[i], ta = h('textarea', {class: 'in', dir: 'auto', rows: 3, 'aria-label': 'توصیف تصویر', value: sh.prompt});
     return h('details', {class: 'box'}, h('summary', null, icon('image'), m.shots.length > 1 ? 'تصویر صحنهٔ ' + fa(i + 1) : 'تصویر دیگر'),
-      h('div', {class: 'col'}, h('div', {class: 'muted sm'}, 'تصویرساز انگلیسی را بهتر می‌فهمد. بنویس تصویر چه چیزی را نشان بدهد.'), ta,
+      h('div', {class: 'col'}, h('div', {class: 'muted sm'}, 'بنویس تصویر چه چیزی را نشان بدهد. فارسی هم می‌شود (دستیار به انگلیسی برمی‌گرداند)، ولی انگلیسی سریع‌تر و دقیق‌تر است.'), ta,
         h('button', {class: 'btn', 'data-redo': i, onclick: () => redo(i, ta.value.trim())}, icon('refresh'), 'تصویر تازه بساز')));
   };
   const result = () => {
@@ -6333,7 +6377,7 @@ async function settingsSheet() {
       () => ({media: {method: method.value, public_url: pub.value, temp_ok: tempOk}})),
     box('telegram', 'send', 'اعلان در تلگرام', [h('p', {class: 'muted sm'}, 'با @BotFather یک ربات بساز، توکنش را اینجا بگذار و شناسهٔ عددی خودت را (مثلاً از @userinfobot) بنویس. هشدارها و گزارش روزانه برایت فرستاده می‌شود؛ در انتشار دستی، سر وقتِ هر یادآوری فایل و کپشن هم به همین گفتگو می‌آید.'), field('توکن ربات', tgToken), field('شناسهٔ چت', tgChat)],
       () => ({telegram: {token: tgToken.value, chat_id: tgChat.value}}), h('button', {class: 'btn', onclick: e => run(e.currentTarget, async () => { await POST('/api/telegram/test'); toast('پیام آزمایشی فرستاده شد ✓'); })}, 'آزمایش')),
-    box('network', 'link', 'پروکسی (فیلترشکن)', [h('p', {class: 'muted sm'}, 'اگر اینستاگرام فقط با فیلترشکن باز می‌شود، نشانی پروکسی HTTP آن را بنویس. خالی یعنی اتصال مستقیم.'), field('پروکسی HTTP', proxy)], () => ({network: {proxy: proxy.value}})));
+    box('network', 'link', 'پروکسی (فیلترشکن)', [h('p', {class: 'muted sm'}, 'اگر اینستاگرام، تلگرام یا سرویس‌های هوش مصنوعی فقط با فیلترشکن باز می‌شوند و فیلترشکنت برای همهٔ برنامه‌ها روشن نیست، نشانی پروکسی HTTP آن را بنویس. خالی یعنی اتصال مستقیم.'), field('پروکسی HTTP', proxy)], () => ({network: {proxy: proxy.value}})));
 }
 function assistantSheet() {
   const s = sheet('دستیار'), box = h('div', {class: 'chat'}), ta = h('textarea', {class: 'in', rows: 1, placeholder: 'بپرس…', 'aria-label': 'پیام به دستیار'}), hist = [];
@@ -6356,7 +6400,7 @@ function helpSheet() {
     sec('ساختن پست از روی یک ایده', 'در «بساز» ایده‌ات را بنویس: ایجنت کپشن و هشتگ می‌نویسد، تصویر را از سرویس هوش مصنوعی می‌گیرد و عکس نهایی یا ریل را روی همین دستگاه می‌سازد.',
       'سرویس‌های رایگان تصویر کند و کوچک‌اند و گاهی جواب نمی‌دهند؛ آن وقت ایجنت طرح خودش را می‌کشد. با کلید Pollinations (در تنظیمات) نتیجه بهتر و سریع‌تر است.',
       'ریل از چند تصویر با حرکت و نوشته ساخته می‌شود و صدا ندارد؛ آهنگ را موقع انتشار در اینستاگرام اضافه کن. فیلم‌سازی کامل با هوش مصنوعی فقط در سرویس‌های پولی هست.'),
-    sec('انتشار با خودت (بدون اتصال پیج)', 'پست آماده را باز کن: «ارسال به اینستاگرام» فایل را به اپ می‌دهد و کپشن را کپی می‌کند؛ آنجا بچسبانش. اگر این دکمه نبود، «ذخیره در گوشی» و «کپی کپشن» را بزن.',
+    sec('انتشار با خودت (بدون اتصال پیج)', 'پست آماده را باز کن: «ارسال به اینستاگرام» فایل را به اپ می‌دهد و کپشن را کپی می‌کند؛ آنجا بچسبانش. اگر این دکمه نبود، «ذخیره» و «کپی کپشن» را بزن.',
       'برای هر پست می‌توانی یادآوری بگذاری؛ سر وقت در پنل (و در تلگرام، اگر وصلش کرده باشی) خبر می‌دهد. بعد از انتشار «منتشر کردم» را بزن.'),
     sec('ایجنت چه کارهایی می‌کند؟', 'با اتصال پیج: پست، پست چندتایی، ریل و استوری را همین حالا یا در زمان دلخواه منتشر می‌کند.', 'کامنت‌ها و دایرکت‌ها را در یک صندوق نشان می‌دهد و می‌توانی از همین‌جا جواب بدهی، مخفی یا حذف کنی.',
       'طبق قانون‌هایی که می‌نویسی خودش جواب می‌دهد و کامنت‌های تبلیغاتی را مخفی می‌کند.', 'آمار پیج و بهترین ساعت انتشار را نشان می‌دهد و در نوشتن کپشن و هشتگ کمک می‌کند.'),
