@@ -248,7 +248,7 @@ try {
   await page.click('.sheet [data-studio-go]');
   await page.waitForSelector('.sheet canvas.stage', {timeout: 60000});
   await sleep(500);
-  t.check('the demo says its words and pictures are made up', await t.waitText('حالت نمایشی: متن‌ها و تصویرها ساختگی‌اند', 3000));
+  t.check('the demo says its words and pictures are made up', await t.waitText('حالت نمایشی: متن‌ها، تصویرها و صدای گوینده ساختگی‌اند', 3000));
   await t.shot('52-studio');
   await page.click('.sheet [data-studio-done]');
   await page.waitForFunction(() => !document.querySelector('.sheet canvas.stage') && document.querySelector('.sheet .mitem img'), {timeout: 20000});
