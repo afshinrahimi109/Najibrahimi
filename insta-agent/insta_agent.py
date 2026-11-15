@@ -48,6 +48,7 @@ VERSION = "1.0.0"
 DEFAULT_PORT = 8787
 API_VERSIONS = ["v26.0", "v27.0", "v25.0", ""]
 KINDS = ("image", "carousel", "reel", "story")
+IMAGE_MODES = ("auto", "pollinations", "horde", "custom", "off")       # where the studio gets its pictures from
 KIND_FA = {"image": "پست", "carousel": "پست چندتایی", "reel": "ریل", "story": "استوری"}
 IMAGE_MAX = 8 * 1024 * 1024
 VIDEO_MAX = 300 * 1024 * 1024
@@ -358,18 +359,20 @@ class DB:
 
 DEFAULT_SETTINGS = {
     "autopilot": True,
+    "manual": False,                                   # no page connected: the agent prepares, the owner posts by hand
     "auto": {"comment_reply": False, "spam_hide": False, "dm_reply": False, "ai_suggest": False, "ai_send": False,
              "daily_report": False},
     "since": {"comment_reply": 0.0, "spam_hide": 0.0, "dm_reply": 0.0, "ai_suggest": 0.0, "ai_send": 0.0,
               "daily_report": 0.0},
     "limits": {"per_hour": 30, "cooldown_min": 30, "daily_posts": 25, "quiet_from": "", "quiet_to": ""},
-    "brand": {"about": "", "tone": "صمیمی و محترمانه", "hashtags": ""},
+    "brand": {"about": "", "tone": "صمیمی و محترمانه", "hashtags": "", "handle": ""},
     "ai": {"mode": "free", "url": "", "model": "", "key": ""},
+    "studio": {"image": "auto", "key": "", "url": "", "model": ""},
     "media": {"method": "auto", "public_url": "", "temp_ok": False},
     "network": {"proxy": ""},
     "telegram": {"token": "", "chat_id": ""},
 }
-SECRET_FIELDS = (("ai", "key"), ("telegram", "token"))
+SECRET_FIELDS = (("ai", "key"), ("studio", "key"), ("telegram", "token"))
 
 
 def deep_merge(base, extra):
@@ -473,7 +476,14 @@ class Settings:
             s["ai"]["mode"] = "free"
         if s["media"]["method"] not in ("auto", "public", "tunnel", "temp"):
             s["media"]["method"] = "auto"
-        for section, key, label in (("ai", "url", "نشانی سرویس هوش مصنوعی"), ("media", "public_url", "نشانی عمومی")):
+        if s["studio"]["image"] not in IMAGE_MODES:
+            s["studio"]["image"] = "auto"
+        handle = s["brand"]["handle"].strip().lstrip("@").strip()
+        if handle and not re.fullmatch(r"[A-Za-z0-9._]{1,30}", handle):
+            raise UserError("نام کاربری پیج فقط حروف انگلیسی، عدد، نقطه و زیرخط دارد (مثلاً my.page).")
+        s["brand"]["handle"] = handle
+        for section, key, label in (("ai", "url", "نشانی سرویس هوش مصنوعی"), ("media", "public_url", "نشانی عمومی"),
+                                    ("studio", "url", "نشانی سرویس تصویر")):
             v = s[section][key]
             if v and not re.fullmatch(r"https?://[\x21-\x7e]+", v):
                 raise UserError(label + " باید با http:// یا https:// شروع شود.")
@@ -987,16 +997,28 @@ def sniff(head):
         if brand[:2] == b"qt":
             return "video", "mov", "video/quicktime"
         return "video", "mp4", "video/mp4"
+    if head[:4] == b"\x1a\x45\xdf\xa3":
+        return "video", "webm", "video/webm"          # what some browsers record; fine for the gallery, not for the API
     return None
 
 
 def image_size(path):
     try:
         with open(path, "rb") as fh:
-            head = fh.read(26)
+            head = fh.read(30)
             if head[:8] == b"\x89PNG\r\n\x1a\n":
                 w, h = struct.unpack(">II", head[16:24])
                 return int(w), int(h)
+            if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+                form = head[12:16]
+                if form == b"VP8X":
+                    return 1 + int.from_bytes(head[24:27], "little"), 1 + int.from_bytes(head[27:30], "little")
+                if form == b"VP8L":
+                    bits = int.from_bytes(head[21:25], "little")
+                    return 1 + (bits & 0x3FFF), 1 + ((bits >> 14) & 0x3FFF)
+                if form == b"VP8 ":
+                    return int.from_bytes(head[26:28], "little") & 0x3FFF, int.from_bytes(head[28:30], "little") & 0x3FFF
+                return 0, 0
             if head[:2] != b"\xff\xd8":
                 return 0, 0
             fh.seek(2)
@@ -1296,7 +1318,7 @@ class AI:
         b, a = self.settings.all()["brand"], self.ig.acct
         return ("تو دستیار مدیریت یک پیج اینستاگرام هستی. نام پیج: @%s (%s). دربارهٔ پیج: %s. لحن نوشتن: %s. "
                 "فارسی روان و طبیعی بنویس؛ کوتاه و بدون مقدمه و توضیح اضافه. چیزی را که نمی‌دانی از خودت نساز."
-                % (a.get("username") or "page", a.get("name") or "", b["about"] or a.get("bio") or "نامشخص", b["tone"]))
+                % (a.get("username") or b["handle"] or "page", a.get("name") or "", b["about"] or a.get("bio") or "نامشخص", b["tone"]))
 
     def brand_tags(self):
         out = []
@@ -1591,7 +1613,8 @@ class Publisher:
             else:
                 media.append({"url": m.get("url"), "type": m.get("type") or "image", "preview": m.get("url")})
         out = {k: r[k] for k in POST_COLS}
-        out.update(media=media, opts=jload(r["opts"], {}), manual=bool(r["manual"]))
+        out.update(media=media, opts=jload(r["opts"], {}), manual=bool(r["manual"]),
+                   by_hand=(jload(r["state"], {}) or {}).get("by") == "hand")
         return out
 
     def get(self, pid):
@@ -1599,7 +1622,7 @@ class Publisher:
 
     def list(self, group="all"):
         where, order = {
-            "queue": ("status IN ('scheduled','publishing','failed','missed')", "scheduled_at"),
+            "queue": ("status IN ('due','scheduled','publishing','failed','missed')", "status!='due', scheduled_at"),
             "drafts": ("status IN ('draft','canceled')", "updated_at DESC"),
             "published": ("status='published'", "published_at DESC"),
         }.get(group, ("1=1", "updated_at DESC"))
@@ -1613,11 +1636,14 @@ class Publisher:
         return m.get("type") or "image"
 
     def validate(self, kind, caption, media, opts):
-        if not self.agent.ig.connected:
+        hand = self.agent.hand()
+        if not self.agent.ig.connected and not hand:
             raise UserError("اول پیج را وصل کن.")
         kinds = [self.media_kind(m) for m in media]
         n = len(media)
-        if kind == "image" and not (n == 1 and kinds[0] == "image"):
+        if hand and not n:
+            pass                                       # a reminder may be just a caption: the owner picks the file in Instagram
+        elif kind == "image" and not (n == 1 and kinds[0] == "image"):
             raise UserError("پست تکی یک عکس می‌خواهد. (برای ویدیو «ریل» و برای چند عکس «چندتایی» را انتخاب کن.)")
         if kind == "reel" and not (n == 1 and kinds[0] == "video"):
             raise UserError("ریل یک ویدیو می‌خواهد.")
@@ -1639,6 +1665,10 @@ class Publisher:
             f = self.agent.store.get(m["file"])
             if not f or not os.path.exists(self.agent.store.path(f)):
                 raise UserError("یکی از فایل‌ها دیگر روی دستگاه نیست؛ دوباره انتخابش کن.")
+            if hand:
+                continue                               # posted by hand: the Instagram app crops and converts by itself
+            if f["ext"] == "webm":
+                raise UserError("اینستاگرام ویدیوی WebM نمی‌پذیرد. ویدیو را دوباره (با مرورگر Chrome) بساز تا MP4 شود.")
             if kind == "story" and f["kind"] == "video" and f["size"] > STORY_VIDEO_MAX:
                 raise UserError("ویدیوی استوری باید کمتر از ۱۰۰ مگابایت (و حداکثر ۶۰ ثانیه) باشد.")
             if f["kind"] == "image" and kind != "story" and f["width"] and f["height"]:
@@ -1696,6 +1726,8 @@ class Publisher:
             status = "scheduled"
             if action == "now":
                 when, manual = now(), 1
+                if self.agent.hand():
+                    status, manual = "due", 0          # nothing is sent anywhere: the owner posts it by hand now
             elif when < now() + 30:
                 raise UserError("زمان انتشار باید در آینده باشد.")
         elif action != "draft":
@@ -1730,9 +1762,26 @@ class Publisher:
                 raise UserError("این پست همین حالا در حال انتشار است.")
             self.validate(r["kind"], r["caption"], jload(r["media"], []), jload(r["opts"], {}))
             state = self.carry_state(jload(r["state"], {}))
+            if self.agent.hand():
+                self.db.x("UPDATE posts SET status='due', manual=0, scheduled_at=?, attempts=0, next_try_at=0, error='', "
+                          "progress='', updated_at=? WHERE id=?", (now(), now(), pid))
+                return self.get(pid)
             self.db.x("UPDATE posts SET status='scheduled', manual=1, scheduled_at=?, attempts=0, next_try_at=0, error='', "
                       "progress='', state=?, updated_at=? WHERE id=?", (now(), jdump(state), now(), pid))
         self.agent.wake.set()
+        return self.get(pid)
+
+    def done_by_hand(self, pid):
+        """The owner says: I have posted this one myself in the Instagram app."""
+        with self.lock:
+            r = self.raw(pid)
+            if r["status"] == "published":
+                raise UserError("این پست قبلاً منتشرشده علامت خورده است.")
+            if r["status"] == "publishing" or (jload(r["state"], {}) or {}).get("sent"):
+                raise UserError("ایجنت همین حالا مشغول انتشار این پست است؛ چند لحظه صبر کن.")
+            self.db.x("UPDATE posts SET status='published', published_at=?, updated_at=?, error='', progress='', manual=0, "
+                      "attempts=0, next_try_at=0, state=? WHERE id=?", (now(), now(), jdump({"stage": "done", "by": "hand"}), pid))
+        self.agent.note("%s را خودت منتشر کردی ✓" % KIND_FA[r["kind"]], "ok", "publish")
         return self.get(pid)
 
     def stoppable(self, r):
@@ -1807,6 +1856,19 @@ class Publisher:
         delay = wait if wait is not None else RETRY_BACKOFF[n - 1]
         self.db.x("UPDATE posts SET attempts=?, next_try_at=?, error=?, progress=? WHERE id=?",
                   (n, now() + delay, why, "تلاش دوباره تا %s دقیقهٔ دیگر" % fa(max(1, int(round(delay / 60.0)))), r["id"]))
+
+    def tick_hand(self):
+        """Posting by hand: at its time a post only becomes "due" and the owner is told (panel and Telegram)."""
+        t = now()
+        for row in self.db.q("SELECT id FROM posts WHERE status='scheduled' AND scheduled_at<=? ORDER BY scheduled_at LIMIT 10", (t,)):
+            with self.lock:
+                r = self.db.one("SELECT * FROM posts WHERE id=?", (row["id"],))
+                if not r or r["status"] != "scheduled" or r["scheduled_at"] > t:
+                    continue                           # changed from the panel a moment ago
+                self.db.x("UPDATE posts SET status='due', manual=0, error='', progress='', updated_at=? WHERE id=?", (t, r["id"]))
+            first = (r["caption"] or "").strip().split("\n")[0][:60]
+            self.agent.note("وقت انتشار %s رسید%s. پنل را باز کن، فایل را ذخیره و کپشن را کپی کن و در اینستاگرام بگذار."
+                            % (KIND_FA[r["kind"]], (": «%s»" % first) if first else ""), "alert", "due")
 
     def tick(self):
         t = now()
@@ -2663,6 +2725,9 @@ class Agent:
             if self.sim is not None and self.cfg.demo:
                 self.sim.live_tick()
             if not self.ig.connected or self.ig.acct.get("invalid"):
+                if self.hand():
+                    self.job("remind", 0, self.publisher.tick_hand)
+                    self.job("house", 3600, self.store.cleanup)
                 return
             self.job("publish", 0, self.publisher.tick)
             if now() < self.cool_until:
@@ -2784,8 +2849,19 @@ class Agent:
                    fa(self.db.val("SELECT COUNT(*) FROM actions WHERE actor!='user' AND ts>?", (since,))),
                    fa(self.inbox.open_count()), fa(self.direct.open_count())))
 
+    def hand(self):
+        """No page is connected and the owner chose to post by hand: the agent prepares everything, the owner publishes."""
+        return not self.ig.connected and bool(self.settings.get("manual"))
+
     def facts(self):
         a = self.ig.acct
+        if not self.ig.connected:
+            count = self.db.val
+            return ("پیج به ایجنت وصل نیست؛ صاحب پیج خودش در اپ اینستاگرام پست می‌گذارد و ایجنت محتوا را آماده و یادآوری می‌کند.\n"
+                    "آمادهٔ انتشار: %s | یادآوری‌های پیش رو: %s | پیش‌نویس: %s"
+                    % (fa(count("SELECT COUNT(*) FROM posts WHERE status='due'")),
+                       fa(count("SELECT COUNT(*) FROM posts WHERE status='scheduled'")),
+                       fa(count("SELECT COUNT(*) FROM posts WHERE status IN ('draft','canceled')"))))
         return ("دنبال‌کننده: %s | دنبال‌شونده: %s | تعداد پست: %s\nکامنت منتظر پاسخ: %s | دایرکت منتظر پاسخ: %s\n"
                 "پست در صف انتشار: %s | پیش‌نویس: %s\nبهترین ساعت‌های انتشار: %s"
                 % (fa(a.get("followers") or 0), fa(a.get("follows") or 0), fa(a.get("media_count") or 0),
@@ -2908,7 +2984,7 @@ class Agent:
         count = self.db.val
         nxt = self.db.one("SELECT * FROM posts WHERE status='scheduled' ORDER BY scheduled_at LIMIT 1")
         return {
-            "version": VERSION, "demo": self.cfg.demo, "connected": self.ig.connected, "now": t,
+            "version": VERSION, "demo": self.cfg.demo, "connected": self.ig.connected, "manual": self.hand(), "now": t,
             "account": {k: a.get(k) for k in ("username", "name", "picture", "followers", "follows", "media_count", "bio",
                                               "login", "invalid", "token_expires", "connected_at", "last_username")},
             "autopilot": s["autopilot"], "auto": s["auto"], "quiet": self.quiet(),
@@ -2917,6 +2993,7 @@ class Agent:
                 "scheduled": count("SELECT COUNT(*) FROM posts WHERE status='scheduled'"),
                 "publishing": count("SELECT COUNT(*) FROM posts WHERE status='publishing'"),
                 "failed": count("SELECT COUNT(*) FROM posts WHERE status IN ('failed','missed')"),
+                "due": count("SELECT COUNT(*) FROM posts WHERE status='due'"),
                 "drafts": count("SELECT COUNT(*) FROM posts WHERE status IN ('draft','canceled')"),
                 "published_today": count("SELECT COUNT(*) FROM posts WHERE status='published' AND published_at>=?", (day,)),
                 "auto_today": count("SELECT COUNT(*) FROM actions WHERE actor!='user' AND ts>=?", (day,)),
@@ -3855,11 +3932,11 @@ def api_call(app, method, path, q, body):
         if P:
             return pub.save(body)
         return {"items": pub.list(q.get("group") or "all")}
-    m = re.fullmatch(r"posts/(\d+)(?:/(publish|cancel|duplicate))?", path)
+    m = re.fullmatch(r"posts/(\d+)(?:/(publish|cancel|duplicate|done))?", path)
     if m:
         pid, action = int(m.group(1)), m.group(2)
         if action and P:
-            return getattr(pub, {"publish": "publish_now", "cancel": "cancel", "duplicate": "duplicate"}[action])(pid)
+            return getattr(pub, {"publish": "publish_now", "cancel": "cancel", "duplicate": "duplicate", "done": "done_by_hand"}[action])(pid)
         if not action and G:
             return pub.get(pid)
         if not action and P:

@@ -96,59 +96,63 @@ def show(name, status, headers, raw, took, want=None):
 
 
 def check_text():
+    """One free reply per 45 seconds and per address: every question here waits for its own turn."""
     n = random.randint(10000, 99999)
     base = "https://text.pollinations.ai/"
-    show("legacy text GET", *http("GET", base + urllib.parse.quote("Write the number %d and nothing else" % n), timeout=60), want=str(n))
-    status, headers, raw, took = http("GET", base + "models", timeout=60)
-    try:
-        names = [(m.get("name"), m.get("tier"), m.get("community")) for m in json.loads(raw.decode("utf-8"))]
-    except Exception:
-        names = raw[:600].decode("utf-8", "replace")
-    note("notice", "legacy text models", "status=%s %s" % (status, json.dumps(names)[:3500]))
-    q = urllib.parse.urlencode({"model": "openai", "system": PLAN_SYSTEM, "private": "true", "seed": n})
-    show("legacy text GET: Persian plan with system", *http("GET", base + urllib.parse.quote(PLAN_ASK) + "?" + q, timeout=90))
-    q = urllib.parse.urlencode({"system": PLAN_SYSTEM, "private": "true", "seed": n + 1, "json": "true"})
-    show("legacy text GET: Persian plan with json=true and no model", *http("GET", base + urllib.parse.quote(PLAN_ASK) + "?" + q, timeout=90))
+    q = urllib.parse.urlencode({"model": "openai-fast", "system": PLAN_SYSTEM, "private": "true", "seed": n})
+    show("classic text GET: Persian plan with system", *http("GET", base + urllib.parse.quote(PLAN_ASK) + "?" + q, timeout=75))
+    time.sleep(47)
+    msgs = [{"role": "system", "content": PLAN_SYSTEM}, {"role": "user", "content": PLAN_ASK}]
+    show("classic POST /openai (first in its window)", *http("POST", base + "openai", {"model": "openai-fast", "messages": msgs, "seed": n}, timeout=75))
 
 
 def check_text_post():
     n = random.randint(10000, 99999)
+    time.sleep(47)
     msgs = [{"role": "system", "content": PLAN_SYSTEM}, {"role": "user", "content": "برای پستی با موضوع «لاتهٔ پاییزی، شمارهٔ %d» یک کپشن دو جمله‌ای بنویس." % n}]
-    show("legacy POST /openai minimal", *http("POST", "https://text.pollinations.ai/openai", {"model": "openai", "messages": msgs}, timeout=60))
-    show("legacy POST /openai no model", *http("POST", "https://text.pollinations.ai/openai", {"messages": msgs}, timeout=60))
-    show("legacy POST / (plain)", *http("POST", "https://text.pollinations.ai/", {"model": "openai", "messages": msgs, "seed": n}, timeout=60))
-    show("legacy POST /openai with max_tokens and temperature", *http(
-        "POST", "https://text.pollinations.ai/openai", {"model": "openai", "messages": msgs, "max_tokens": 400, "temperature": 0.8}, timeout=60))
+    show("classic POST / (plain, first in its window)", *http("POST", "https://text.pollinations.ai/", {"model": "openai-fast", "messages": msgs, "seed": n}, timeout=75))
+    time.sleep(47)
+    show("classic POST /openai as the assistant asks today", *http(
+        "POST", "https://text.pollinations.ai/openai", {"model": "openai", "messages": msgs, "max_tokens": 400, "temperature": 0.8}, timeout=75))
 
 
-def legacy_image(name, prompt, **params):
+def classic_image(name, prompt, tries=8, **params):
     q = {"width": 768, "height": 960, "seed": random.randint(1, 2 ** 31 - 1), "nologo": "true", "private": "true", "safe": "true"}
     q.update(params)
-    status, headers, raw, took = http("GET", "https://image.pollinations.ai/prompt/%s?%s" % (urllib.parse.quote(prompt), urllib.parse.urlencode(q)), timeout=240)
-    ok = report_image(name, status, headers, raw, took)
-    note("notice", name + " headers", json.dumps({k: v for k, v in headers.items() if k.startswith(("x-", "retry", "content-type"))})[:1200])
-    return ok
+    url = "https://image.pollinations.ai/prompt/%s?%s" % (urllib.parse.quote(prompt), urllib.parse.urlencode(q))
+    t0, seen = time.time(), []
+    for _ in range(tries):
+        status, headers, raw, took = http("GET", url, timeout=240)
+        seen.append("%s:%s" % (status, headers.get("retry-after")))
+        if status not in (402, 429, 503):
+            break
+        time.sleep(min(50, int(headers.get("retry-after") or 10)) + 1)
+    headers = dict(headers, **{"content-type": "%s model=%s answers=%s total=%.0fs" % (headers.get("content-type"), headers.get("x-model-used"), ",".join(seen), time.time() - t0)})
+    return report_image(name, status, headers, raw, took)
 
 
 def check_image():
-    en = "a cup of autumn latte with cinnamon on a wooden cafe table, warm light, food photography, no text"
-    legacy_image("legacy image (no key)", en)
+    classic_image("classic image", "a cup of autumn latte with cinnamon on a wooden cafe table, warm light, food photography, no text")
     time.sleep(47)
-    legacy_image("legacy image, Persian prompt", "یک فنجان لاتهٔ پاییزی با دارچین روی میز چوبی کافه، نور گرم")
+    classic_image("classic image, Persian prompt", "یک فنجان لاتهٔ پاییزی با دارچین روی میز چوبی کافه، نور گرم")
     time.sleep(47)
-    legacy_image("legacy image 9:16 with model=flux", "a barista pouring milk into a latte, cozy cafe, autumn, cinematic", width=720, height=1280, model="flux")
+    classic_image("classic image 9:16", "a barista pouring milk into a latte, cozy cafe, autumn, cinematic", width=720, height=1280)
 
 
-def horde_one(base, h, name, body, wait=300):
+def horde_submit(base, h, name, body):
     status, _, raw, took = http("POST", base + "/generate/async", body, h)
-    note("notice" if status in (200, 202) else "error", name + " submit", "status=%s seconds=%.1f body=%s" % (status, took, raw[:500].decode("utf-8", "replace")))
+    text = raw[:420].decode("utf-8", "replace")
     try:
-        rid = json.loads(raw.decode("utf-8"))["id"]
+        return json.loads(raw.decode("utf-8"))["id"], "submit=%s %s" % (status, text)
     except Exception:
-        return None
+        note("error", name, "submit status=%s body=%s" % (status, text))
+        return None, ""
+
+
+def horde_collect(base, h, name, rid, said, wait=240):
     t0, last = time.time(), {}
     while time.time() - t0 < wait:
-        time.sleep(5)
+        time.sleep(4)
         status, _, raw, _ = http("GET", base + "/generate/check/" + rid, headers=h)
         try:
             last = json.loads(raw.decode("utf-8"))
@@ -159,37 +163,44 @@ def horde_one(base, h, name, body, wait=300):
     took = time.time() - t0
     if not last.get("done"):
         http("DELETE", base + "/generate/status/" + rid, headers=h)
-        return note("error", name + " wait", "seconds=%.0f last=%s" % (took, json.dumps(last)[:400]))
+        return note("error", name, "%s | not done after %.0fs last=%s" % (said, took, json.dumps(last)[:300]))
     status, _, raw, _ = http("GET", base + "/generate/status/" + rid, headers=h)
     try:
         gen = json.loads(raw.decode("utf-8"))["generations"][0]
     except Exception:
-        return note("error", name + " result", "status=%s body=%s" % (status, raw[:400].decode("utf-8", "replace")))
+        return note("error", name, "%s | status=%s body=%s" % (said, status, raw[:300].decode("utf-8", "replace")))
     img = str(gen.get("img") or "")
-    status, headers, raw, _ = http("GET", img) if img.startswith("http") else (200, {"content-type": "base64"}, base64.b64decode(img), 0.0)
-    headers = dict(headers, **{"content-type": "%s model=%s wait=%.0fs" % (headers.get("content-type"), gen.get("model"), took)})
+    how = "link" if img.startswith("http") else "base64"
+    status, headers, raw, _ = http("GET", img) if how == "link" else (200, {}, base64.b64decode(img), 0.0)
+    headers = {"content-type": "%s model=%s wait=%.0fs censored=%s | %s" % (how, gen.get("model"), took, gen.get("censored"), said[:160])}
     return report_image(name, status, headers, raw, 0.0)
 
 
 def check_horde():
     base = "https://aihorde.net/api/v2"
     h = {"apikey": "0000000000", "Client-Agent": "insta-agent:1.1:github.com/afshinrahimi109/Najibrahimi"}
-    status, _, raw, _ = http("GET", base + "/status/models?type=image", headers=h)
-    try:
-        models = sorted(json.loads(raw.decode("utf-8")), key=lambda m: -int(m.get("count") or 0))
-    except Exception:
-        models = []
-    note("notice", "horde models by workers", json.dumps([(m.get("name"), m.get("count"), m.get("queued"), m.get("eta")) for m in models[:28]])[:3600])
-    prompt = "a cup of autumn latte with cinnamon on a wooden cafe table, warm light, food photography"
-    params = {"width": 768, "height": 960, "steps": 20, "n": 1, "sampler_name": "k_euler_a", "cfg_scale": 6}
-    common = {"nsfw": False, "censor_nsfw": True, "r2": True, "shared": False, "slow_workers": True, "trusted_workers": False}
-    horde_one(base, h, "horde 768x960 any model", dict(common, prompt=prompt, params=params))
-    xl = [m["name"] for m in models if any(w in str(m.get("name")) for w in ("XL", "Flux", "flux")) and int(m.get("count") or 0) >= 1][:6]
-    note("notice", "horde better models asked", json.dumps(xl))
-    if xl:
-        horde_one(base, h, "horde 768x960 XL or Flux", dict(common, prompt=prompt, params=dict(params, steps=20), models=xl))
-    horde_one(base, h, "horde 576x1024 any model", dict(common, prompt="a barista pouring milk into a latte, cozy cafe, autumn, cinematic",
-                                                         params=dict(params, width=576, height=1024)), wait=200)
+    neg = " ### text, letters, watermark, logo, blurry, deformed, low quality"
+    photo = ["ICBINP - I Can't Believe It's Not Photography", "AbsoluteReality", "Deliberate", "stable_diffusion"]
+    art = ["Dreamshaper", "Deliberate", "stable_diffusion"]
+    params = {"width": 512, "height": 640, "steps": 24, "n": 1, "sampler_name": "k_euler_a", "cfg_scale": 6.5, "karras": True}
+    common = {"nsfw": False, "censor_nsfw": True, "r2": False, "shared": False, "slow_workers": True, "trusted_workers": False}
+    a = "a cup of autumn latte with cinnamon on a wooden cafe table, warm light, food photography"
+    b = "a barista pouring milk into a latte, cozy cafe, autumn, cinematic"
+    c = "flat illustration of a small cafe storefront in autumn, falling leaves, soft colors"
+    # two at once: is that allowed without an account?
+    r1, s1 = horde_submit(base, h, "horde photo 512x640", dict(common, prompt=a + neg, params=params, models=photo))
+    r2, s2 = horde_submit(base, h, "horde tall 384x704", dict(common, prompt=b + neg, params=dict(params, width=384, height=704), models=photo))
+    if r1:
+        horde_collect(base, h, "horde photo 512x640", r1, s1)
+    if r2:
+        horde_collect(base, h, "horde tall 384x704", r2, s2)
+    r3, s3 = horde_submit(base, h, "horde art 512x640", dict(common, prompt=c + neg, params=params, models=art))
+    if r3:
+        horde_collect(base, h, "horde art 512x640", r3, s3)
+    horde_submit(base, h, "horde 448x768 (just over the free size)", dict(common, prompt=b + neg, params=dict(params, width=448, height=768), models=photo))
+    r5, s5 = horde_submit(base, h, "horde 576x576", dict(common, prompt=a + neg, params=dict(params, width=576, height=576), models=photo))
+    if r5:
+        horde_collect(base, h, "horde 576x576", r5, s5)
 
 
 if __name__ == "__main__":
