@@ -18,7 +18,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: insta-agent-${{ github.ref }}
+  group: insta-agent-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
@@ -80,3 +80,34 @@ jobs:
           name: panel-screenshots
           path: insta-agent/tests/ui/shots
           if-no-files-found: ignore
+
+  # Only when the workflow is started by hand: asks the real AI services for text and a picture. The tests above
+  # never leave the machine, so this is the one place that shows whether those services still answer as expected.
+  live:
+    name: Live check of the AI services (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Pillow (only to make small preview pictures of the results)
+        run: python -m pip install --quiet pillow
+      - name: Text
+        if: always()
+        working-directory: insta-agent/tests
+        run: python live_check.py text
+      - name: Picture
+        if: always()
+        working-directory: insta-agent/tests
+        run: python live_check.py image
+      - name: Picture from the volunteer network
+        if: always()
+        working-directory: insta-agent/tests
+        run: python live_check.py horde
+      - name: How much an annotation can carry
+        if: always()
+        working-directory: insta-agent/tests
+        run: python live_check.py limits
