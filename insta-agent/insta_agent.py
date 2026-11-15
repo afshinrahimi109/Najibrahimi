@@ -1316,7 +1316,7 @@ class AI:
         ep = self.endpoint()
         return ep[3] if ep else "off"
 
-    def ask(self, system, user, history=None, max_tokens=700):
+    def ask(self, system, user, history=None, max_tokens=700, timeout=45):
         ep = self.endpoint()
         if not ep:
             raise AIDown("off")
@@ -1329,15 +1329,19 @@ class AI:
         headers = {"Content-Type": "application/json"}
         if key:
             headers["Authorization"] = "Bearer " + key
-        payload = {"messages": messages, "max_tokens": max_tokens}
+        payload = {"messages": messages}
         if model:
             payload["model"] = model
         if kind != "pollen":                           # its default model takes no temperature
             payload["temperature"] = 0.8
         if kind == "free":
-            payload["seed"] = random.randint(1, 2 ** 31 - 1)      # the same question must not come back from a shared cache
+            # The free model thinks aloud before it answers and that thinking counts as output: a limit on the
+            # length would cut the answer itself off. The seed keeps a shared cache from repeating an old answer.
+            payload["seed"] = random.randint(1, 2 ** 31 - 1)
+        else:
+            payload["max_tokens"] = max_tokens
         try:
-            status, hdrs, body = self.graph.http("POST", url, jdump(payload).encode("utf-8"), headers, timeout=45)
+            status, hdrs, body = self.graph.http("POST", url, jdump(payload).encode("utf-8"), headers, timeout=timeout)
         except GraphError as e:
             raise AIDown(str(e))
         raw = body.decode("utf-8", "replace")
@@ -1514,6 +1518,7 @@ HORDE_AGENT = "insta-agent:%s:github.com/afshinrahimi109/Najibrahimi" % VERSION
 HORDE_POLL = 3.0                # seconds between two looks at a queued picture
 HORDE_WAIT = 150                # how long a picture may sit in the volunteers' queue
 PATIENCE = 60                   # the longest the studio waits for a service that says "come back in N seconds"
+PLAN_TIMEOUT = 120              # seconds the assistant gets for writing one post
 GRACE = 1.0                     # ...plus this much, so the service's clock has surely moved on
 PICTURE_MAX = 15 * 1024 * 1024
 SCENE_LINES = ["جزئیات بیشتر در کپشن 👇", "همین حالا پیام بده", "برای دوستانت هم بفرست", "ما را دنبال کن"]
@@ -1582,18 +1587,21 @@ class Studio:
         ai, text, why = self.agent.ai, "", ""
         reel = kind == "reel"
         system, ask = self.question(idea, kind, n)
-        for attempt in (0, 1):
+        for attempt in (0, 1, 2):
             try:
-                text = ai.ask(system, ask, max_tokens=1100)
+                # the free model needs 20 to 40 seconds for this much; the job runs in the background anyway
+                text = ai.ask(system, ask, max_tokens=1500, timeout=PLAN_TIMEOUT)
                 break
             except AIDown as e:
                 wait = e.wait
                 why = "limit" if wait else ("off" if str(e) == "off" else "down")
-                if attempt or not 0 < wait <= PATIENCE or job is None:
+                if attempt == 2 or not 0 < wait <= PATIENCE or job is None:
                     break
+                wait = max(wait, 3.0 * attempt)        # told "one more second" twice in a row: give it a little longer
                 job["step"] = "سرویس رایگان متن هر ۴۵ ثانیه یک پاسخ می‌دهد؛ %s ثانیهٔ دیگر…" % fa(int(wait + GRACE))
                 if job["cancel"].wait(wait + GRACE):
                     break
+                job["step"] = "در حال نوشتن کپشن و چیدن صحنه‌ها…"
         base = self.offline_plan(idea, kind, n)
         data = loose_json(text)
         if not data:

@@ -82,34 +82,21 @@ def check_picture():
 
 
 def check_probe():
-    """How long does the free text service take for the studio's real question, asked in different ways?"""
+    """Does the free text service think less (and answer sooner) when asked to?"""
     import random
-    import urllib.parse
     a = agent()
     system, ask = a.studio.question("تخفیف ۲۰ درصدی لاتهٔ پاییزی تا آخر هفته", "reel", 3)
-    seed = random.randint(1, 2 ** 31 - 1)
-    msgs = [{"role": "system", "content": system}, {"role": "user", "content": ask}]
-
-    def go(title, method, url, body=None, timeout=150):
-        t0 = time.time()
-        try:
-            status, headers, raw = a.graph.http(method, url, json.dumps(body).encode("utf-8") if body is not None else None,
-                                                {"Content-Type": "application/json"} if body is not None else {}, timeout)
-            text = raw.decode("utf-8", "replace")
-        except ia.GraphError as e:
-            status, headers, text = 0, {}, str(e)
-        took = time.time() - t0
-        note("notice" if status == 200 else "error", title, "status=%s seconds=%.1f chars=%d url_chars=%d headers=%s body=%s" % (
-            status, took, len(text), len(url), {k: v for k, v in headers.items() if k.startswith(("x-", "retry", "content-type"))}, text[:1500]))
-        time.sleep(50)
-
-    base = "https://text.pollinations.ai/"
-    q = urllib.parse.urlencode({"model": "openai-fast", "system": system, "private": "true", "seed": seed})
-    go("GET with system", "GET", base + urllib.parse.quote(ask, safe="") + "?" + q)
-    go("POST /openai as the studio asks", "POST", base + "openai", {"model": "openai-fast", "messages": msgs, "max_tokens": 1100, "temperature": 0.8, "seed": seed + 1})
-    go("POST /openai with nothing extra", "POST", base + "openai", {"model": "openai-fast", "messages": msgs, "seed": seed + 2})
-    go("POST /openai asked for JSON", "POST", base + "openai", {"model": "openai-fast", "messages": msgs, "seed": seed + 3, "response_format": {"type": "json_object"}})
-    go("GET with json=true", "GET", base + urllib.parse.quote(ask, safe="") + "?" + urllib.parse.urlencode({"model": "openai-fast", "system": system, "private": "true", "seed": seed + 4, "json": "true"}))
+    body = {"model": "openai-fast", "messages": [{"role": "system", "content": system}, {"role": "user", "content": ask}],
+            "temperature": 0.8, "seed": random.randint(1, 2 ** 31 - 1), "reasoning_effort": "low"}
+    t0 = time.time()
+    try:
+        status, headers, raw = a.graph.http("POST", "https://text.pollinations.ai/openai", json.dumps(body).encode("utf-8"), {"Content-Type": "application/json"}, 150)
+        text = raw.decode("utf-8", "replace")
+    except ia.GraphError as e:
+        status, headers, text = 0, {}, str(e)
+    note("notice" if status == 200 else "error", "POST /openai with reasoning_effort low", "status=%s seconds=%.1f chars=%d tokens=%s body=%s" % (
+        status, time.time() - t0, len(text), headers.get("x-usage-completion-text-tokens"), text[:1200]))
+    time.sleep(50)
 
 
 if __name__ == "__main__":
