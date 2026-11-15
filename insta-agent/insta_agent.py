@@ -1572,7 +1572,7 @@ VOICES = ("nova", "shimmer", "alloy", "onyx", "echo", "fable")         # the spe
 NO_VOICE = "گویندهٔ هوش مصنوعی به کلید Pollinations نیاز دارد (تنظیمات ← ساخت عکس و ویدیو)."
 
 # ── the narrator that lives on the owner's own device ──
-# A Persian voice that needs no key and no service: the Piper voice "amir" (trained on CC0 recordings), Piper's
+# A Persian voice that needs no key and no service: the Piper voice "ganji" (trained on CC0 recordings), Piper's
 # phonemizer (espeak-ng built for the browser) and the ONNX Runtime for the web. None of it is part of this file.
 # When the owner asks for it the agent fetches the six files once (about 85 MB over the network, 93 MB on disk),
 # checks every one against the SHA-256 written here, and from then on the panel runs them in a worker on the
@@ -1584,12 +1584,15 @@ VOICE_FILES = {                 # name: (bytes, SHA-256)
     "piper_phonemize.js": (120714, "fef0c2fc442d24fdef5c7c7cc37d5da2314407640fe11ab1bfe347c723dff19b"),
     "piper_phonemize.wasm": (635212, "b777cd107a91d2bcc6a1ea46f2c26a662a7407394fe84589198aeaa83dd7a9d6"),
     "piper_phonemize.data": (18077249, "29f1025eb23a5b5c192cd14a6efbce4509402ff265405072ee6f7d1a09b78f8c"),
-    "voice.onnx": (63531379, "fb815380d969ea372b0b21b0de14421f58fe481047e153e69685d079b6e1a9d1"),
+    "voice.onnx": (63516050, "6a98504bb77dc2fd3a863c977d37e67a6a525fdf661917385d569a3ff78e6cae"),
 }
 VOICE_FETCH_MB = 85             # what the owner is told the download costs
 _PHON = ("piper_phonemize.js", "piper_phonemize.wasm", "piper_phonemize.data")
 _ORT = ("ort.wasm.min.js", "ort-wasm-simd.wasm")
-_AMIR = "/rhasspy/piper-voices/resolve/6b9cfaacb4fb2e02a9621227e3c1a48bec9710c3/fa/fa_IR/amir/medium/fa_IR-amir-medium.onnx"
+# Which voice, and how it speaks, was chosen by measurement (tests/ui/voicelab.py): the five Persian voices of the
+# Piper collection read the same sentences and a speech recogniser wrote down what it heard. "ganji" with a calmer
+# rhythm came through best (98.5% of the letters); "amir" as published, the first choice here, only 91%.
+_VOICE = "/rhasspy/piper-voices/resolve/6b9cfaacb4fb2e02a9621227e3c1a48bec9710c3/fa/fa_IR/ganji/medium/fa_IR-ganji-medium.onnx"
 # Where the files come from, tried in this order until every file is there: (address, bytes of the archive or 0,
 # folder inside the archive, the files it brings). An address ending in "/" has each file under its own name;
 # any other address is the one file itself.
@@ -1601,15 +1604,14 @@ VOICE_SOURCES = [
     ("https://unpkg.com/onnxruntime-web@1.18.0/dist/", 0, "", _ORT),
     ("https://cdnjs.cloudflare.com/ajax/libs/onnxruntime-web/1.18.0/", 0, "", _ORT),
     ("https://registry.npmjs.org/onnxruntime-web/-/onnxruntime-web-1.18.0.tgz", 36155916, "package/dist/", _ORT),
-    ("https://huggingface.co" + _AMIR, 0, "", ("voice.onnx",)),
-    ("https://hf-mirror.com" + _AMIR, 0, "", ("voice.onnx",)),
-    # the same file as it sits in two public repositories on GitHub, for networks that reach neither of the above
-    ("https://raw.githubusercontent.com/dibbed/TTSKit-multi-engine-tts/9eb30526a4c707c88e44aa43097fbed62d7e8fc6/models/piper/fa_IR-amir-medium.onnx", 0, "", ("voice.onnx",)),
-    ("https://raw.githubusercontent.com/unesjalai/farsi-tts-api/84bb6a6609db57aff1420ba886b75fc368c6430a/models/fa_IR-amir-medium.onnx", 0, "", ("voice.onnx",)),
+    ("https://huggingface.co" + _VOICE, 0, "", ("voice.onnx",)),
+    ("https://hf-mirror.com" + _VOICE, 0, "", ("voice.onnx",)),
+    # the same file as it sits in a public repository on GitHub, for networks that reach neither of the above
+    ("https://raw.githubusercontent.com/theMahdiyarB/toolbox/5669f1007d7558c3f4694713046a730389b9b276/static/lib/fa_IR-ganji-medium.onnx", 0, "", ("voice.onnx",)),
 ]
 VOICE_MIME = {"js": "text/javascript; charset=utf-8", "wasm": "application/wasm"}
 VOICE_RATE = 22050              # samples per second of the voice
-VOICE_SCALES = (0.667, 1.0, 0.8)                       # liveliness of the sound, slowness (1 = as recorded), freedom of the rhythm
+VOICE_SCALES = (0.5, 1.0, 0.333)                       # liveliness of the sound, slowness (1 = as recorded), freedom of the rhythm
 # The worker the panel starts. It is the only code of the agent that touches the downloaded files, and its own
 # Content-Security-Policy lets it talk to this agent alone.
 VOICE_WORKER_JS = r"""'use strict';
@@ -6524,7 +6526,7 @@ function composer(post, seed) {
 const FACE = '"Vazirmatn", "Vazir", Tahoma, system-ui, sans-serif';
 const LOOKS = [['#f97316', '#db2777'], ['#0ea5e9', '#4338ca'], ['#10b981', '#065f46'], ['#111827', '#4b5563'], ['#8b5cf6', '#4c1d95'], ['#fde68a', '#fca5a5'], ['#f59e0b', '#b45309'], ['#e0f2fe', '#a5b4fc']];
 const SCENE_SEC = 3.2, FADE_SEC = 0.5, REEL_FPS = 30, AUDIO_RATE = 48000, VOICE_LEAD = 0.35, VOICE_TAIL = 0.6;
-const DEVICE = 'device', DEVICE_NAME = 'امیر — فارسی، روی همین گوشی (رایگان)';
+const DEVICE = 'device', DEVICE_NAME = 'گویندهٔ فارسی (مرد) — روی همین گوشی، رایگان';
 const SPEAKERS = [['nova', 'زن (nova)'], ['shimmer', 'زن (shimmer)'], ['alloy', 'خنثی (alloy)'], ['onyx', 'مرد (onyx)'], ['echo', 'مرد (echo)'], ['fable', 'مرد (fable)']];
 const PIC_FROM = {key: 'Pollinations', free: 'Pollinations رایگان', horde: 'AI Horde', custom: 'سرویس خودت'};
 const NO_PLAN = {off: 'دستیار در تنظیمات خاموش است', limit: 'سرویس رایگان متن نوبت نداد', down: 'به سرویس متن دسترسی نبود', format: 'پاسخ سرویس متن قابل‌استفاده نبود'};
