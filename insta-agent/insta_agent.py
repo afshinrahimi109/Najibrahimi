@@ -1317,7 +1317,7 @@ class AI:
         ep = self.endpoint()
         return ep[3] if ep else "off"
 
-    def ask(self, system, user, history=None, max_tokens=700, timeout=45):
+    def ask(self, system, user, history=None, max_tokens=700, timeout=45, temperature=0.8):
         ep = self.endpoint()
         if not ep:
             raise AIDown("off")
@@ -1334,7 +1334,7 @@ class AI:
         if model:
             payload["model"] = model
         if kind != "pollen":                           # its default model takes no temperature
-            payload["temperature"] = 0.8
+            payload["temperature"] = temperature
         if kind == "free":
             # The free model thinks aloud before it answers and that thinking counts as output: a limit on the
             # length would cut the answer itself off, and asked to think less it answers in half the time.
@@ -1551,6 +1551,7 @@ def no_writing(prompt):
     text = re.sub(quoted, " ", text)
     text = re.sub(r"\b%s[^,.;]*" % verbs, " ", text, flags=re.I)                              # ... saying Welcome
     text = re.sub(r"\bwith (?:the )?(?:words?|text|letters|caption|inscription|slogan)\b[^,.;]*", " ", text, flags=re.I)
+    text = re.sub(r"\bin (?:(?:bold|big|large|capital|neon) )*letters\b", " ", text, flags=re.I)
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")       # café → cafe; English only
     text = re.sub(r"\s+([,.;])", r"\1", re.sub(r"\s+", " ", text))
     return re.sub(r"(?:[,.;]\s*){2,}", ", ", text).strip(" ,.;")
@@ -1605,8 +1606,9 @@ class Studio:
         busy = job["step"] if job else ""
         for attempt in (0, 1, 2):
             try:
-                # the free model needs 20 to 40 seconds for a whole post; the job runs in the background anyway
-                text = ai.ask(system, question, max_tokens=1500, timeout=PLAN_TIMEOUT)
+                # The free model needs 10 to 40 seconds for a whole post; the job runs in the background anyway.
+                # A cool temperature keeps a small model's Persian closer to plain, correct sentences.
+                text = ai.ask(system, question, max_tokens=1500, timeout=PLAN_TIMEOUT, temperature=0.4)
                 why = ""
                 break
             except AIDown as e:

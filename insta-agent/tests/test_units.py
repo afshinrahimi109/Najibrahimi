@@ -126,6 +126,7 @@ class StudioHelperTests(unittest.TestCase):
             "a display board with the text '20% off this week', customers in the background": "a display board, customers in the background",
             "A banner saying Welcome; warm light. A cup labeled SALE, on a table": "A banner; warm light. A cup, on a table",
             "fresh carrot cake on a wooden table, top-down shot": "fresh carrot cake on a wooden table, top-down shot",
+            "a chalkboard sign showing a discount in bold letters, autumn leaves": "a chalkboard sign showing a discount, autumn leaves",
         }
         for asked, want in cases.items():
             self.assertEqual(ia.no_writing(asked), want)
