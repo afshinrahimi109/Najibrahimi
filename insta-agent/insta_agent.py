@@ -15,11 +15,14 @@
 راهنمای کامل: README.md کنار همین فایل.
 """
 import argparse
+import base64
 import copy
 import hashlib
 import hmac
 import http.client
+import io
 import json
+import math
 import os
 import random
 import re
@@ -33,9 +36,11 @@ import ssl
 import struct
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 import traceback
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -44,10 +49,12 @@ import zlib
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.0.0"
+VERSION = "1.2.0"
 DEFAULT_PORT = 8787
 API_VERSIONS = ["v26.0", "v27.0", "v25.0", ""]
 KINDS = ("image", "carousel", "reel", "story")
+IMAGE_MODES = ("auto", "pollinations", "horde", "custom", "off")       # where the studio gets its pictures from
+FREE_GAP = 46                   # Pollinations without a key: one picture and one text every 45 seconds per address
 KIND_FA = {"image": "پست", "carousel": "پست چندتایی", "reel": "ریل", "story": "استوری"}
 IMAGE_MAX = 8 * 1024 * 1024
 VIDEO_MAX = 300 * 1024 * 1024
@@ -239,6 +246,11 @@ class Config:
         self.tunnel_cmd = env.get("AGENT_TUNNEL_CMD") or ""
         self.ai_url = env.get("AGENT_AI_URL") or ""
         self.temp_host = env.get("AGENT_TEMP_HOST") or "https://litterbox.catbox.moe/resources/internals/api.php"
+        self.image_api = (env.get("AGENT_IMAGE_URL") or "https://image.pollinations.ai").rstrip("/")
+        self.gen_api = (env.get("AGENT_GEN_URL") or "https://gen.pollinations.ai").rstrip("/")
+        self.horde_api = (env.get("AGENT_HORDE_URL") or "https://aihorde.net/api/v2").rstrip("/")
+        self.free_gap = float(env.get("AGENT_FREE_GAP") or (8 if self.demo else FREE_GAP))
+        self.voice_mirror = (env.get("AGENT_VOICE_MIRROR") or "").strip()      # an own copy of the narrator's files, tried first
         self.api_version = env.get("IG_API_VERSION") or API_VERSIONS[0]
         self.ig_graph = (env.get("IG_GRAPH_URL") or "https://graph.instagram.com").rstrip("/")
         self.fb_graph = (env.get("FB_GRAPH_URL") or "https://graph.facebook.com").rstrip("/")
@@ -358,18 +370,20 @@ class DB:
 
 DEFAULT_SETTINGS = {
     "autopilot": True,
+    "manual": False,                                   # no page connected: the agent prepares, the owner posts by hand
     "auto": {"comment_reply": False, "spam_hide": False, "dm_reply": False, "ai_suggest": False, "ai_send": False,
              "daily_report": False},
     "since": {"comment_reply": 0.0, "spam_hide": 0.0, "dm_reply": 0.0, "ai_suggest": 0.0, "ai_send": 0.0,
               "daily_report": 0.0},
     "limits": {"per_hour": 30, "cooldown_min": 30, "daily_posts": 25, "quiet_from": "", "quiet_to": ""},
-    "brand": {"about": "", "tone": "صمیمی و محترمانه", "hashtags": ""},
+    "brand": {"about": "", "tone": "صمیمی و محترمانه", "hashtags": "", "handle": ""},
     "ai": {"mode": "free", "url": "", "model": "", "key": ""},
+    "studio": {"image": "auto", "pollen": "", "url": "", "key": "", "model": "", "speaker": "", "tts_model": ""},
     "media": {"method": "auto", "public_url": "", "temp_ok": False},
     "network": {"proxy": ""},
     "telegram": {"token": "", "chat_id": ""},
 }
-SECRET_FIELDS = (("ai", "key"), ("telegram", "token"))
+SECRET_FIELDS = (("ai", "key"), ("studio", "pollen"), ("studio", "key"), ("telegram", "token"))
 
 
 def deep_merge(base, extra):
@@ -473,7 +487,16 @@ class Settings:
             s["ai"]["mode"] = "free"
         if s["media"]["method"] not in ("auto", "public", "tunnel", "temp"):
             s["media"]["method"] = "auto"
-        for section, key, label in (("ai", "url", "نشانی سرویس هوش مصنوعی"), ("media", "public_url", "نشانی عمومی")):
+        if s["studio"]["image"] not in IMAGE_MODES:
+            s["studio"]["image"] = "auto"
+        if not re.fullmatch(r"[A-Za-z0-9_.:\-]{0,60}", s["studio"]["speaker"]):
+            s["studio"]["speaker"] = ""                # no choice: the narrator on the device, or the service's first voice
+        handle = s["brand"]["handle"].strip().lstrip("@").strip()
+        if handle and not re.fullmatch(r"[A-Za-z0-9._]{1,30}", handle):
+            raise UserError("نام کاربری پیج فقط حروف انگلیسی، عدد، نقطه و زیرخط دارد (مثلاً my.page).")
+        s["brand"]["handle"] = handle
+        for section, key, label in (("ai", "url", "نشانی سرویس هوش مصنوعی"), ("media", "public_url", "نشانی عمومی"),
+                                    ("studio", "url", "نشانی سرویس تصویر")):
             v = s[section][key]
             if v and not re.fullmatch(r"https?://[\x21-\x7e]+", v):
                 raise UserError(label + " باید با http:// یا https:// شروع شود.")
@@ -585,6 +608,7 @@ class Graph:
         self.usage, self.usage_at = 0, 0.0
         self._opener, self._opener_key = None, None
         self._lock = threading.Lock()
+        self._reach = {}
 
     def opener(self):
         proxy = (self.settings.get("network.proxy") or self.cfg.proxy or "").strip()
@@ -614,6 +638,22 @@ class Graph:
             return e.code, {k.lower(): v for k, v in (e.headers.items() if e.headers else [])}, body
         except (urllib.error.URLError, socket.timeout, ssl.SSLError, http.client.HTTPException, OSError) as e:
             raise GraphError("network: %s" % e, kind="network")
+
+    def reachable(self, url, timeout=12):
+        """Does the service at this address answer at all? Where an address is blocked, a request often just hangs;
+        this finds out in seconds, before a long request is sent. The answer is remembered for a while."""
+        parts = urllib.parse.urlsplit(url)
+        root = "%s://%s/" % (parts.scheme, parts.netloc)
+        known = self._reach.get(root)
+        if known and now() < known[1]:
+            return known[0]
+        try:
+            self.http("HEAD", root, timeout=timeout)   # any answer will do, even "not found"
+            ok = True
+        except GraphError:
+            ok = False
+        self._reach[root] = (ok, now() + (600 if ok else 45))
+        return ok
 
     def track_usage(self, headers):
         top = 0
@@ -987,16 +1027,45 @@ def sniff(head):
         if brand[:2] == b"qt":
             return "video", "mov", "video/quicktime"
         return "video", "mp4", "video/mp4"
+    if head[:4] == b"\x1a\x45\xdf\xa3":
+        return "video", "webm", "video/webm"          # what some browsers record; fine for the gallery, not for the API
+    return None
+
+
+def sniff_audio(head):
+    """(extension, mime) of a sound file from its first bytes, or None."""
+    if head[:3] == b"ID3" or (len(head) > 1 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0 and head[1] & 0x06):
+        return "mp3", "audio/mpeg"
+    if len(head) > 1 and head[0] == 0xFF and head[1] & 0xF6 == 0xF0:
+        return "aac", "audio/aac"
+    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return "wav", "audio/wav"
+    if head[:4] == b"OggS":
+        return "ogg", "audio/ogg"
+    if head[:4] == b"fLaC":
+        return "flac", "audio/flac"
+    if head[4:8] == b"ftyp":
+        return "m4a", "audio/mp4"
     return None
 
 
 def image_size(path):
     try:
         with open(path, "rb") as fh:
-            head = fh.read(26)
+            head = fh.read(30)
             if head[:8] == b"\x89PNG\r\n\x1a\n":
                 w, h = struct.unpack(">II", head[16:24])
                 return int(w), int(h)
+            if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+                form = head[12:16]
+                if form == b"VP8X":
+                    return 1 + int.from_bytes(head[24:27], "little"), 1 + int.from_bytes(head[27:30], "little")
+                if form == b"VP8L":
+                    bits = int.from_bytes(head[21:25], "little")
+                    return 1 + (bits & 0x3FFF), 1 + ((bits >> 14) & 0x3FFF)
+                if form == b"VP8 ":
+                    return int.from_bytes(head[26:28], "little") & 0x3FFF, int.from_bytes(head[28:30], "little") & 0x3FFF
+                return 0, 0
             if head[:2] != b"\xff\xd8":
                 return 0, 0
             fh.seek(2)
@@ -1162,6 +1231,24 @@ class MediaStore:
                   (fid, ext, mime, kind, size, w, h, str(name or "")[:200], now()))
         return self.get(fid)
 
+    def add_asset(self, raw, name=""):
+        """A picture the studio fetched, in whatever format it came. The panel draws the final image from it;
+        it is never published as it is and, like every unused file, it is removed after a day."""
+        found = sniff(raw[:64])
+        if not found or found[0] != "image":
+            sound = sniff_audio(raw[:64])              # a narration clip: the panel mixes it into the reel
+            if not sound:
+                raise UserError("این فایل عکس یا صدا نیست.")
+            found = ("audio",) + sound
+        fid = secrets.token_hex(12)
+        final = os.path.join(self.dir, "%s.%s" % (fid, found[1]))
+        with open(final, "wb") as fh:
+            fh.write(raw)
+        w, h = image_size(final) if found[0] == "image" else (0, 0)
+        self.db.x("INSERT INTO files (id, ext, mime, kind, size, width, height, name, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                  (fid, found[1], found[2], "asset", len(raw), w, h, str(name or "")[:200], now()))
+        return self.get(fid)
+
     def methods(self):
         m = self.settings.all()["media"]
         public = (m["public_url"] or self.cfg.public_url).rstrip("/")
@@ -1239,7 +1326,11 @@ class MediaStore:
 # ───────────────────────────── writing assistant ─────────────────────────────
 
 class AIDown(Exception):
-    pass
+    """The text service gave no usable answer. wait > 0: it asked to come back after that many seconds."""
+
+    def __init__(self, why="", wait=0.0):
+        super().__init__(why)
+        self.wait = max(0.0, float(wait or 0))
 
 
 class AI:
@@ -1247,40 +1338,65 @@ class AI:
 
     def __init__(self, cfg, settings, graph, ig):
         self.cfg, self.settings, self.graph, self.ig = cfg, settings, graph, ig
+        self.free_at = 0.0                             # when the free service takes the next question from this address
 
     def endpoint(self):
-        s = self.settings.all()["ai"]
-        if s["mode"] == "off":
+        """(address, key, model, kind) of the text service in use, or None when it is switched off."""
+        s = self.settings.all()
+        ai, pollen = s["ai"], s["studio"]["pollen"]
+        if ai["mode"] == "off":
             return None
-        if s["mode"] == "custom" and s["url"]:
-            return s["url"], s["key"], s["model"] or "gpt-4o-mini"
-        if self.cfg.ai_url:
-            return self.cfg.ai_url, "", s["model"] or "openai"
-        if self.cfg.sim:
+        if ai["mode"] == "custom" and ai["url"]:
+            return ai["url"], ai["key"], ai["model"] or "gpt-4o-mini", "custom"
+        if self.cfg.ai_url:                            # AGENT_AI_URL: an own service that needs no key
+            return self.cfg.ai_url, "", ai["model"] or "openai", "custom"
+        if pollen:                                     # the owner's Pollinations key: better models, no waiting
+            return self.cfg.gen_api + "/v1/chat/completions", pollen, ai["model"], "pollen"
+        if self.cfg.sim and self.FREE_URL == AI.FREE_URL:
             return None                                # demo and tests never call out
-        return self.FREE_URL, "", "openai"
+        return self.FREE_URL, "", "openai-fast", "free"
 
     def mode(self):
         ep = self.endpoint()
-        return "off" if not ep else ("custom" if ep[0] != self.FREE_URL else "free")
+        return ep[3] if ep else "off"
 
-    def ask(self, system, user, history=None, max_tokens=700):
+    def ask(self, system, user, history=None, max_tokens=700, timeout=45, temperature=0.8):
         ep = self.endpoint()
         if not ep:
             raise AIDown("off")
-        url, key, model = ep
+        url, key, model, kind = ep
+        if kind == "free" and now() < self.free_at:
+            raise AIDown("limit", self.free_at - now())
         if not url.rstrip("/").endswith(("/chat/completions", "/openai")):
             url = url.rstrip("/") + "/chat/completions"
         messages = [{"role": "system", "content": system}] + list(history or []) + [{"role": "user", "content": user}]
         headers = {"Content-Type": "application/json"}
         if key:
             headers["Authorization"] = "Bearer " + key
-        payload = jdump({"model": model, "messages": messages, "max_tokens": max_tokens, "temperature": 0.8})
+        payload = {"messages": messages}
+        if model:
+            payload["model"] = model
+        if kind != "pollen":                           # its default model takes no temperature
+            payload["temperature"] = temperature
+        if kind == "free":
+            # The free model thinks aloud before it answers and that thinking counts as output: a limit on the
+            # length would cut the answer itself off, and asked to think less it answers in half the time.
+            # The seed keeps a shared cache from repeating an old answer.
+            payload.update(seed=random.randint(1, 2 ** 31 - 1), reasoning_effort="low")
+        else:
+            payload["max_tokens"] = max_tokens
         try:
-            status, _, body = self.graph.http("POST", url, payload.encode("utf-8"), headers, timeout=45)
+            status, hdrs, body = self.graph.http("POST", url, jdump(payload).encode("utf-8"), headers, timeout=timeout)
         except GraphError as e:
             raise AIDown(str(e))
-        data = jload(body.decode("utf-8", "replace"), None)
+        raw = body.decode("utf-8", "replace")
+        data = jload(raw, None)
+        if status in (402, 429, 503) and kind == "free":
+            m = re.search(r"(?:retry after|wait)\s+(\d+)\s*s", raw, re.I)
+            after = str(hdrs.get("retry-after") or "")
+            wait = int(m.group(1)) if m else int(after) if after.isdigit() else self.cfg.free_gap
+            self.free_at = now() + wait
+            raise AIDown("limit", wait)
         try:
             if status >= 400:
                 raise KeyError(status)
@@ -1290,13 +1406,21 @@ class AI:
         text = re.sub(r"<think>.*?</think>", "", text or "", flags=re.S).strip()
         if not text:
             raise AIDown("empty answer")
+        if kind == "free":
+            self.free_at = now() + self.cfg.free_gap
         return text
+
+    @staticmethod
+    def offline(e, **extra):
+        """What the panel is told when templates stand in for the assistant (and how long the free service asks to wait)."""
+        wait = int(getattr(e, "wait", 0) + 0.999)
+        return dict(extra, source="offline", **({"wait": wait} if wait else {}))
 
     def persona(self):
         b, a = self.settings.all()["brand"], self.ig.acct
         return ("تو دستیار مدیریت یک پیج اینستاگرام هستی. نام پیج: @%s (%s). دربارهٔ پیج: %s. لحن نوشتن: %s. "
                 "فارسی روان و طبیعی بنویس؛ کوتاه و بدون مقدمه و توضیح اضافه. چیزی را که نمی‌دانی از خودت نساز."
-                % (a.get("username") or "page", a.get("name") or "", b["about"] or a.get("bio") or "نامشخص", b["tone"]))
+                % (a.get("username") or b["handle"] or "page", a.get("name") or "", b["about"] or a.get("bio") or "نامشخص", b["tone"]))
 
     def brand_tags(self):
         out = []
@@ -1333,13 +1457,14 @@ class AI:
             items = [limit_tags(i) for i in items if i][:5]
             if items:
                 return {"items": items, "source": "ai"}
-        except AIDown:
-            pass
+            down = None
+        except AIDown as e:
+            down = e
         tail = " ".join(self.offline_hashtags(topic)[:5])
-        return {"source": "offline", "items": [
+        return self.offline(down, items=[
             "%s ✨\n\n%s" % (topic, tail),
             "%s\n\nنظر شما چیه؟ توی کامنت‌ها برامون بنویسید 👇\n\n%s" % (topic, tail),
-            "یه خبر خوب: %s 🌿\nاگه دوست داشتید برای دوستاتون هم بفرستید.\n\n%s" % (topic, tail)]}
+            "یه خبر خوب: %s 🌿\nاگه دوست داشتید برای دوستاتون هم بفرستید.\n\n%s" % (topic, tail)])
 
     def hashtags(self, topic):
         topic = str(topic or "").strip()[:500]
@@ -1353,9 +1478,10 @@ class AI:
                     tags.append(t)
             if len(tags) >= 3:
                 return {"items": tags[:12], "source": "ai"}
-        except AIDown:
-            pass
-        return {"items": self.offline_hashtags(topic)[:12], "source": "offline"}
+            down = None
+        except AIDown as e:
+            down = e
+        return self.offline(down, items=self.offline_hashtags(topic)[:12])
 
     def ideas(self, count=6):
         about = self.settings.all()["brand"]["about"] or "پیج"
@@ -1366,14 +1492,15 @@ class AI:
             items = [i for i in items if len(i) > 8][:count]
             if items:
                 return {"items": items, "source": "ai"}
-        except AIDown:
-            pass
+            down = None
+        except AIDown as e:
+            down = e
         base = ["پشت‌صحنهٔ یک روز کاری: از صبح تا شب در چند عکس", "معرفی پرطرفدارترین محصول یا خدمت و دلیل محبوبیتش",
                 "پاسخ به سه سؤال پرتکرار مشتری‌ها در یک پست چندتایی", "قبل و بعد: نتیجهٔ یک کار واقعی را نشان بده",
                 "یک نکتهٔ آموزشی کوتاه که مخاطب همین امروز به کارش بیاید", "نظر یک مشتری راضی (با اجازهٔ خودش)",
                 "نظرسنجی در استوری: از مخاطب بپرس چه چیزی دوست دارد ببیند", "داستان شروع کار: %s چطور راه افتاد؟" % about]
         random.shuffle(base)
-        return {"items": base[:count], "source": "offline"}
+        return self.offline(down, items=base[:count])
 
     @staticmethod
     def offline_reply(text):
@@ -1396,8 +1523,8 @@ class AI:
                            % ("کامنت" if kind == "comment" else "پیام", str(text)[:600],
                               ("متن پست: «%s»\n" % context[:400]) if context else ""), max_tokens=220)
             return {"text": out.strip().strip("«»\"'")[:900], "source": "ai"}
-        except AIDown:
-            return {"text": self.offline_reply(text), "source": "offline"}
+        except AIDown as e:
+            return self.offline(e, text=self.offline_reply(text))
 
     def chat(self, history, facts):
         history = [{"role": "assistant" if m.get("role") == "assistant" else "user", "content": str(m.get("content") or "")[:2000]}
@@ -1407,9 +1534,830 @@ class AI:
         try:
             text = self.ask(self.persona() + "\nوضعیت فعلی پیج:\n" + facts, history[-1]["content"], history[:-1], 800)
             return {"text": text, "source": "ai"}
-        except AIDown:
-            return {"source": "offline", "text": "الان به سرویس هوش مصنوعی دسترسی ندارم، ولی این وضعیت فعلی پیج است:\n\n"
-                    + facts + "\n\nبرای ایدهٔ پست و کپشن می‌توانی از دکمه‌های «کپشن پیشنهادی» و «ایده» هم استفاده کنی."}
+        except AIDown as e:
+            if e.wait:
+                return self.offline(e, text="سرویس رایگان هوش مصنوعی هر ۴۵ ثانیه یک پاسخ می‌دهد؛ %s ثانیهٔ دیگر دوباره بپرس."
+                                    % fa(int(e.wait + 0.999)))
+            return self.offline(e, text="الان به سرویس هوش مصنوعی دسترسی ندارم، ولی این وضعیت فعلی پیج است:\n\n" + facts
+                                + "\n\nبرای ایدهٔ پست و کپشن می‌توانی از دکمه‌های «کپشن پیشنهادی» و «ایده» هم استفاده کنی.")
+
+
+# ───────────────────────────── studio: a post or a reel out of one idea ─────────────────────────────
+# The agent writes the words itself (caption, hashtags, a headline, a line for each scene) and asks a picture
+# service for the pictures. The panel then draws the final image or renders the reel on the phone itself, so the
+# result exists even when no picture service can be reached.
+
+PICTURE_SIZES = {"post": (768, 960), "reel": (720, 1280), "square": (896, 896)}
+HORDE_SIZES = {"post": (512, 640), "reel": (384, 704), "square": (576, 576)}     # the most it gives without an account
+PICTURE_STYLES = {
+    "photo": "professional photograph, natural light, shallow depth of field, highly detailed",
+    "art": "digital illustration, soft colors, clean shapes",
+    "minimal": "minimalist composition, plain background, a lot of empty space, soft light",
+    "3d": "3D render, soft studio lighting, pastel colors",
+}
+NO_TEXT = "no text, no letters, no watermark"
+HORDE_MODELS = {"photo": ["ICBINP - I Can't Believe It's Not Photography", "AbsoluteReality", "Deliberate", "stable_diffusion"],
+                "art": ["Dreamshaper", "Deliberate", "stable_diffusion"]}
+HORDE_AVOID = re.compile(r"nsfw|pony|anime|furry|hentai|illustrious|noob|waifu|anything|XL|flux", re.I)
+HORDE_AGENT = "insta-agent:%s:github.com/afshinrahimi109/Najibrahimi" % VERSION
+HORDE_POLL = 3.0                # seconds between two looks at a queued picture
+HORDE_WAIT = 150                # how long a picture may sit in the volunteers' queue
+PATIENCE = 60                   # the longest the studio waits for a service that says "come back in N seconds"
+PLAN_TIMEOUT = 120              # seconds the assistant gets for writing one post
+GRACE = 1.0                     # ...plus this much, so the service's clock has surely moved on
+PICTURE_MAX = 15 * 1024 * 1024
+SOUND_MAX = 12 * 1024 * 1024
+SAY_MAX = 400                   # characters one scene's narration may have
+VOICES = ("nova", "shimmer", "alloy", "onyx", "echo", "fable")         # the speakers of the default speech model
+NO_VOICE = "گویندهٔ هوش مصنوعی به کلید Pollinations نیاز دارد (تنظیمات ← ساخت عکس و ویدیو)."
+
+# ── the narrator that lives on the owner's own device ──
+# A Persian voice that needs no key and no service: the Piper voice "ganji" (trained on CC0 recordings), Piper's
+# phonemizer (espeak-ng built for the browser) and the ONNX Runtime for the web. None of it is part of this file.
+# When the owner asks for it the agent fetches the six files once (about 85 MB over the network, 93 MB on disk),
+# checks every one against the SHA-256 written here, and from then on the panel runs them in a worker on the
+# device itself: no text leaves the phone and nothing is paid.
+DEVICE = "device"               # the name of that speaker, next to the names of a speech service's voices
+VOICE_FILES = {                 # name: (bytes, SHA-256)
+    "ort.wasm.min.js": (142930, "90533a3fd7006df7f897c0d63c468996da5c8e430e39964d92ebe586c4996614"),
+    "ort-wasm-simd.wasm": (10595041, "f533b5f21790563d7556c611c3835ac65848ee326da2689aac54ed7d9cc8c6a4"),
+    "piper_phonemize.js": (120714, "fef0c2fc442d24fdef5c7c7cc37d5da2314407640fe11ab1bfe347c723dff19b"),
+    "piper_phonemize.wasm": (635212, "b777cd107a91d2bcc6a1ea46f2c26a662a7407394fe84589198aeaa83dd7a9d6"),
+    "piper_phonemize.data": (18077249, "29f1025eb23a5b5c192cd14a6efbce4509402ff265405072ee6f7d1a09b78f8c"),
+    "voice.onnx": (63516050, "6a98504bb77dc2fd3a863c977d37e67a6a525fdf661917385d569a3ff78e6cae"),
+}
+VOICE_FETCH_MB = 85             # what the owner is told the download costs
+_PHON = ("piper_phonemize.js", "piper_phonemize.wasm", "piper_phonemize.data")
+_ORT = ("ort.wasm.min.js", "ort-wasm-simd.wasm")
+# Which voice, and how it speaks, was chosen by measurement (tests/ui/voicelab.py): the five Persian voices of the
+# Piper collection read the same sentences and a speech recogniser wrote down what it heard. "ganji" with a calmer
+# rhythm came through best (98.5% of the letters); "amir" as published, the first choice here, only 91%.
+_VOICE = "/rhasspy/piper-voices/resolve/6b9cfaacb4fb2e02a9621227e3c1a48bec9710c3/fa/fa_IR/ganji/medium/fa_IR-ganji-medium.onnx"
+# Where the files come from, tried in this order until every file is there: (address, bytes of the archive or 0,
+# folder inside the archive, the files it brings). An address ending in "/" has each file under its own name;
+# any other address is the one file itself.
+VOICE_SOURCES = [
+    ("https://registry.npmjs.org/@diffusionstudio/piper-wasm/-/piper-wasm-1.0.0.tgz", 9204429, "package/build/", _PHON),
+    ("https://cdn.jsdelivr.net/npm/@diffusionstudio/piper-wasm@1.0.0/build/", 0, "", _PHON),
+    ("https://unpkg.com/@diffusionstudio/piper-wasm@1.0.0/build/", 0, "", _PHON),
+    ("https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/", 0, "", _ORT),
+    ("https://unpkg.com/onnxruntime-web@1.18.0/dist/", 0, "", _ORT),
+    ("https://cdnjs.cloudflare.com/ajax/libs/onnxruntime-web/1.18.0/", 0, "", _ORT),
+    ("https://registry.npmjs.org/onnxruntime-web/-/onnxruntime-web-1.18.0.tgz", 36155916, "package/dist/", _ORT),
+    ("https://huggingface.co" + _VOICE, 0, "", ("voice.onnx",)),
+    ("https://hf-mirror.com" + _VOICE, 0, "", ("voice.onnx",)),
+    # the same file as it sits in a public repository on GitHub, for networks that reach neither of the above
+    ("https://raw.githubusercontent.com/theMahdiyarB/toolbox/5669f1007d7558c3f4694713046a730389b9b276/static/lib/fa_IR-ganji-medium.onnx", 0, "", ("voice.onnx",)),
+]
+VOICE_MIME = {"js": "text/javascript; charset=utf-8", "wasm": "application/wasm"}
+VOICE_RATE = 22050              # samples per second of the voice
+VOICE_SCALES = (0.5, 1.0, 0.333)                       # liveliness of the sound, slowness (1 = as recorded), freedom of the rhythm
+# The worker the panel starts. It is the only code of the agent that touches the downloaded files, and its own
+# Content-Security-Policy lets it talk to this agent alone.
+VOICE_WORKER_JS = r"""'use strict';
+/* The narrator on the device: text in, sound out. Runs apart from the page, which stays responsive meanwhile. */
+importScripts('ort.wasm.min.js', 'piper_phonemize.js');
+ort.env.wasm.numThreads = 1;
+ort.env.wasm.wasmPaths = new URL('.', self.location.href).href;
+var session = null, line = Promise.resolve();
+function phonemes(texts) {                             /* for every text the sounds the voice has to make, as numbers */
+  return new Promise(function (resolve, reject) {
+    var out = [], err = [], over = false;
+    function finish() {
+      if (over) return;
+      over = true;
+      if (out.length === texts.length) resolve(out); else reject(new Error('phonemizer: ' + (err.join(' | ').slice(0, 300) || 'no answer')));
+    }
+    createPiperPhonemize({
+      print: function (text) {
+        try { var o = JSON.parse(text); if (o && o.phoneme_ids && o.phoneme_ids.length) out.push(o.phoneme_ids); else err.push(String(text)); }
+        catch (e) { err.push(String(text)); }
+        if (out.length === texts.length) finish();
+      },
+      printErr: function (text) { err.push(String(text)); },
+      locateFile: function (name) { return name; }
+    }).then(function (mod) {
+      try { mod.callMain(['-l', 'fa', '--input', JSON.stringify(texts.map(function (t) { return {text: t}; })), '--espeak_data', '/espeak-ng-data']); }
+      catch (e) { err.push(String(e)); }
+      setTimeout(finish, 2000);
+    }, reject);
+  });
+}
+function wide(list) { return BigInt64Array.from(list, function (x) { return BigInt(x); }); }
+async function voice(tell) {                           /* the voice itself: by far the largest file, so its progress is told */
+  var res = await fetch('voice.onnx');
+  if (!res.ok) throw new Error('voice file: HTTP ' + res.status);
+  var total = +res.headers.get('Content-Length') || 0;
+  if (!res.body || !res.body.getReader) return new Uint8Array(await res.arrayBuffer());
+  var reader = res.body.getReader(), all = total ? new Uint8Array(total) : null, parts = [], got = 0;
+  for (;;) {                                           /* straight into one block when the size is known: phones have little memory */
+    var part = await reader.read();
+    if (part.done) break;
+    if (all && got + part.value.length <= total) all.set(part.value, got);
+    else { if (all) { parts.push(all.slice(0, got)); all = null; } parts.push(part.value); }
+    got += part.value.length;
+    if (total) tell(Math.min(99, Math.floor(got * 100 / total)));
+  }
+  if (all) return got === total ? all : all.subarray(0, got);
+  var out = new Uint8Array(got), at = 0;
+  parts.forEach(function (x) { out.set(x, at); at += x.length; });
+  return out;
+}
+async function read(id, texts) {
+  var pct = 0, beat = setInterval(function () { self.postMessage({id: id, kind: 'step', i: -1, pct: pct}); }, 3000);
+  try {
+    self.postMessage({id: id, kind: 'step', i: -1, pct: 0});
+    var ids = await phonemes(texts);
+    if (!session) session = await ort.InferenceSession.create(await voice(function (p) { pct = p; }), {executionProviders: ['wasm']});
+    clearInterval(beat);
+    for (var i = 0; i < ids.length; i++) {
+      self.postMessage({id: id, kind: 'step', i: i});
+      var got = await session.run({input: new ort.Tensor('int64', wide(ids[i]), [1, ids[i].length]),
+        input_lengths: new ort.Tensor('int64', wide([ids[i].length]), [1]), scales: new ort.Tensor('float32', Float32Array.from(__SCALES__), [3])});
+      var pcm = new Float32Array(got.output.data);
+      self.postMessage({id: id, kind: 'clip', i: i, rate: __RATE__, pcm: pcm}, [pcm.buffer]);
+    }
+    self.postMessage({id: id, kind: 'done'});
+  } catch (e) { self.postMessage({id: id, kind: 'error', error: String((e && e.message) || e)}); }
+  clearInterval(beat);
+}
+self.onmessage = function (ev) { line = line.then(function () { return read(ev.data.id, ev.data.texts); }); };
+""".replace("__SCALES__", json.dumps(list(VOICE_SCALES))).replace("__RATE__", str(VOICE_RATE))
+SCENE_LINES = ["جزئیات بیشتر در کپشن 👇", "همین حالا پیام بده", "برای دوستانت هم بفرست", "ما را دنبال کن"]
+SCENE_SAYS = {"جزئیات بیشتر در کپشن 👇": "جزئیات بیشتر را در کپشن بخوانید.", "همین حالا پیام بده": "همین حالا به ما پیام بدهید.",
+              "برای دوستانت هم بفرست": "این ویدیو را برای دوستانتان هم بفرستید.", "ما را دنبال کن": "ما را دنبال کنید تا خبرهای بعدی را از دست ندهید."}
+
+
+class PictureError(Exception):
+    """A picture service could not deliver. wait > 0: it asked to come back after that many seconds.
+    tell=True: the owner should hear about it even when another service delivers (a refused key, for example)."""
+
+    def __init__(self, message, wait=0.0, tell=False):
+        super().__init__(message)
+        self.message, self.wait, self.tell = message, max(0.0, float(wait or 0)), tell
+
+
+def shorten(text, limit):
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit + 1]
+    return (cut[:cut.rfind(" ")] if " " in cut[limit // 2:] else text[:limit]).rstrip(" ،,.؛:-") + "…"
+
+
+def no_writing(prompt):
+    """Takes requests for written words out of a picture description: picture models turn them into scribble, and the
+    panel writes the real words on the picture itself."""
+    quoted, verbs = r"[\"“”«»][^\"“”«»]{0,80}[\"“”«»]", r"(?:that |which )?(?:reads?|reading|says?|saying|labell?ed|titled|written)\b"
+    text = re.sub(r"\b%s:?\s*%s" % (verbs, quoted), " ", str(prompt or ""), flags=re.I)      # ... that reads "20% OFF"
+    text = re.sub(quoted, " ", text)
+    text = re.sub(r"\b%s[^,.;]*" % verbs, " ", text, flags=re.I)                              # ... saying Welcome
+    text = re.sub(r"\bwith (?:the )?(?:words?|text|letters|caption|inscription|slogan)\b[^,.;]*", " ", text, flags=re.I)
+    text = re.sub(r"\bin (?:(?:bold|big|large|capital|neon) )*letters\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(?:an? |the )?(?:[\w-]+ ){0,2}(?:signboard|signage|sign|banner|poster|placard|chalkboard|blackboard|price tag|label)s?\b"
+                  r"[^,.;]*", " ", text, flags=re.I)                                           # a sign is writing too
+    text = re.sub(r"\b(?:an? )?\d+\s*%[^,.;]*", " ", text)                                    # "20% off" cannot be drawn
+    text = re.sub(r"\b(?:with|and|showing|displaying|offering|featuring|holding|beside|next to)\s*(?=[,.;]|$)", " ", text, flags=re.I)
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")       # café → cafe; English only
+    text = re.sub(r"\s+([,.;])", r"\1", re.sub(r"\s+", " ", text))
+    return re.sub(r"(?:[,.;]\s*){2,}", ", ", text).strip(" ,.;")
+
+
+_ONES = ["صفر", "یک", "دو", "سه", "چهار", "پنج", "شش", "هفت", "هشت", "نه", "ده", "یازده", "دوازده", "سیزده", "چهارده",
+         "پانزده", "شانزده", "هفده", "هجده", "نوزده"]
+_TENS = ["", "", "بیست", "سی", "چهل", "پنجاه", "شصت", "هفتاد", "هشتاد", "نود"]
+_HUNDREDS = ["", "صد", "دویست", "سیصد", "چهارصد", "پانصد", "ششصد", "هفتصد", "هشتصد", "نهصد"]
+
+
+def number_words(n):
+    """A whole number below a billion in Persian words."""
+    if n < 20:
+        return _ONES[n]
+    if n < 100:
+        return _TENS[n // 10] + (" و " + _ONES[n % 10] if n % 10 else "")
+    if n < 1000:
+        return _HUNDREDS[n // 100] + (" و " + number_words(n % 100) if n % 100 else "")
+    size, name = (10 ** 6, "میلیون") if n >= 10 ** 6 else (1000, "هزار")
+    head, rest = divmod(n, size)
+    lead = name if head == 1 and size == 1000 else number_words(head) + " " + name
+    return lead + (" و " + number_words(rest) if rest else "")
+
+
+def spoken(text):
+    """A line as a speech service should get it: numbers and signs in words, no emoji, links or hashtag signs."""
+    text = str(text or "").translate(_FA_DIGITS)
+    text = re.sub(r"https?://\S+|www\.\S+", " ", text)
+    text = re.sub(r"[#@]([^\s#@]+)", lambda m: m.group(1).replace("_", " "), text)
+    text = re.sub(r"(\d)\s*[%٪]", r"\1 درصد", text)
+    # a phone number with its area code is read digit by digit; the parts of a date one after another
+    text = re.sub(r"\b0\d{1,3}[-–]\d{3,8}(?:[-–]\d{2,4})?\b", lambda m: " ".join(_ONES[int(d)] for d in re.sub(r"\D", "", m.group(0))), text)
+    text = re.sub(r"\b(\d{1,4})[/.\-](\d{1,2})[/.\-](\d{1,4})\b", lambda m: " ".join(str(int(x)) for x in m.groups()), text)
+    text = re.sub(r"(\d)[.٫/](\d)", r"\1 ممیز \2", text)
+    text = re.sub(r"(\d):(\d)", r"\1 و \2", text)
+
+    def words(m):
+        digits = re.sub(r"\D", "", m.group(0))
+        if len(digits) > 9 or (digits[0] == "0" and len(digits) > 1):      # a phone number or a code: digit by digit
+            return " ".join(_ONES[int(d)] for d in digits[:16])
+        return number_words(int(digits))
+
+    text = re.sub(r"\d+(?:[,٬]\d{3})*", words, text)
+    # emoji and pictographs go; the zero-width non-joiner that Persian words need stays
+    text = re.sub("[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200D\u20E3]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()[:SAY_MAX]
+
+
+def loose_json(text):
+    """The first JSON object inside an answer that may carry a code fence or a few words around it."""
+    text = str(text or "")
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    data = jload(text[start:end + 1], None)
+    return data if isinstance(data, dict) else None
+
+
+class Studio:
+    def __init__(self, agent):
+        self.agent, self.cfg, self.graph = agent, agent.cfg, agent.graph
+        self.jobs, self.lock = {}, threading.Lock()
+        self.free_at = 0.0                             # when the free picture service takes the next request from here
+        self.models, self.models_at = None, 0.0
+
+    def conf(self):
+        return self.agent.settings.all()["studio"]
+
+    def state(self):
+        c = self.conf()
+        return {"image": c["image"], "pollen": bool(c["pollen"]), "custom": bool(c["url"]),
+                "free_wait": max(0, int(self.free_at - now())), "text": self.agent.ai.mode(),
+                "voice": self.voice_ready(), "speaker": self.speaker(None), "pack": self.agent.pack.view()}
+
+    # ── words ──
+    def question(self, idea, kind, n):
+        """(what the assistant is, what it is asked) for one post."""
+        ai, reel = self.agent.ai, kind == "reel"
+        ask = ("ایده: «%s»\nبرای %s اینستاگرام فقط یک شیء JSON معتبر بده (بدون هیچ توضیح یا متن دیگری) با این کلیدها. "
+               "فارسی را ساده، روزمره و درست بنویس و فقط چیزی را بگو که در ایده هست.\n"
+               "\"caption\": کپشن فارسی ۲ تا ۴ جمله با یکی دو ایموجی؛ بدون هشتگ.\n"
+               "\"hashtags\": آرایهٔ ۳ تا ۵ هشتگ دقیق و مرتبط.\n"
+               "\"headline\": تیتر فارسی خیلی کوتاه برای نوشتن روی تصویر (حداکثر ۶ کلمه).\n"
+               "\"sub\": یک جملهٔ کوتاه تکمیلی یا دعوت به اقدام (حداکثر ۸ کلمه) یا رشتهٔ خالی.\n"
+               "\"image\": توصیف انگلیسی دقیق یک تصویر برای مدل تصویرساز (سوژه، محیط، نور، زاویه)؛ بدون هیچ نوشته‌ای در تصویر و "
+               "بدون آدم، مگر ایده بدون آدم معنا ندهد.\n"
+               % (idea, ("یک ریل %d صحنه‌ای" % n) if reel else "یک پست تصویری"))
+        if reel:
+            ask += ("\"scenes\": آرایهٔ دقیقاً %d صحنه؛ هر صحنه یک شیء با \"text\" (جملهٔ فارسی خیلی کوتاه برای روی تصویر، حداکثر ۷ کلمه)، "
+                    "\"say\" (متنی که گوینده روی همین صحنه می‌خواند: یک یا دو جملهٔ فارسی روان و گفتاری، ۸ تا ۱۸ کلمه، بدون ایموجی؛ "
+                    "عددها را با حروف بنویس) و \"image\" (توصیف انگلیسی تصویر همان صحنه، با همان قاعده‌ها). "
+                    "صحنهٔ اول توجه را جلب کند و صحنهٔ آخر دعوت به اقدام باشد.\n" % n)
+        return ai.persona() + " هر چه می‌نویسی فقط یک شیء JSON معتبر باشد.", ask
+
+    def ask(self, system, question, job=None):
+        """Asks the assistant and, inside a job, waits for the free service's turn. Returns (answer, why there is none)."""
+        ai, text, why = self.agent.ai, "", ""
+        busy = job["step"] if job else ""
+        ep = ai.endpoint()
+        if ep and not self.graph.reachable(ep[0]):
+            return "", "down"                          # known in seconds; the question itself may take a minute
+        for attempt in (0, 1, 2):
+            try:
+                # The free model needs 10 to 40 seconds for a whole post; the job runs in the background anyway.
+                # A cool temperature keeps a small model's Persian closer to plain, correct sentences.
+                text = ai.ask(system, question, max_tokens=1500, timeout=PLAN_TIMEOUT, temperature=0.4)
+                why = ""
+                break
+            except AIDown as e:
+                wait = e.wait
+                why = "limit" if wait else ("off" if str(e) == "off" else "down")
+                if attempt == 2 or not 0 < wait <= PATIENCE or job is None:
+                    break
+                wait = max(wait, 3.0 * attempt)        # told "one more second" twice in a row: give it a little longer
+                job["step"] = "سرویس رایگان متن هر ۴۵ ثانیه یک پاسخ می‌دهد؛ %s ثانیهٔ دیگر…" % fa(int(wait + GRACE))
+                if job["cancel"].wait(wait + GRACE):
+                    break
+                job["step"] = busy
+        return text, why
+
+    @staticmethod
+    def readable(prompt):
+        """Can a picture service make sense of this description? They read English only."""
+        letters = re.findall(r"[^\W\d_]", str(prompt or ""))
+        return len(letters) >= 3 and sum(1 for ch in letters if ch.isascii()) >= 0.6 * len(letters)
+
+    def plan(self, idea, kind, n, job=None):
+        """Caption, hashtags, headline and one picture description per scene: from the assistant, or from templates."""
+        reel = kind == "reel"
+        system, ask = self.question(idea, kind, n)
+        text, why = self.ask(system, ask, job)
+        base = self.offline_plan(idea, kind, n)
+        data = loose_json(text)
+        if not data:
+            base["why"] = why or ("down" if not text else "format")
+            return base
+
+        def s(value, limit):
+            return shorten(value, limit) if isinstance(value, str) else ""
+
+        out = dict(base, source="ai", why="")
+        caption = str(data.get("caption") or "").strip() if isinstance(data.get("caption"), str) else ""
+        caption = re.sub(r"\s*#[^\s#]+", "", caption).strip()[:1800]       # hashtags travel on their own
+        tags = []
+        for t in (data.get("hashtags") if isinstance(data.get("hashtags"), list) else []):
+            t = "#" + re.sub(r"[\s#]+", "_", str(t).strip().lstrip("#")).strip("_")
+            if len(t) > 1 and norm(t) not in [norm(x) for x in tags]:
+                tags.append(t[:60])
+
+        def pic(value):
+            return shorten(no_writing(value), 500) if isinstance(value, str) else ""
+
+        out.update(caption=caption or base["caption"], hashtags=tags[:GOOD_HASHTAGS] or base["hashtags"],
+                   headline=s(data.get("headline"), 70) or base["headline"], sub=s(data.get("sub"), 90),
+                   image=pic(data.get("image")))
+        if reel:
+            scenes = []
+            for i, sc in enumerate(data.get("scenes") if isinstance(data.get("scenes"), list) else []):
+                if isinstance(sc, dict) and len(scenes) < n:
+                    text = s(sc.get("text"), 80) or base["scenes"][i]["text"]
+                    scenes.append({"text": text, "say": s(sc.get("say"), 300) or text, "image": pic(sc.get("image")) or out["image"]})
+            out["scenes"] = scenes + base["scenes"][len(scenes):]
+        return out
+
+    def offline_plan(self, idea, kind, n):
+        ai = self.agent.ai
+        tags = ai.offline_hashtags(idea)[:GOOD_HASHTAGS]
+        parts = [p.strip() for p in re.split(r"[\n.!؟?؛،:\-–—]+", idea) if len(p.strip()) >= 3]
+        headline = shorten(parts[0] if parts else idea, 60)
+        lines = [shorten(p, 70) for p in parts][:max(1, n - 1)]
+        handle = self.agent.ig.acct.get("username") or self.agent.settings.get("brand.handle") or ""
+        extra = ([("@" + handle)] if handle else []) + SCENE_LINES
+        while len(lines) < n:
+            lines.append(extra[(len(lines) - 1) % len(extra)] if lines else headline)
+        return {"source": "offline", "why": "", "caption": "%s ✨\n\nنظر شما چیه؟ توی کامنت‌ها برامون بنویسید 👇" % idea, "hashtags": tags,
+                "headline": headline, "sub": "", "image": idea,
+                "scenes": [{"text": t, "image": idea, "say": SCENE_SAYS.get(t) or ("ما را در اینستاگرام دنبال کنید." if t.startswith("@") else t)}
+                           for t in lines[:n]] if kind == "reel" else []}
+
+    # ── pictures ──
+    def fetch(self, method, url, data=None, headers=None, timeout=120, what="تصویر"):
+        try:
+            if not self.graph.reachable(url):
+                raise GraphError("unreachable", kind="network")
+            return self.graph.http(method, url, data, headers, timeout)
+        except GraphError:
+            raise PictureError("ارتباط با سرویس %s برقرار نشد (اینترنت یا فیلترشکن را بررسی کن)." % what)
+
+    @staticmethod
+    def is_picture(raw):
+        found = sniff(raw[:64])
+        return bool(found and found[0] == "image" and found[1] in ("jpg", "png", "webp") and len(raw) <= PICTURE_MAX)
+
+    @staticmethod
+    def refusal(headers, raw):
+        """(what the service said, how many seconds it wants us to wait) out of a "not now" answer."""
+        text = raw[:2000].decode("utf-8", "replace")
+        data, msg = jload(text, None), ""
+        if isinstance(data, dict):
+            err = data.get("error")
+            msg = (err.get("message") if isinstance(err, dict) else err) or data.get("message") or ""
+        msg = str(msg or text)[:300]
+        m = re.search(r"(?:retry after|wait)\s+(\d+)\s*s", msg, re.I)
+        if m:
+            return msg, int(m.group(1))
+        after = str(headers.get("retry-after") or "")
+        return msg, int(after) if after.isdigit() else 0
+
+    def from_key(self, prompt, shape, seed, style, job):
+        """Pollinations with the owner's own key: full size, no waiting, no logo."""
+        c = self.conf()
+        if not c["pollen"]:
+            raise PictureError("")
+        w, h = PICTURE_SIZES[shape]
+        q = {"width": w, "height": h, "seed": seed, "safe": "true"}
+        url = "%s/image/%s?%s" % (self.cfg.gen_api, urllib.parse.quote(prompt[:900], safe=""), urllib.parse.urlencode(q))
+        status, headers, raw = self.fetch("GET", url, headers={"Authorization": "Bearer " + c["pollen"]})
+        if status == 200 and self.is_picture(raw):
+            return raw
+        if status == 401:
+            raise PictureError("کلید Pollinations پذیرفته نشد؛ در تنظیمات دوباره واردش کن.", tell=True)
+        if status == 402:
+            raise PictureError("اعتبار (Pollen) کلید Pollinations تمام شده است.", tell=True)
+        _, wait = self.refusal(headers, raw)
+        if status in (429, 503):
+            raise PictureError("Pollinations فعلاً شلوغ است.", wait or 10)
+        raise PictureError("Pollinations جواب نداد (HTTP %s)." % status)
+
+    def from_free(self, prompt, shape, seed, style, job):
+        """Pollinations without a key: one picture every 45 seconds per address, with its small logo in a corner."""
+        left = self.free_at - now()
+        if left > 0:
+            raise PictureError("سرویس رایگان هر ۴۵ ثانیه یک تصویر می‌دهد.", left)
+        w, h = PICTURE_SIZES[shape]
+        q = urllib.parse.urlencode({"width": w, "height": h, "seed": seed, "private": "true", "safe": "true"})
+        url = "%s/prompt/%s?%s" % (self.cfg.image_api, urllib.parse.quote(prompt[:700], safe=""), q)
+        status, headers, raw = self.fetch("GET", url)
+        if status == 200 and self.is_picture(raw):
+            self.free_at = now() + self.cfg.free_gap
+            return raw
+        _, wait = self.refusal(headers, raw)
+        if status in (402, 429, 503):
+            wait = wait or (10 if status == 503 else self.cfg.free_gap)
+            self.free_at = max(self.free_at, now() + wait)
+            raise PictureError("سرویس رایگان فعلاً نوبت نمی‌دهد.", wait)
+        raise PictureError("سرویس رایگان تصویر جواب نداد (HTTP %s)." % status)
+
+    def horde_headers(self, json_body=False):
+        h = {"apikey": "0000000000", "Client-Agent": HORDE_AGENT, "Accept": "application/json"}
+        if json_body:
+            h["Content-Type"] = "application/json"
+        return h
+
+    def horde_models(self, style):
+        """Which general-purpose models the volunteers serve right now (most of that network draws anime)."""
+        if self.models is None or now() - self.models_at > 1800:
+            self.models, self.models_at = [], now()
+            try:
+                status, _, raw = self.fetch("GET", self.cfg.horde_api + "/status/models?type=image", headers=self.horde_headers(), timeout=20)
+                rows = jload(raw.decode("utf-8", "replace"), None) if status == 200 else None
+                for m in (rows if isinstance(rows, list) else []):
+                    if isinstance(m, dict) and int(m.get("count") or 0) > 0:
+                        self.models.append((str(m.get("name")), int(m.get("count") or 0)))
+            except (PictureError, ValueError, TypeError):
+                pass
+        known = HORDE_MODELS["art" if style in ("art", "3d") else "photo"]
+        if not self.models:
+            return list(known)
+        live = dict(self.models)
+        want = [name for name in known if name in live]
+        if not want:
+            want = [name for name, _ in sorted(self.models, key=lambda x: -x[1]) if not HORDE_AVOID.search(name)][:4]
+        return want
+
+    def from_horde(self, prompt, shape, seed, style, job):
+        """AI Horde, a network of volunteers: free and without an account, but small pictures and sometimes a queue."""
+        base = self.cfg.horde_api
+        w, h = HORDE_SIZES[shape]
+        body = {"prompt": prompt[:900] + " ### text, letters, watermark, logo, blurry, deformed, low quality",
+                "params": {"width": w, "height": h, "steps": 24, "n": 1, "sampler_name": "k_euler_a", "cfg_scale": 6.5,
+                           "karras": True, "seed": str(seed)},
+                "nsfw": False, "censor_nsfw": True, "r2": False, "shared": False, "slow_workers": True, "trusted_workers": False}
+        models = self.horde_models(style)
+        if models:
+            body["models"] = models
+        status, headers, raw = self.fetch("POST", base + "/generate/async", jdump(body).encode("utf-8"), self.horde_headers(True), 30)
+        data = jload(raw.decode("utf-8", "replace"), None)
+        rid = data.get("id") if isinstance(data, dict) else None
+        if status not in (200, 202) or not rid:
+            rc = data.get("rc") if isinstance(data, dict) else ""
+            if status == 429 or rc == "TooManyPrompts":
+                raise PictureError("شبکهٔ داوطلبانه فعلاً درخواست تازه نمی‌پذیرد.", 20)
+            raise PictureError("شبکهٔ داوطلبانه (AI Horde) درخواست را نپذیرفت (%s)." % (rc or "HTTP %s" % status))
+        deadline = now() + HORDE_WAIT
+        try:
+            while True:
+                if job is not None and job["cancel"].wait(HORDE_POLL):
+                    raise PictureError("لغو شد.")
+                if job is None:
+                    time.sleep(HORDE_POLL)
+                status, _, raw = self.fetch("GET", base + "/generate/check/" + rid, headers=self.horde_headers(), timeout=20)
+                st = jload(raw.decode("utf-8", "replace"), None)
+                st = st if isinstance(st, dict) else {}
+                if st.get("done"):
+                    break
+                if st.get("faulted") or st.get("is_possible") is False:
+                    raise PictureError("شبکهٔ داوطلبانه نتوانست این تصویر را بسازد.")
+                if now() > deadline:
+                    raise PictureError("صف شبکهٔ داوطلبانه طولانی بود.")
+                if job is not None and st.get("queue_position"):
+                    job["step"] = "در صف شبکهٔ داوطلبانه (نفر %s)…" % fa(st["queue_position"])
+        except PictureError:
+            try:
+                self.fetch("DELETE", base + "/generate/status/" + rid, headers=self.horde_headers(), timeout=15)
+            except PictureError:
+                pass
+            raise
+        status, _, raw = self.fetch("GET", base + "/generate/status/" + rid, headers=self.horde_headers(), timeout=60)
+        data = jload(raw.decode("utf-8", "replace"), None)
+        gens = data.get("generations") if isinstance(data, dict) else None
+        if not gens or not isinstance(gens[0], dict):
+            raise PictureError("شبکهٔ داوطلبانه تصویری برنگرداند.")
+        if gens[0].get("censored"):
+            raise PictureError("شبکهٔ داوطلبانه این تصویر را نپذیرفت؛ توصیف دیگری امتحان کن.")
+        return self.unwrap(gens[0].get("img"))
+
+    def unwrap(self, value):
+        """A picture that came inside JSON: either a link or the file itself as base64."""
+        value = str(value or "")
+        if value.startswith(("http://", "https://")):
+            status, _, blob = self.fetch("GET", value)
+            if status != 200:
+                blob = b""
+        else:
+            try:
+                blob = base64.b64decode(value.split(",", 1)[-1], validate=False)
+            except ValueError:
+                blob = b""
+        if not self.is_picture(blob):
+            raise PictureError("فایلی که سرویس تصویر فرستاد عکس نبود.")
+        return blob
+
+    def from_custom(self, prompt, shape, seed, style, job):
+        """Any service that speaks OpenAI's "images/generations" (the owner's own address, key and model)."""
+        c = self.conf()
+        if not c["url"]:
+            raise PictureError("" if c["image"] != "custom" else "نشانی سرویس تصویر خودت را در تنظیمات ننوشته‌ای.")
+        url = c["url"] if c["url"].endswith("/images/generations") else c["url"] + "/images/generations"
+        body = {"model": c["model"] or "gpt-image-1", "prompt": prompt[:1500], "n": 1, "size": "1024x1024" if shape == "square" else "1024x1536"}
+        headers = {"Content-Type": "application/json"}
+        if c["key"]:
+            headers["Authorization"] = "Bearer " + c["key"]
+        status, _, raw = self.fetch("POST", url, jdump(body).encode("utf-8"), headers, 180)
+        data = jload(raw.decode("utf-8", "replace"), None)
+        try:
+            item = data["data"][0]
+            value = item.get("b64_json") or item.get("url")
+        except (TypeError, KeyError, IndexError, AttributeError):
+            value = None
+        if status >= 400 or not value:
+            raise PictureError("سرویس تصویر خودت جواب قابل‌استفاده‌ای نداد (HTTP %s)." % status, tell=True)
+        return self.unwrap(value)
+
+    SOURCES = {"key": "Pollinations (با کلید)", "free": "Pollinations (رایگان)", "horde": "AI Horde", "custom": "سرویس خودت"}
+    ORDER = {"auto": ("custom", "key", "free", "horde"), "pollinations": ("key", "free"), "horde": ("horde",), "custom": ("custom",)}
+
+    def picture(self, prompt, shape="post", style="photo", job=None):
+        """One picture from the first service that delivers. Returns (file row, name of the service)."""
+        mode = self.conf()["image"]
+        if mode == "off":
+            raise PictureError("ساخت تصویر با هوش مصنوعی در تنظیمات خاموش است.")
+        shape = shape if shape in PICTURE_SIZES else "post"
+        full = ", ".join(x for x in (shorten(prompt, 600), PICTURE_STYLES.get(style, PICTURE_STYLES["photo"]), NO_TEXT) if x)
+        seed = random.randint(1, 2 ** 31 - 1)
+        said = []
+        for attempt in (0, 1):
+            soonest = None
+            for name in self.ORDER[mode]:
+                if job is not None and job["cancel"].is_set():
+                    raise PictureError("لغو شد.")
+                try:
+                    raw = getattr(self, "from_" + name)(full, shape, seed, style, job)
+                    return self.agent.store.add_asset(raw, "studio:" + name), name
+                except PictureError as e:
+                    if e.message:
+                        said.append("%s: %s" % (self.SOURCES[name], e.message))
+                    if e.tell and job is not None and said[-1] not in job["notes"]:
+                        job["notes"].append(said[-1])
+                    if e.wait and (soonest is None or e.wait < soonest):
+                        soonest = e.wait
+            if attempt or soonest is None or soonest > PATIENCE:
+                break
+            if job is not None:
+                job["step"] = "سرویس تصویر نوبت نداد؛ %s ثانیهٔ دیگر دوباره می‌پرسم…" % fa(int(soonest + GRACE))
+                if job["cancel"].wait(soonest + GRACE):
+                    raise PictureError("لغو شد.")
+            else:
+                time.sleep(soonest + GRACE)
+            said = []
+        raise PictureError(" | ".join(said[-3:]) or "هیچ سرویس تصویری در دسترس نبود.")
+
+    # ── the narrator ──
+    def voice_ready(self):
+        """Is there a speech service to read the narration? (The free services have none.)"""
+        c = self.conf()
+        return bool(c["pollen"] or (c["url"] and c["tts_model"]) or self.cfg.demo)
+
+    def speak(self, text, speaker, job=None):
+        """One narration clip. Returns (file row, name of the service)."""
+        c, say = self.conf(), spoken(text)
+        if len(say) < 2:
+            raise PictureError("متنی برای خواندن نیست.")
+        body = {"input": say, "voice": speaker, "response_format": "mp3"}
+        if c["url"] and c["tts_model"]:                # the owner's own service, OpenAI's "audio/speech"
+            base = c["url"][:-len("/images/generations")] if c["url"].endswith("/images/generations") else c["url"]
+            name, url, key = "custom", base + "/audio/speech", c["key"]
+            body["model"] = c["tts_model"]
+        elif c["pollen"] or self.cfg.demo:
+            name, url = "key", self.cfg.gen_api + "/v1/audio/speech"
+            key = c["pollen"] or (self.agent.sim.ai_key if self.agent.sim is not None else "")
+            body["model"] = c["tts_model"] or "openai/tts-1"
+        else:
+            raise PictureError(NO_VOICE, tell=True)
+        headers = {"Content-Type": "application/json"}
+        if key:
+            headers["Authorization"] = "Bearer " + key
+        status = 0
+        for attempt in (0, 1):
+            status, hdrs, raw = self.fetch("POST", url, jdump(body).encode("utf-8"), headers, 120, what="صدا")
+            if status == 200 and sniff_audio(raw[:64]) and len(raw) <= SOUND_MAX:
+                return self.agent.store.add_asset(raw, "voice:" + name), name
+            if status not in (429, 503) or attempt or job is None:
+                break
+            if job["cancel"].wait(min(20, self.refusal(hdrs, raw)[1] or 5)):
+                raise PictureError("لغو شد.")
+        if status == 401:
+            raise PictureError("کلید سرویس صدا پذیرفته نشد؛ در تنظیمات دوباره واردش کن.", tell=True)
+        if status in (402, 403):
+            raise PictureError("اعتبار این کلید برای ساخت صدا کافی نیست (یا با اعتبار رایگان اجازه ندارد).", tell=True)
+        if status == 400:
+            raise PictureError("سرویس صدا این متن یا این گوینده را نپذیرفت.")
+        raise PictureError("سرویس صدا جواب قابل‌استفاده‌ای نداد (HTTP %s)." % status)
+
+    def read(self, job, speaker):
+        """The narration of a job: one clip per scene, in order."""
+        total = len(job["voices"])
+        for i, v in enumerate(job["voices"]):
+            if job["cancel"].is_set():
+                return
+            job["step"] = "گوینده در حال خواندن است…" if total == 1 else "گوینده در حال خواندن صحنهٔ %s از %s…" % (fa(i + 1), fa(total))
+            try:
+                f, source = self.speak(v["text"], speaker, job)
+                v.update(file=f["id"], preview="/api/file/" + f["id"], source=source)
+            except PictureError as e:
+                v["why"] = e.message
+                if e.tell:                             # the key or its credit: the next scene would hear the same
+                    if e.message not in job["notes"]:
+                        job["notes"].append(e.message)
+                    for rest in job["voices"][i + 1:]:
+                        rest["why"] = e.message
+                    return
+
+    def speaker(self, value):
+        """Who reads: the name the panel sent, else the saved one, else whoever is there. Without a speech service
+        that is the narrator on the device; in the demo too once it is installed, because the demo's service only beeps."""
+        for name in (value, self.conf()["speaker"]):
+            if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_.:\-]{1,60}", name):
+                return name
+        if not self.voice_ready() or (self.cfg.demo and self.agent.pack.ready()):
+            return DEVICE
+        return VOICES[0]
+
+    def lines(self, texts, speaker):
+        """One entry per line to read. For the narrator on the device the panel does the reading itself; it gets
+        the line the way it should be pronounced (numbers and signs in words)."""
+        if speaker == DEVICE:
+            return [{"text": t, "say": spoken(t), "file": "", "preview": "", "source": DEVICE, "why": ""} for t in texts]
+        return [{"text": t, "file": "", "preview": "", "source": "", "why": ""} for t in texts]
+
+    def voice(self, data):
+        texts = [str(t or "").strip()[:SAY_MAX] for t in (data.get("texts") if isinstance(data.get("texts"), list) else [])][:8]
+        if not texts or any(len(spoken(t)) < 2 for t in texts):
+            raise UserError("بنویس گوینده چه چیزی را بخواند.")
+        return self.start("voice", self.do_voice, texts, self.speaker(data.get("speaker")))
+
+    def do_voice(self, job, texts, speaker):
+        job["voices"] = self.lines(texts, speaker)
+        if speaker != DEVICE:
+            self.read(job, speaker)
+
+    def check_key(self):
+        """Is the saved Pollinations key accepted, and what does it carry?"""
+        key, gen = self.conf()["pollen"], self.cfg.gen_api
+        if not key:
+            raise UserError("اول کلید را بنویس و «ذخیره» را بزن.")
+        auth = {"Authorization": "Bearer " + key, "Accept": "application/json"}
+        try:
+            status, _, raw = self.fetch("GET", gen + "/account/key", headers=auth, timeout=30, what="Pollinations")
+        except PictureError as e:
+            raise UserError(e.message, 502)
+        data = jload(raw.decode("utf-8", "replace"), None)
+        if status in (401, 403) or (isinstance(data, dict) and data.get("valid") is False):
+            raise UserError("Pollinations این کلید را نپذیرفت. کلید با sk_ شروع می‌شود؛ کامل کپی‌اش کن.")
+        if status != 200 or not isinstance(data, dict):
+            raise UserError("Pollinations جواب روشنی نداد (HTTP %s)؛ کمی بعد دوباره امتحان کن." % status, 502)
+        models = (data.get("permissions") or {}).get("models") if isinstance(data.get("permissions"), dict) else None
+        budget = data.get("pollenBudget")
+        out = {"ok": True, "name": str(data.get("name") or "")[:60], "balance": budget if isinstance(budget, (int, float)) else None,
+               "audio": not isinstance(models, list) or "audio" in models}
+        if out["balance"] is None:                     # a key without its own budget spends the account's credit
+            try:
+                status, _, raw = self.fetch("GET", gen + "/account/balance", headers=auth, timeout=30, what="Pollinations")
+                bal = jload(raw.decode("utf-8", "replace"), None)
+                if status == 200 and isinstance(bal, dict) and isinstance(bal.get("balance"), (int, float)):
+                    out["balance"] = bal["balance"]
+            except PictureError:
+                pass
+        return out
+
+    # ── jobs: making takes a while, so the panel starts a job and asks how it is going ──
+    @staticmethod
+    def view(job):
+        return {k: job[k] for k in ("id", "kind", "status", "step", "plan", "pictures", "voices", "notes", "error")}
+
+    def job(self, jid):
+        with self.lock:
+            job = self.jobs.get(str(jid))
+        if not job:
+            raise UserError("این کار پیدا نشد (شاید ایجنت دوباره اجرا شده باشد). دوباره «بساز» را بزن.", 404)
+        return self.view(job)
+
+    def cancel(self, jid):
+        with self.lock:
+            job = self.jobs.get(str(jid))
+        if job:
+            job["cancel"].set()
+        return {"ok": True}
+
+    def start(self, kind, fn, *args):
+        with self.lock:
+            for old in [k for k, v in self.jobs.items() if v["created"] < now() - 3600]:
+                del self.jobs[old]
+            if sum(1 for v in self.jobs.values() if v["status"] == "running") >= 2:
+                raise UserError("ایجنت همین حالا مشغول ساختن است؛ صبر کن تمام شود.", 429)
+            job = {"id": secrets.token_hex(8), "kind": kind, "status": "running", "step": "", "plan": None, "pictures": [],
+                   "voices": [], "notes": [], "error": "", "created": now(), "cancel": threading.Event()}
+            self.jobs[job["id"]] = job
+        threading.Thread(target=self.run, args=(job, fn) + args, name="studio", daemon=True).start()
+        return self.view(job)
+
+    def run(self, job, fn, *args):
+        try:
+            fn(job, *args)
+            job["status"] = "canceled" if job["cancel"].is_set() else "done"
+        except UserError as e:
+            job["status"], job["error"] = "failed", e.message
+        except Exception:
+            log("studio:", traceback.format_exc())
+            job["status"], job["error"] = "failed", "خطای داخلی برنامه؛ جزئیات در ترمینال نوشته شد."
+        job["step"] = ""
+
+    def make(self, data):
+        idea = re.sub(r"[ \t]+", " ", str(data.get("idea") or "")).strip()[:600]
+        if len(idea) < 3:
+            raise UserError("ایده‌ات را در یک جمله بنویس.")
+        kind = "reel" if data.get("kind") == "reel" else "image"
+        n = clamp(data.get("scenes") or 4, 2, 6) if kind == "reel" else 1
+        style = data.get("style") if data.get("style") in PICTURE_STYLES else "photo"
+        voice = self.speaker(data.get("speaker")) if kind == "reel" and data.get("voice") is True else ""
+        return self.start("make", self.do_make, idea, kind, n, style, data.get("pictures") is not False, voice)
+
+    def do_make(self, job, idea, kind, n, style, want, voice=""):
+        job["step"] = "در حال نوشتن کپشن و چیدن صحنه‌ها…"
+        plan = self.plan(idea, kind, n, job)
+        plan.update(idea=idea, kind=kind, style=style)
+        prompts = [sc["image"] for sc in plan["scenes"]] if kind == "reel" else [plan["image"]]
+        job["pictures"] = [{"prompt": p, "file": "", "preview": "", "source": "", "why": ""} for p in prompts]
+        if voice:
+            job["voices"] = self.lines([sc["say"] for sc in plan["scenes"]], voice)
+        job["plan"] = plan
+        if voice == DEVICE:
+            pass                                       # read on the device, by the panel, once the job is done
+        elif voice and self.voice_ready():             # the narrator first: it is quick, the pictures are not
+            self.read(job, voice)
+        elif voice:
+            for v in job["voices"]:
+                v["why"] = NO_VOICE
+        if not want:
+            return
+        # The picture services only understand English. Without a description from the assistant the picture would
+        # show something else than the idea, so a drawn background is the honest choice.
+        for pic in job["pictures"]:
+            if not self.readable(pic["prompt"]):
+                pic["why"] = ("دستیار در دسترس نبود تا ایده را برای تصویرساز توصیف کند؛ برای همین تصویر هوش مصنوعی ساخته نشد."
+                              if plan["source"] != "ai" else "دستیار برای این تصویر توصیفی نداد؛ در «تصویر دیگر» خودت بنویس چه چیزی را نشان بدهد.")
+        self.draw(job, "reel" if kind == "reel" else "post", style)
+
+    def redo(self, data):
+        prompt = str(data.get("prompt") or "").strip()[:600]
+        if len(prompt) < 3:
+            raise UserError("بنویس تصویر چه چیزی را نشان بدهد.")
+        shape = data.get("shape") if data.get("shape") in PICTURE_SIZES else "post"
+        style = data.get("style") if data.get("style") in PICTURE_STYLES else "photo"
+        return self.start("picture", self.do_redo, prompt, shape, style)
+
+    def do_redo(self, job, prompt, shape, style):
+        pic = {"prompt": prompt, "file": "", "preview": "", "source": "", "why": ""}
+        job["pictures"] = [pic]
+        if not self.readable(prompt):                  # written in Persian: the assistant puts it into English first
+            job["step"] = "در حال برگرداندن توصیف به انگلیسی…"
+            text, why = self.ask("You translate picture descriptions into English for an image generator. Answer with the English "
+                                 "description only: one or two sentences, no quotes, no explanation.", prompt, job)
+            english = shorten(no_writing(text.strip().strip("\"'«»")), 500)
+            if not self.readable(english):
+                pic["why"] = ("تصویرسازها فقط انگلیسی می‌فهمند و دستیار الان در دسترس نبود تا توصیف را برگرداند. "
+                              "کمی بعد دوباره بزن یا توصیف را انگلیسی بنویس.")
+                return
+            pic["prompt"] = english
+        self.draw(job, shape, style)
+
+    def draw(self, job, shape, style):
+        failed, total = 0, len(job["pictures"])
+        for i, pic in enumerate(job["pictures"]):
+            if job["cancel"].is_set():
+                return
+            if pic["why"]:
+                continue                               # already known to be undrawable
+            job["step"] = "در حال کشیدن تصویر…" if total == 1 else "در حال کشیدن تصویر %s از %s…" % (fa(i + 1), fa(total))
+            try:
+                f, source = self.picture(pic["prompt"], shape, style, job)
+                pic.update(file=f["id"], preview="/api/file/" + f["id"], source=source, width=f["width"], height=f["height"])
+                failed = 0
+            except PictureError as e:
+                pic["why"] = e.message
+                failed += 1
+                if failed >= 2:                        # nothing answers: the remaining scenes get a drawn background at once
+                    for rest in job["pictures"][i + 1:]:
+                        rest["why"] = e.message
+                    return
 
 
 # ───────────────────────────── auto-reply rules ─────────────────────────────
@@ -1454,6 +2402,230 @@ DEFAULT_RULES = [
     {"scope": "dm", "name": "ساعت کاری و آدرس", "keywords": ["ساعت کاری", "تا ساعت چند", "آدرس", "کجایید", "لوکیشن"],
      "mode": "any", "replies": ["سلام 🌹 ممنون از پیام‌تون. ساعت کاری و آدرس در بیوی پیج هست؛ اگر سؤال دیگه‌ای بود در خدمتیم."]},
 ]
+
+
+class PackError(Exception):
+    """net=True: the trouble is the connection, so trying again later can help."""
+
+    def __init__(self, message, net=False):
+        super().__init__(message)
+        self.message, self.net = message, net
+
+
+class VoicePack:
+    """The files of the narrator on the device (see VOICE_FILES): fetched once on request, checked, handed to the panel."""
+
+    def __init__(self, agent):
+        self.agent, self.cfg = agent, agent.cfg
+        self.dir = os.path.join(agent.cfg.data_dir, "voice")
+        self.files, self.sources = dict(VOICE_FILES), list(VOICE_SOURCES)
+        self.lock, self.stop = threading.Lock(), threading.Event()
+        self.busy, self.why, self.part, self.thread = False, "", 0, None
+        self.shown = 0                                 # the progress told so far: it does not go backwards while loading
+        self.sure = set()                              # files whose content was checked since the agent started
+
+    def have(self, name):
+        try:
+            return os.path.getsize(os.path.join(self.dir, name)) == self.files[name][0]
+        except OSError:
+            return False
+
+    def ready(self):
+        return not self.busy and all(self.have(n) for n in self.files)
+
+    def view(self):
+        total = sum(v[0] for v in self.files.values())
+        done = sum(self.files[n][0] for n in self.files if self.have(n))
+        state = "loading" if self.busy else "ready" if done == total else "failed" if self.why else "none"
+        pct = 100 if state == "ready" else min(99, int((done + self.part) * 100 // max(1, total)))
+        if state == "loading":
+            pct = self.shown = max(self.shown, pct)
+        return {"state": state, "pct": pct, "why": self.why if state == "failed" else "", "mb": int(round(total / 1e6)), "fetch_mb": VOICE_FETCH_MB}
+
+    def path(self, name):
+        return os.path.join(self.dir, name) if name in self.files and self.ready() else None
+
+    def start(self):
+        with self.lock:
+            if not self.busy and not all(self.have(n) and n in self.sure for n in self.files):
+                self.busy, self.why, self.part, self.shown = True, "", 0, 0
+                self.stop.clear()
+                self.thread = threading.Thread(target=self.run, name="voice-pack", daemon=True)
+                self.thread.start()
+        return self.view()
+
+    def cancel(self):
+        self.stop.set()
+        return self.view()
+
+    def remove(self):
+        self.stop.set()
+        t = self.thread
+        if t is not None and t.is_alive():
+            t.join(20)
+        with self.lock:
+            if self.busy:
+                raise UserError("دانلود هنوز در حال توقف است؛ چند ثانیهٔ دیگر دوباره بزن.", 409)
+            for name in (os.listdir(self.dir) if os.path.isdir(self.dir) else []):
+                if name in self.files or name.endswith((".part", ".new")):
+                    try:
+                        os.remove(os.path.join(self.dir, name))
+                    except OSError:
+                        pass
+            self.sure.clear()
+            self.why, self.part = "", 0
+        return self.view()
+
+    # ── fetching ──
+    def run(self):
+        why, failed = "", []
+        again = " اینترنت (و فیلترشکن) را بررسی کن و دوباره بزن؛ دانلود از همان‌جا ادامه پیدا می‌کند."
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+            for name in self.files:                    # what is already there (left from before, or copied by hand) is checked, not trusted
+                if self.have(name) and name not in self.sure:
+                    try:
+                        self.accept(os.path.join(self.dir, name), name)
+                    except PackError:
+                        pass
+            missing = sum(self.files[n][0] for n in self.files if not self.have(n))
+            if shutil.disk_usage(self.dir).free < missing + 64 * 1024 * 1024:
+                raise PackError("حافظهٔ دستگاه برای گوینده جا ندارد (حدود %s مگابایت لازم است)." % fa(int(missing / 1e6) + 64))
+            mirror = [(self.cfg.voice_mirror.rstrip("/") + "/", 0, "", tuple(self.files))] if self.cfg.voice_mirror else []
+            for base, archive, inside, names in mirror + self.sources:
+                need = [n for n in names if not self.have(n)]
+                if not need or self.stop.is_set():
+                    continue
+                try:
+                    self.bring(base, archive, inside, need)
+                except PackError as e:
+                    failed.append((names, e.message + (again if e.net else "")))
+                    log("voice pack:", base, "→", e.message)
+                self.part = 0
+            for names, message in failed:              # of a file's addresses the first one is the one to tell about
+                if any(not self.have(n) for n in names):
+                    why = message
+                    break
+        except PackError as e:
+            why = e.message
+        except Exception:
+            log("voice pack:", traceback.format_exc())
+            why = "خطای داخلی برنامه؛ جزئیات در ترمینال نوشته شد."
+        with self.lock:
+            self.part, self.busy = 0, False
+            done = all(self.have(n) for n in self.files)
+            self.why = "" if done or self.stop.is_set() else (why or "فایل‌های گوینده کامل نشد.")
+        if done:
+            log("voice pack: the narrator is on this device now (%d MB)" % round(sum(v[0] for v in self.files.values()) / 1e6))
+
+    def bring(self, base, archive, inside, need):
+        weight, host = sum(self.files[n][0] for n in need), urllib.parse.urlsplit(base).netloc
+        if not self.agent.graph.reachable(base):       # a blocked address often just hangs; this finds out in seconds
+            raise PackError("به سرور دانلود (%s) دسترسی نبود." % host, net=True)
+
+        def moved(frac, share):                        # what is on its way counts as much as the files it will become
+            self.part = int(frac * share)
+
+        if archive:                                    # one archive carries them all
+            tmp = self.download(base, archive, lambda f: moved(f, weight))
+            try:
+                with tarfile.open(tmp, "r:gz") as tar:
+                    for name in need:
+                        member = tar.extractfile(inside + name)
+                        if member is None:
+                            raise KeyError(name)
+                        new = os.path.join(self.dir, name + ".new")
+                        with member, open(new, "wb") as fh:
+                            shutil.copyfileobj(member, fh, 1 << 16)
+                        self.part = max(0, self.part - self.files[name][0])
+                        self.accept(new, name)
+            except (tarfile.TarError, KeyError, EOFError, OSError, zlib.error):
+                raise PackError("بستهٔ دانلودشده باز نشد.")
+            finally:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+            return
+        for name in need:
+            size = self.files[name][0]
+            tmp = self.download(base + name if base.endswith("/") else base, size, lambda f, sz=size: moved(f, sz))
+            self.part = 0
+            self.accept(tmp, name)
+
+    def accept(self, path, name):
+        """Keeps the file only if it is, byte for byte, the one this agent was written for."""
+        size, sha = self.files[name]
+        digest, got = hashlib.sha256(), 0
+        try:
+            with open(path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    digest.update(chunk)
+                    got += len(chunk)
+        except OSError:
+            got = -1
+        if got != size or digest.hexdigest() != sha:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            raise PackError("فایل «%s» با نسخهٔ اصلی یکی نبود و کنار گذاشته شد." % name)
+        final = os.path.join(self.dir, name)
+        if path != final:
+            os.replace(path, final)
+        self.sure.add(name)
+
+    def download(self, url, size, progress):
+        """Fetches one address into a .part file and returns its path. A broken connection is picked up where it
+        stopped; six tries in a row that bring nothing end it."""
+        part = os.path.join(self.dir, hashlib.sha1(url.encode("utf-8")).hexdigest()[:16] + ".part")
+        idle, last = 0, "سرور دانلود جواب نداد."
+        while True:
+            if self.stop.is_set():
+                raise PackError("لغو شد.")
+            have = os.path.getsize(part) if os.path.exists(part) else 0
+            if have == size:
+                return part
+            if have > size:
+                os.remove(part)
+                have = 0
+            headers = {"Accept-Encoding": "identity"}
+            if have:
+                headers["Range"] = "bytes=%d-" % have
+            got = 0
+            try:
+                with self.agent.graph.opener().open(urllib.request.Request(url, headers=headers), timeout=45) as res:
+                    if have and res.status != 206:     # the server starts from the beginning
+                        have = 0
+                    with open(part, "ab" if have else "wb") as fh:
+                        while have + got <= size:
+                            if self.stop.is_set():
+                                raise PackError("لغو شد.")
+                            chunk = res.read(1 << 16)
+                            if not chunk:
+                                break
+                            fh.write(chunk)
+                            got += len(chunk)
+                            progress(min(1.0, (have + got) / float(size)))
+                if have + got == size:
+                    return part
+                if have + got > size:
+                    os.remove(part)
+                    raise PackError("اندازهٔ فایل روی سرور با نسخهٔ اصلی یکی نبود.")
+                last = "ارتباط وسط دانلود قطع شد."
+            except urllib.error.HTTPError as e:
+                if e.code == 416:                      # the rest that was asked for does not exist: start over
+                    os.remove(part)
+                elif e.code not in (408, 425, 429, 500, 502, 503, 504):
+                    raise PackError("سرور فایل را نداد (HTTP %d)." % e.code)
+                last = "سرور فایل را نداد (HTTP %d)." % e.code
+            except (urllib.error.URLError, socket.timeout, ssl.SSLError, http.client.HTTPException, OSError) as e:
+                last = "ارتباط با سرور دانلود برقرار نماند (%s)." % (str(getattr(e, "reason", e))[:80] or e.__class__.__name__)
+            idle = 0 if got else idle + 1
+            if idle >= (6 if have + got else 3):       # a server that never sent a byte gets fewer chances
+                raise PackError(last, net=True)
+            if self.stop.wait(min(15, 1 + 3 * idle) if not self.cfg.sim else 0.05):
+                raise PackError("لغو شد.")
 
 
 class Rules:
@@ -1591,7 +2763,8 @@ class Publisher:
             else:
                 media.append({"url": m.get("url"), "type": m.get("type") or "image", "preview": m.get("url")})
         out = {k: r[k] for k in POST_COLS}
-        out.update(media=media, opts=jload(r["opts"], {}), manual=bool(r["manual"]))
+        out.update(media=media, opts=jload(r["opts"], {}), manual=bool(r["manual"]),
+                   by_hand=(jload(r["state"], {}) or {}).get("by") == "hand")
         return out
 
     def get(self, pid):
@@ -1599,7 +2772,7 @@ class Publisher:
 
     def list(self, group="all"):
         where, order = {
-            "queue": ("status IN ('scheduled','publishing','failed','missed')", "scheduled_at"),
+            "queue": ("status IN ('due','scheduled','publishing','failed','missed')", "status!='due', scheduled_at"),
             "drafts": ("status IN ('draft','canceled')", "updated_at DESC"),
             "published": ("status='published'", "published_at DESC"),
         }.get(group, ("1=1", "updated_at DESC"))
@@ -1613,11 +2786,14 @@ class Publisher:
         return m.get("type") or "image"
 
     def validate(self, kind, caption, media, opts):
-        if not self.agent.ig.connected:
+        hand = self.agent.hand()
+        if not self.agent.ig.connected and not hand:
             raise UserError("اول پیج را وصل کن.")
         kinds = [self.media_kind(m) for m in media]
         n = len(media)
-        if kind == "image" and not (n == 1 and kinds[0] == "image"):
+        if hand and not n:
+            pass                                       # a reminder may be just a caption: the owner picks the file in Instagram
+        elif kind == "image" and not (n == 1 and kinds[0] == "image"):
             raise UserError("پست تکی یک عکس می‌خواهد. (برای ویدیو «ریل» و برای چند عکس «چندتایی» را انتخاب کن.)")
         if kind == "reel" and not (n == 1 and kinds[0] == "video"):
             raise UserError("ریل یک ویدیو می‌خواهد.")
@@ -1639,6 +2815,12 @@ class Publisher:
             f = self.agent.store.get(m["file"])
             if not f or not os.path.exists(self.agent.store.path(f)):
                 raise UserError("یکی از فایل‌ها دیگر روی دستگاه نیست؛ دوباره انتخابش کن.")
+            if str(f["mime"]).startswith("audio/"):    # a narration clip of the studio is not a post
+                raise UserError("این فایل صداست؛ پست عکس یا ویدیو می‌خواهد.")
+            if hand:
+                continue                               # posted by hand: the Instagram app crops and converts by itself
+            if f["ext"] == "webm":
+                raise UserError("اینستاگرام ویدیوی WebM نمی‌پذیرد. ویدیو را دوباره (با مرورگر Chrome) بساز تا MP4 شود.")
             if kind == "story" and f["kind"] == "video" and f["size"] > STORY_VIDEO_MAX:
                 raise UserError("ویدیوی استوری باید کمتر از ۱۰۰ مگابایت (و حداکثر ۶۰ ثانیه) باشد.")
             if f["kind"] == "image" and kind != "story" and f["width"] and f["height"]:
@@ -1696,6 +2878,8 @@ class Publisher:
             status = "scheduled"
             if action == "now":
                 when, manual = now(), 1
+                if self.agent.hand():
+                    status, manual = "due", 0          # nothing is sent anywhere: the owner posts it by hand now
             elif when < now() + 30:
                 raise UserError("زمان انتشار باید در آینده باشد.")
         elif action != "draft":
@@ -1730,9 +2914,26 @@ class Publisher:
                 raise UserError("این پست همین حالا در حال انتشار است.")
             self.validate(r["kind"], r["caption"], jload(r["media"], []), jload(r["opts"], {}))
             state = self.carry_state(jload(r["state"], {}))
+            if self.agent.hand():
+                self.db.x("UPDATE posts SET status='due', manual=0, scheduled_at=?, attempts=0, next_try_at=0, error='', "
+                          "progress='', updated_at=? WHERE id=?", (now(), now(), pid))
+                return self.get(pid)
             self.db.x("UPDATE posts SET status='scheduled', manual=1, scheduled_at=?, attempts=0, next_try_at=0, error='', "
                       "progress='', state=?, updated_at=? WHERE id=?", (now(), jdump(state), now(), pid))
         self.agent.wake.set()
+        return self.get(pid)
+
+    def done_by_hand(self, pid):
+        """The owner says: I have posted this one myself in the Instagram app."""
+        with self.lock:
+            r = self.raw(pid)
+            if r["status"] == "published":
+                raise UserError("این پست قبلاً منتشرشده علامت خورده است.")
+            if r["status"] == "publishing" or (jload(r["state"], {}) or {}).get("sent"):
+                raise UserError("ایجنت همین حالا مشغول انتشار این پست است؛ چند لحظه صبر کن.")
+            self.db.x("UPDATE posts SET status='published', published_at=?, updated_at=?, error='', progress='', manual=0, "
+                      "attempts=0, next_try_at=0, state=? WHERE id=?", (now(), now(), jdump({"stage": "done", "by": "hand"}), pid))
+        self.agent.note("%s را خودت منتشر کردی ✓" % KIND_FA[r["kind"]], "ok", "publish")
         return self.get(pid)
 
     def stoppable(self, r):
@@ -1807,6 +3008,46 @@ class Publisher:
         delay = wait if wait is not None else RETRY_BACKOFF[n - 1]
         self.db.x("UPDATE posts SET attempts=?, next_try_at=?, error=?, progress=? WHERE id=?",
                   (n, now() + delay, why, "تلاش دوباره تا %s دقیقهٔ دیگر" % fa(max(1, int(round(delay / 60.0)))), r["id"]))
+
+    def to_telegram(self, pid):
+        """A post's files, then its caption as a message of its own (one tap copies it), to the owner's Telegram chat:
+        from there the owner passes them on to the Instagram app."""
+        r, agent = self.raw(pid), self.agent
+        if not agent.has_telegram():
+            raise UserError("اول در «تنظیمات ← اعلان در تلگرام» ربات خودت را وصل کن.")
+        files = []
+        for m in jload(r["media"], []):
+            f = agent.store.get(m["file"]) if m.get("file") else None
+            if f and os.path.exists(agent.store.path(f)):
+                files.append(f)
+        if not files and not r["caption"]:
+            raise UserError("این پست نه فایل دارد نه کپشن.")
+        for i, f in enumerate(files):
+            agent.telegram_file(f, "insta-%d%s.%s" % (pid, ("-%d" % (i + 1)) if len(files) > 1 else "", f["ext"]))
+        if r["caption"]:
+            agent.telegram(r["caption"])
+        return {"ok": True, "files": len(files)}
+
+    def tick_hand(self):
+        """Posting by hand: at its time a post only becomes "due" and the owner is told (panel and Telegram)."""
+        t = now()
+        for row in self.db.q("SELECT id FROM posts WHERE status='scheduled' AND scheduled_at<=? ORDER BY scheduled_at LIMIT 10", (t,)):
+            with self.lock:
+                r = self.db.one("SELECT * FROM posts WHERE id=?", (row["id"],))
+                if not r or r["status"] != "scheduled" or r["scheduled_at"] > t:
+                    continue                           # changed from the panel a moment ago
+                self.db.x("UPDATE posts SET status='due', manual=0, error='', progress='', updated_at=? WHERE id=?", (t, r["id"]))
+            first, sent = (r["caption"] or "").strip().split("\n")[0][:60], False
+            if self.agent.has_telegram():              # the file and the caption travel ahead of the reminder itself
+                try:
+                    self.to_telegram(r["id"])
+                    sent = True
+                except UserError as e:
+                    log("telegram:", e.message)
+            self.agent.note("وقت انتشار %s رسید%s. %s" % (
+                KIND_FA[r["kind"]], (": «%s»" % first) if first else "",
+                "فایل و کپشن را در تلگرام برایت فرستادم؛ از همان‌جا به اینستاگرام بده." if sent
+                else "پنل را باز کن، فایل را ذخیره و کپشن را کپی کن و در اینستاگرام بگذار."), "alert", "due")
 
     def tick(self):
         t = now()
@@ -2623,6 +3864,8 @@ class Agent:
         self.ai = AI(cfg, self.settings, self.graph, self.ig)
         self.rules = Rules(self.db)
         self.publisher, self.inbox, self.direct, self.analytics = Publisher(self), Inbox(self), Direct(self), Analytics(self)
+        self.pack = VoicePack(self)
+        self.studio = Studio(self)
         self.sim = None
         self.wake, self.stop_flag = threading.Event(), threading.Event()
         self.thread = None
@@ -2663,6 +3906,9 @@ class Agent:
             if self.sim is not None and self.cfg.demo:
                 self.sim.live_tick()
             if not self.ig.connected or self.ig.acct.get("invalid"):
+                if self.hand():
+                    self.job("remind", 0, self.publisher.tick_hand)
+                    self.job("house", 3600, self.store.cleanup)
                 return
             self.job("publish", 0, self.publisher.tick)
             if now() < self.cool_until:
@@ -2784,8 +4030,19 @@ class Agent:
                    fa(self.db.val("SELECT COUNT(*) FROM actions WHERE actor!='user' AND ts>?", (since,))),
                    fa(self.inbox.open_count()), fa(self.direct.open_count())))
 
+    def hand(self):
+        """No page is connected and the owner chose to post by hand: the agent prepares everything, the owner publishes."""
+        return not self.ig.connected and bool(self.settings.get("manual"))
+
     def facts(self):
         a = self.ig.acct
+        if not self.ig.connected:
+            count = self.db.val
+            return ("پیج به ایجنت وصل نیست؛ صاحب پیج خودش در اپ اینستاگرام پست می‌گذارد و ایجنت محتوا را آماده و یادآوری می‌کند.\n"
+                    "آمادهٔ انتشار: %s | یادآوری‌های پیش رو: %s | پیش‌نویس: %s"
+                    % (fa(count("SELECT COUNT(*) FROM posts WHERE status='due'")),
+                       fa(count("SELECT COUNT(*) FROM posts WHERE status='scheduled'")),
+                       fa(count("SELECT COUNT(*) FROM posts WHERE status IN ('draft','canceled')"))))
         return ("دنبال‌کننده: %s | دنبال‌شونده: %s | تعداد پست: %s\nکامنت منتظر پاسخ: %s | دایرکت منتظر پاسخ: %s\n"
                 "پست در صف انتشار: %s | پیش‌نویس: %s\nبهترین ساعت‌های انتشار: %s"
                 % (fa(a.get("followers") or 0), fa(a.get("follows") or 0), fa(a.get("media_count") or 0),
@@ -2821,6 +4078,36 @@ class Agent:
             raise UserError("به تلگرام وصل نشد (اینترنت یا پروکسی را بررسی کن).")
         if status != 200 or not (jload(body.decode("utf-8", "replace"), {}) or {}).get("ok"):
             raise UserError("تلگرام پیام را نپذیرفت؛ توکن ربات و شناسهٔ چت را بررسی کن.")
+        return True
+
+    def has_telegram(self):
+        t = self.settings.all()["telegram"]
+        return bool(t["token"] and t["chat_id"])
+
+    def telegram_file(self, f, name):
+        """Sends one of the agent's files to the owner's own chat. A picture goes as a document, so that Telegram does
+        not shrink it; a video stays playable."""
+        t = self.settings.all()["telegram"]
+        if not (t["token"] and t["chat_id"]):
+            return False
+        if f["size"] > 50 * 1024 * 1024:
+            raise UserError("این فایل برای ربات تلگرام بزرگ است (بیش از ۵۰ مگابایت)؛ «ذخیره» را بزن.")
+        method, field = ("sendVideo", "video") if f["kind"] == "video" and f["ext"] in ("mp4", "mov") else ("sendDocument", "document")
+        boundary = "----ia" + secrets.token_hex(12)
+        with open(self.store.path(f), "rb") as fh:
+            blob = fh.read()
+        parts = [("--%s\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n%s\r\n" % (boundary, t["chat_id"])).encode("utf-8")]
+        if method == "sendVideo":
+            parts.append(("--%s\r\nContent-Disposition: form-data; name=\"supports_streaming\"\r\n\r\ntrue\r\n" % boundary).encode("utf-8"))
+        parts += [("--%s\r\nContent-Disposition: form-data; name=\"%s\"; filename=\"%s\"\r\nContent-Type: %s\r\n\r\n"
+                   % (boundary, field, name, f["mime"])).encode("utf-8"), blob, ("\r\n--%s--\r\n" % boundary).encode("utf-8")]
+        url = "%s/bot%s/%s" % (self.cfg.telegram_api, t["token"], method)
+        try:
+            status, _, body = self.graph.http("POST", url, b"".join(parts), {"Content-Type": "multipart/form-data; boundary=" + boundary}, 300)
+        except GraphError:
+            raise UserError("به تلگرام وصل نشد (اینترنت یا پروکسی را بررسی کن).")
+        if status != 200 or not (jload(body.decode("utf-8", "replace"), {}) or {}).get("ok"):
+            raise UserError("تلگرام فایل را نپذیرفت؛ توکن ربات و شناسهٔ چت را بررسی کن.")
         return True
 
     def acted(self, kind, target, ukey, actor, rule_id, detail):
@@ -2908,7 +4195,8 @@ class Agent:
         count = self.db.val
         nxt = self.db.one("SELECT * FROM posts WHERE status='scheduled' ORDER BY scheduled_at LIMIT 1")
         return {
-            "version": VERSION, "demo": self.cfg.demo, "connected": self.ig.connected, "now": t,
+            "version": VERSION, "demo": self.cfg.demo, "connected": self.ig.connected, "manual": self.hand(), "now": t,
+            "handle": s["brand"]["handle"],
             "account": {k: a.get(k) for k in ("username", "name", "picture", "followers", "follows", "media_count", "bio",
                                               "login", "invalid", "token_expires", "connected_at", "last_username")},
             "autopilot": s["autopilot"], "auto": s["auto"], "quiet": self.quiet(),
@@ -2917,6 +4205,7 @@ class Agent:
                 "scheduled": count("SELECT COUNT(*) FROM posts WHERE status='scheduled'"),
                 "publishing": count("SELECT COUNT(*) FROM posts WHERE status='publishing'"),
                 "failed": count("SELECT COUNT(*) FROM posts WHERE status IN ('failed','missed')"),
+                "due": count("SELECT COUNT(*) FROM posts WHERE status='due'"),
                 "drafts": count("SELECT COUNT(*) FROM posts WHERE status IN ('draft','canceled')"),
                 "published_today": count("SELECT COUNT(*) FROM posts WHERE status='published' AND published_at>=?", (day,)),
                 "auto_today": count("SELECT COUNT(*) FROM actions WHERE actor!='user' AND ts>=?", (day,)),
@@ -2925,6 +4214,7 @@ class Agent:
             "next_post": self.publisher.view(nxt) if nxt else None, "quota": self.db.get("quota"),
             "daily_cap": s["limits"]["daily_posts"], "media": self.store.methods(), "ai": self.ai.mode(),
             "dm_blocked": self.db.get("dm.blocked") or "", "busy": self.graph.busy() or t < self.cool_until,
+            "studio": self.studio.state(), "telegram": self.has_telegram(),
         }
 
 
@@ -2955,7 +4245,7 @@ class Sim:
                      "biography": "قهوهٔ تازه، هر روز ☕️ | سفارش: دایرکت", "website": "https://example.com"}
         self.seq = 1000
         self.media, self.stories, self.comments, self.convs, self.containers = [], [], {}, {}, {}
-        self.calls, self.faults, self.fetched, self.telegram = [], [], [], []
+        self.calls, self.faults, self.fetched, self.telegram, self.telegram_files = [], [], [], [], []
         self.unknown_fields, self.bad_versions = set(), set()
         self.config_issue, self.versions = "", set()
         self.flat_messages = False                     # True: chats only give message ids; each message is read on its own
@@ -2965,6 +4255,18 @@ class Sim:
         self.lively = True
         self.quota_used, self.quota_total = 0, 50
         self.next_live, self.live_i = now() + 20, 0
+        # stand-ins for the text and picture services the studio talks to
+        self.ai_calls, self.ai_script, self.horde_jobs = [], {}, {}
+        self.ai_key = "sk_sim_demo_key"
+        self.pollen = 1.25                             # credit of that key; None: the key may not see its balance
+        self.voice_cut = 0                             # > 0: the next download of a narrator file breaks off after that many bytes
+        self.voice_delay = 0.0                         # seconds every answer of the narrator's download server takes
+        self.pack_files = dict(SIM_VOICE_FILES)
+        self.ai_text = None                            # the text service's answer: a string, or a function of the request
+        self.ai_delay = 0.0                            # seconds every picture takes
+        self.free_gap, self.free_next = {"image": 0.0, "text": 0.0}, {"image": 0.0, "text": 0.0}
+        self.horde_polls = 1                           # looks at a queued picture until it is ready
+        self.horde_names = ["stable_diffusion", "Deliberate", "Dreamshaper", "AbsoluteReality", "WAI-NSFW-illustrious-SDXL"]
         self.seed()
 
     def nid(self, prefix):
@@ -3064,6 +4366,181 @@ class Sim:
         """Next matching call(s) fail. drop=True: the action happens but the answer is lost."""
         self.faults.append({"pattern": pattern, "method": method, "times": times, "drop": drop, "status": status,
                             "error": {"message": message, "type": "OAuthException", "code": code, "error_subcode": sub}})
+
+    def demo_plan(self, body):
+        """Demo only: the studio's question gets a made-up but sensible answer. Every other question gets none, so
+        the assistant falls back to its templates, exactly as it does without internet."""
+        ask = str((((body or {}).get("messages") or [{}])[-1]).get("content") or "")
+        m = re.match(r"ایده: «(.*?)»\n", ask, re.S)
+        if not m or "JSON" not in ask:
+            return None
+        idea, n = m.group(1).strip(), re.search(r"ریل (\d+) صحنه", ask)
+        head = shorten(idea, 44)
+        lines = [head, "همین هفته", "با بهترین کیفیت", "منتظرتان هستیم", "همین حالا پیام بده", "جزئیات در کپشن"]
+        says = ["%s؛ خبر خوب این هفتهٔ ماست." % head, "فقط همین هفته فرصت دارید، پس از دستش ندهید.", "مثل همیشه با بهترین کیفیت آماده شده است.",
+                "منتظر دیدن شما هستیم.", "برای سفارش همین حالا پیام بدهید.", "جزئیات بیشتر را در کپشن بخوانید."]
+        scenes = [{"text": lines[i % len(lines)], "say": says[i % len(says)],
+                   "image": "scene %d of a short video about a small business offer, warm light" % (i + 1)}
+                  for i in range(int(n.group(1)) if n else 0)]
+        return jdump({"caption": "%s ✨\nهمین امروز سر بزنید؛ منتظرتان هستیم 🌿" % idea, "hashtags": ["#پیشنهاد_ویژه", "#کسب_و_کار", "#اینستاگرام"],
+                      "headline": head, "sub": "همین حالا پیام بده", "image": "a warm, inviting photo that shows the offer", "scenes": scenes})
+
+    def pack_tgz(self):
+        """The phonemizer's three files the way npm ships them: one .tgz."""
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            for name in _PHON:
+                info = tarfile.TarInfo("package/build/" + name)
+                info.size = len(self.pack_files[name])
+                tar.addfile(info, io.BytesIO(self.pack_files[name]))
+        return buf.getvalue()
+
+    def pack_setup(self, pack, base):
+        """Points the agent's narrator pack at these stand-ins: same steps, a few kilobytes instead of 85 MB."""
+        tgz = self.pack_tgz()
+        pack.files = {n: (len(b), hashlib.sha256(b).hexdigest()) for n, b in self.pack_files.items()}
+        pack.sources = [(base + "/pack.tgz", len(tgz), "package/build/", _PHON), (base + "/", 0, "", _PHON),
+                        (base + "/", 0, "", _ORT), (base + "/", 0, "", ("voice.onnx",))]
+
+    def script(self, service, status, obj=None, headers=None, times=1):
+        """The next call(s) to one of the AI stand-ins ("pimg", "pgen", "horde", "oimg", "ptxt") get this answer."""
+        self.ai_script.setdefault(service, []).extend([(status, obj if obj is not None else {}, headers or {})] * times)
+
+    def free_turn(self, what):
+        """The free service serves one request every so often per address; the others are told how long to wait."""
+        with self.lock:
+            left = self.free_next[what] - now()
+            if left > 0:
+                return int(left + 0.999)
+            self.free_next[what] = now() + self.free_gap[what]
+            return 0
+
+    def ai(self, method, path, q, raw, headers):
+        """(status, content type, body, extra headers) of the simulated text and picture services."""
+        service, _, tail = path.partition("/")
+        body = jload(raw.decode("utf-8", "replace"), None) if raw else None
+
+        def answer(status, obj, extra=None):
+            return status, "application/json; charset=utf-8", jdump(obj).encode("utf-8"), extra or {}
+
+        def picture(text, width, height):
+            if self.ai_delay:
+                time.sleep(self.ai_delay)
+            return 200, "image/png", fake_picture(text, width, height), {"x-model-used": "sim"}
+
+        def speech(asked):
+            asked = asked if isinstance(asked, dict) else {}
+            if not str(asked.get("input") or "").strip():
+                return answer(400, {"error": {"message": "input is required", "code": "BAD_REQUEST"}})
+            if self.pollen is not None and self.pollen <= 0:
+                return answer(402, {"success": False, "error": {"message": "Insufficient pollen balance.", "code": "PAYMENT_REQUIRED"}, "status": 402})
+            return 200, "audio/wav", fake_speech(asked["input"]), {}
+
+        if service == "voice" and self.voice_delay:
+            time.sleep(self.voice_delay)
+        with self.lock:
+            self.ai_calls.append((service, method, tail, dict(q), body, {k.lower(): v for k, v in headers.items()}))
+            if len(self.ai_calls) > 2000:
+                del self.ai_calls[:1000]
+            queue = self.ai_script.get(service)
+            if queue:
+                status, obj, extra = queue.pop(0)
+                return answer(status, obj, extra)
+        limit = lambda what, left: answer(402, {"status": 402, "success": False, "error": {"code": "FREE_LIMIT", "message": (
+            "Free limit reached: 1 %s every 45 seconds per IP. Retry after %ds, or get unlimited %ss with a pollen key" % (what, left, what))}})
+        bearer = headers.get("Authorization") or ""
+        width, height = clamp(q.get("width") or 768, 64, 2048), clamp(q.get("height") or 960, 64, 2048)
+        if service == "pimg" and tail.startswith("prompt/"):
+            left = self.free_turn("image")
+            return limit("image", left) if left else picture(tail + str(q.get("seed")), width * 5 // 8, height * 5 // 8)
+        if service == "pgen":
+            if bearer != "Bearer " + self.ai_key:
+                return answer(401, {"success": False, "error": {"message": "A valid API key is required.", "code": "UNAUTHORIZED"}, "status": 401})
+            if tail.startswith("image/"):
+                return picture(tail + str(q.get("seed")), width, height)
+            if tail == "v1/audio/speech" and method == "POST":
+                return speech(body)
+            if tail == "account/key":
+                return answer(200, {"id": "k_sim", "valid": True, "type": "secret", "name": "insta-agent", "expiresAt": None, "expiresIn": None,
+                                    "permissions": {"models": None, "account": None}, "pollenBudget": None, "questPollenOnly": True})
+            if tail == "account/balance":
+                return answer(200, {"balance": self.pollen}) if self.pollen is not None else answer(403, {"error": {"code": "FORBIDDEN"}})
+            if tail == "v1/chat/completions" and method == "POST":
+                said = self.ai_text(body or {}) if callable(self.ai_text) else self.ai_text
+                if said is None:
+                    return answer(500, {"error": {"message": "the simulated text service has nothing to say"}})
+                return answer(200, {"choices": [{"index": 0, "message": {"role": "assistant", "content": said}, "finish_reason": "stop"}],
+                                    "model": "openai/gpt-5.4-nano"})
+        if service == "oimg" and tail == "audio/speech" and method == "POST":
+            if bearer != "Bearer " + self.ai_key:
+                return answer(401, {"error": {"message": "Incorrect API key provided", "type": "invalid_request_error"}})
+            return speech(body)
+        if service == "oimg" and tail == "images/generations" and method == "POST":
+            if bearer != "Bearer " + self.ai_key:
+                return answer(401, {"error": {"message": "Incorrect API key provided", "type": "invalid_request_error"}})
+            w, _, h = str((body or {}).get("size") or "1024x1024").partition("x")
+            blob = picture(str((body or {}).get("prompt")), clamp(w, 64, 2048), clamp(h, 64, 2048))[2]
+            return answer(200, {"created": int(now()), "data": [{"b64_json": base64.b64encode(blob).decode("ascii")}]})
+        if service == "ptxt":
+            left = self.free_turn("text")
+            if left:
+                return limit("reply", left)
+            said = self.ai_text(body or dict(q, prompt=urllib.parse.unquote(tail))) if callable(self.ai_text) else self.ai_text
+            if said is None:
+                return answer(500, {"error": "the simulated text service has nothing to say"})
+            if method == "POST" and tail == "openai":
+                return answer(200, {"choices": [{"index": 0, "message": {"role": "assistant", "content": said}, "finish_reason": "stop"}]})
+            return 200, "text/plain; charset=utf-8", str(said).encode("utf-8"), {}
+        if service == "voice":                         # where the narrator's files are "downloaded" from
+            blob = self.pack_tgz() if tail == "pack.tgz" else self.pack_files.get(tail)
+            if blob is None:
+                return answer(404, {"error": "no such file"})
+            extra, status = {"Accept-Ranges": "bytes"}, 200
+            rng = re.fullmatch(r"bytes=(\d+)-", headers.get("Range") or "")
+            if rng:
+                start = int(rng.group(1))
+                if start >= len(blob):
+                    return answer(416, {"error": "range"}, {"Content-Range": "bytes */%d" % len(blob)})
+                extra["Content-Range"] = "bytes %d-%d/%d" % (start, len(blob) - 1, len(blob))
+                blob, status = blob[start:], 206
+            with self.lock:
+                if self.voice_cut and len(blob) > self.voice_cut:
+                    extra["X-Sim-Cut"], self.voice_cut = str(self.voice_cut), 0
+            return status, "application/octet-stream", blob, extra
+        if service == "horde":
+            if headers.get("apikey") != "0000000000":
+                return answer(401, {"message": "No user matching sent API Key. Have you remembered to register at https://aihorde.net/register ?", "rc": "InvalidAPIKey"})
+            if tail == "status/models":
+                return answer(200, [{"name": n, "count": 3, "queued": 0, "eta": 5, "type": "image"} for n in self.horde_names])
+            if tail == "generate/async" and method == "POST":
+                params = (body or {}).get("params") or {}
+                if clamp(params.get("width") or 0, 0, 9999) * clamp(params.get("height") or 0, 0, 9999) > 576 * 576:
+                    return answer(403, {"message": "Due to heavy demand, for requests over 576x576 or over the applicable first-order-equivalent "
+                                                   "sampler work budget the client needs to already have the required kudos.", "rc": "KudosUpfront"})
+                rid = "%s-%s" % (secrets.token_hex(4), secrets.token_hex(6))
+                with self.lock:
+                    self.horde_jobs[rid] = {"left": self.horde_polls, "body": body or {}, "canceled": False}
+                return answer(202, {"id": rid, "kudos": 6.0})
+            m = re.fullmatch(r"generate/(check|status)/([\w-]+)", tail)
+            job = self.horde_jobs.get(m.group(2)) if m else None
+            if not job:
+                return answer(404, {"message": "Request not found", "rc": "RequestNotFound"})
+            if method == "DELETE":
+                job["canceled"] = True
+                return answer(200, {"done": False, "generations": []})
+            if m.group(1) == "check":
+                with self.lock:
+                    job["left"] -= 1
+                    done = job["left"] <= 0
+                return answer(200, {"done": done, "faulted": False, "is_possible": True, "wait_time": 0 if done else 8,
+                                    "queue_position": 0 if done else job["left"], "finished": int(done), "waiting": int(not done)})
+            params = job["body"].get("params") or {}
+            blob = picture(str(job["body"].get("prompt")) + str(params.get("seed")), clamp(params.get("width") or 512, 64, 1024),
+                           clamp(params.get("height") or 512, 64, 1024))[2]
+            return answer(200, {"done": True, "generations": [{"img": base64.b64encode(blob).decode("ascii"), "censored": False, "state": "ok",
+                                                               "model": (job["body"].get("models") or ["stable_diffusion"])[0],
+                                                               "seed": str(params.get("seed"))}]})
+        return answer(404, {"error": "not found"})
 
     @staticmethod
     def err(code, message, sub=0, status=400):
@@ -3435,6 +4912,104 @@ MANIFEST = {"name": "ایجنت اینستاگرام", "short_name": "ایجنت
                       {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png"}]}
 
 
+# What the simulator hands out in place of the narrator's files (tests and the browser checks). They have the same
+# names and the same shape as the real ones, so the agent's worker runs unchanged; what comes out is a tone as
+# long as the line, not speech.
+SIM_VOICE_FILES = {
+    "ort.wasm.min.js": b"""/* stand-in for the ONNX runtime: a tone as long as the sounds it is given */
+self.ort = {env: {wasm: {}},
+  Tensor: function (type, data, dims) { this.type = type; this.data = data; this.dims = dims; },
+  InferenceSession: {create: async function (model) {
+    if (!model || model.length < 8) throw new Error('no voice model');
+    var bin = await fetch(self.ort.env.wasm.wasmPaths + 'ort-wasm-simd.wasm');
+    if (!bin.ok || !(await bin.arrayBuffer()).byteLength) throw new Error('runtime: HTTP ' + bin.status);
+    return {inputNames: ['input', 'input_lengths', 'scales'], run: async function (feeds) {
+      var n = feeds.input.data.length, rate = 22050, len = Math.round(rate * (0.3 + 0.03 * n)), out = new Float32Array(len);
+      if (Number(feeds.input_lengths.data[0]) !== n || feeds.scales.data.length !== 3) throw new Error('bad input');
+      for (var i = 0; i < len; i++) {
+        var t = i / rate, edge = Math.min(1, t * 25, (len - i) / rate * 25);
+        out[i] = 0.45 * edge * Math.sin(2 * Math.PI * 330 * t) * (Math.floor(t * 5) % 2 ? 0.35 : 1);
+      }
+      return {output: {data: out, dims: [1, 1, len]}};
+    }};
+  }}};
+""",
+    "ort-wasm-simd.wasm": b"\x00asm\x01\x00\x00\x00" + b"stand-in runtime " * 40,
+    "piper_phonemize.js": b"""/* stand-in for the phonemizer: two numbers per letter */
+self.createPiperPhonemize = async function (opts) {
+  var data = await fetch(opts.locateFile('piper_phonemize.data')), code = await fetch(opts.locateFile('piper_phonemize.wasm'));
+  if (!data.ok || !code.ok) throw new Error('phonemizer files: HTTP ' + data.status + ' ' + code.status);
+  if (!(await data.arrayBuffer()).byteLength || !(await code.arrayBuffer()).byteLength) throw new Error('phonemizer files are empty');
+  return {callMain: function (args) {
+    JSON.parse(args[args.indexOf('--input') + 1]).forEach(function (item) {
+      var ids = [1];
+      for (var i = 0; i < item.text.length; i++) ids.push(0, 10 + item.text.charCodeAt(i) % 100);
+      ids.push(0, 2);
+      opts.print(JSON.stringify({phoneme_ids: ids, text: item.text}));
+    });
+  }};
+};
+""",
+    "piper_phonemize.wasm": b"\x00asm\x01\x00\x00\x00" + b"stand-in phonemizer " * 30,
+    "piper_phonemize.data": b"stand-in espeak data\n" * 400,
+    "voice.onnx": b"stand-in voice model\n" * 3000,
+}
+
+
+def png_file(width, height, rows):
+    """A PNG out of raw RGB rows (each row starts with a zero byte), so that no image library is needed."""
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(bytes(rows), 6)) + chunk(b"IEND", b""))
+
+
+def fake_picture(text, width, height):
+    """What the simulated picture services send (demo and tests): a sky, a sun and a table, coloured after the request."""
+    width, height = clamp(width, 64, 640), clamp(height, 64, 1136)
+    seed = zlib.crc32(str(text).encode("utf-8"))
+    top, bottom = [tuple(int(c[i:i + 2], 16) for i in (1, 3, 5)) for c in PALETTE[seed % len(PALETTE)]]
+    sun_x, sun_y, sun_r = int(width * (0.22 + (seed >> 8) % 56 / 100.0)), height * 0.3, width * 0.17
+    table = int(height * (0.68 + (seed >> 16) % 10 / 100.0))
+    rows = bytearray()
+    for y in range(height):
+        t = y / float(height - 1)
+        row = bytearray(bytes(int(top[i] + (bottom[i] - top[i]) * t) for i in range(3)) * width)
+        dy = y - sun_y
+        if abs(dy) < sun_r:
+            half = int((sun_r * sun_r - dy * dy) ** 0.5)
+            x0, x1 = max(0, sun_x - half), min(width, sun_x + half)
+            row[x0 * 3:x1 * 3] = bytes((255, 240, 205)) * (x1 - x0)
+        if y >= table:
+            shade = 0.55 - 0.25 * (y - table) / float(max(1, height - table))
+            row[:] = bytes(int(bottom[i] * shade) for i in range(3)) * width
+            edge = min(width, max(0, int(width * 0.18 + (y - table) * 0.9)))
+            row[:edge * 3] = bytes(int(top[i] * shade * 0.9) for i in range(3)) * edge
+        rows.append(0)
+        rows.extend(row)
+    return png_file(width, height, rows)
+
+
+def fake_speech(text, rate=16000):
+    """What the simulated speech service sends (demo and tests): a WAV with one short tone per "syllable", as long
+    as a speaker would need for the text. It is not speech; it only lets the whole path be heard and measured."""
+    text = str(text or "")
+    seconds = clamp(int(100 * (0.35 + 0.07 * len(text))), 60, 2000) / 100.0
+    seed, n = zlib.crc32(text.encode("utf-8")), int(rate * seconds)
+    step, on = int(rate * 0.19), int(rate * 0.13)
+    out = bytearray(n * 2)
+    for start in range(int(rate * 0.05), n - on, step):
+        k = start // step
+        freq = 170 + (seed >> (k % 24)) % 9 * 28
+        w = 2 * math.pi * freq / rate
+        for i in range(on):
+            env = min(1.0, i / 240.0, (on - i) / 480.0)
+            struct.pack_into("<h", out, (start + i) * 2, int(9000 * env * math.sin(w * i)))
+    head = b"RIFF" + struct.pack("<I", 36 + len(out)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+    return head + b"data" + struct.pack("<I", len(out)) + bytes(out)
+
+
 def make_icon_png(size):
     """The home-screen icon, drawn by hand so that no image library is needed."""
     rows = bytearray()
@@ -3448,12 +5023,7 @@ def make_icon_png(size):
             if ring_in <= d <= ring_out or d <= dot:
                 col = (255, 255, 255)
             rows.extend(col)
-
-    def chunk(tag, data):
-        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
-
-    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
-            + chunk(b"IDAT", zlib.compress(bytes(rows), 9)) + chunk(b"IEND", b""))
+    return png_file(size, size, rows)
 
 
 class Web:
@@ -3522,6 +5092,11 @@ class Web:
         if size not in self.icons:
             self.icons[size] = make_icon_png(size)
         return self.icons[size]
+
+    def font(self):
+        if "font" not in self.icons:
+            self.icons["font"] = base64.b64decode(FONT_WOFF2)
+        return self.icons["font"]
 
 
 class Server(ThreadingHTTPServer):
@@ -3629,7 +5204,7 @@ def make_handler(app, media_only=False):
             name = host[:host.rfind(":")] if ":" in host and not host.endswith("]") else host
             return name in ("127.0.0.1", "localhost", "[::1]")
 
-        def send_file(self, path, mime):
+        def send_file(self, path, mime, cache="private, max-age=3600"):
             try:
                 size = os.path.getsize(path)
             except OSError:
@@ -3655,7 +5230,7 @@ def make_handler(app, media_only=False):
             self.send_header("Content-Length", str(length))
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Cache-Control", "private, max-age=3600")
+            self.send_header("Cache-Control", cache)
             if status == 206:
                 self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
             self.end_headers()
@@ -3699,6 +5274,8 @@ def make_handler(app, media_only=False):
                     return self.send_bytes(200, jdump(MANIFEST).encode("utf-8"), "application/manifest+json")
                 if path == "/icon.svg":
                     return self.send_bytes(200, ICON_SVG.encode("utf-8"), "image/svg+xml", {"Cache-Control": "max-age=86400"})
+                if path == "/font/vazirmatn.woff2":
+                    return self.send_bytes(200, web.font(), "font/woff2", {"Cache-Control": "max-age=31536000, immutable"})
                 m = re.fullmatch(r"/icon-(192|512)\.png", path)
                 if m:
                     return self.send_bytes(200, web.icon(int(m.group(1))), "image/png", {"Cache-Control": "max-age=86400"})
@@ -3724,7 +5301,7 @@ def make_handler(app, media_only=False):
             nonce = secrets.token_urlsafe(16)
             html = UI_HTML.replace("__NONCE__", nonce).replace("__VERSION__", VERSION)
             csp = ("default-src 'self'; script-src 'nonce-%s'; style-src 'nonce-%s'; img-src 'self' https: data: blob:; "
-                   "media-src 'self' https: blob:; connect-src 'self'; base-uri 'none'; form-action 'self'; object-src 'none'"
+                   "media-src 'self' https: blob:; connect-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'self'; object-src 'none'"
                    % (nonce, nonce)) + ("" if cfg.embed_ok else "; frame-ancestors 'none'")
             return self.send_bytes(200, html.encode("utf-8"), "text/html; charset=utf-8",
                                    {"Content-Security-Policy": csp, "Cache-Control": "no-store"})
@@ -3738,6 +5315,35 @@ def make_handler(app, media_only=False):
                 return self.send_bytes(200, found[1], found[0], {"Cache-Control": "max-age=3600",
                                                                "Content-Security-Policy": "default-src 'none'"})
             raw = self.read_body(8 * 1024 * 1024) if method == "POST" else b""
+            if rest.startswith("ai/"):
+                status, ctype, blob, extra = sim.ai(method, rest[3:], q, raw, self.headers)
+                cut = int(extra.pop("X-Sim-Cut", 0))
+                if cut:                                # a connection that breaks in the middle of a download
+                    self.send_response(status)
+                    self.send_header("Content-Type", ctype)
+                    self.send_header("Content-Length", str(len(blob)))
+                    self.end_headers()
+                    self.wfile.write(blob[:cut])
+                    self.wfile.flush()
+                    self.close_connection = True
+                    return None
+                return self.send_bytes(status, blob, ctype, dict(extra, **{"Cache-Control": "no-store"}))
+            ctype = self.headers.get("Content-Type") or ""
+            if rest.startswith("tg/") and ctype.startswith("multipart/form-data"):
+                got = {"method": rest.rsplit("/", 1)[-1]}
+                for part in raw.split(b"--" + ctype.split("boundary=", 1)[-1].encode("ascii")):
+                    head, sep, data = part.partition(b"\r\n\r\n")
+                    name = re.search(br'name="([^"]*)"', head)
+                    if not sep or not name:
+                        continue
+                    data = data[:-2] if data.endswith(b"\r\n") else data
+                    fname = re.search(br'filename="([^"]*)"', head)
+                    if fname:
+                        got.update(field=name.group(1).decode(), filename=fname.group(1).decode(), size=len(data), head=data[:16])
+                    else:
+                        got[name.group(1).decode()] = data.decode("utf-8", "replace")
+                sim.telegram_files.append(got)
+                return self.send_json(200, {"ok": True})
             form = dict(urllib.parse.parse_qsl(raw.decode("utf-8", "replace"))) if raw else {}
             if rest.startswith("tg/"):
                 sim.telegram.append(form)
@@ -3784,6 +5390,16 @@ def make_handler(app, media_only=False):
                 if not f:
                     return self.send_text(404, "not found")
                 return self.send_file(agent.store.path(f), f["mime"])
+            m = re.fullmatch(r"voice/([a-z0-9_.\-]{1,40})", path)
+            if m and method in ("GET", "HEAD"):        # the narrator on the device: the worker, and the files it runs
+                if m.group(1) == "worker.js":
+                    return self.send_bytes(200, VOICE_WORKER_JS.encode("utf-8"), VOICE_MIME["js"], {
+                        "Cache-Control": "no-store",
+                        "Content-Security-Policy": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'"})
+                found = agent.pack.path(m.group(1))
+                if not found:
+                    return self.send_text(404, "not found")
+                return self.send_file(found, VOICE_MIME.get(m.group(1).rsplit(".", 1)[-1], "application/octet-stream"), "private, max-age=31536000, immutable")
             out = api_call(app, method, path, q, body)
             return self.send_json(200, out)
 
@@ -3855,11 +5471,12 @@ def api_call(app, method, path, q, body):
         if P:
             return pub.save(body)
         return {"items": pub.list(q.get("group") or "all")}
-    m = re.fullmatch(r"posts/(\d+)(?:/(publish|cancel|duplicate))?", path)
+    m = re.fullmatch(r"posts/(\d+)(?:/(publish|cancel|duplicate|done|telegram))?", path)
     if m:
         pid, action = int(m.group(1)), m.group(2)
         if action and P:
-            return getattr(pub, {"publish": "publish_now", "cancel": "cancel", "duplicate": "duplicate"}[action])(pid)
+            return getattr(pub, {"publish": "publish_now", "cancel": "cancel", "duplicate": "duplicate", "done": "done_by_hand",
+                                 "telegram": "to_telegram"}[action])(pid)
         if not action and G:
             return pub.get(pid)
         if not action and P:
@@ -3970,6 +5587,29 @@ def api_call(app, method, path, q, body):
         return {"items": made, "source": ideas["source"]}
     if path == "chat" and P:
         return agent.ai.chat(body.get("messages"), agent.facts())
+
+    # studio
+    if path == "studio" and G:
+        return agent.studio.state()
+    if path == "studio/make" and P:
+        return agent.studio.make(body)
+    if path == "studio/picture" and P:
+        return agent.studio.redo(body)
+    if path == "studio/voice" and P:
+        return agent.studio.voice(body)
+    if path == "studio/key" and P:
+        return agent.studio.check_key()
+    if path == "studio/pack":
+        if G:
+            return agent.pack.view()
+        return agent.pack.start() if P else agent.pack.remove() if D else None
+    if path == "studio/pack/cancel" and P:
+        return agent.pack.cancel()
+    m = re.fullmatch(r"studio/job/([0-9a-f]{16})(/cancel)?", path)
+    if m and m.group(2) and P:
+        return agent.studio.cancel(m.group(1))
+    if m and not m.group(2) and G:
+        return agent.studio.job(m.group(1))
     raise UserError("چنین نشانی‌ای در برنامه نیست.", 404)
 
 
@@ -4020,6 +5660,9 @@ class App:
             self.agent.sim = Sim()
             base = "http://127.0.0.1:%d/_sim" % self.port
             cfg.ig_graph, cfg.fb_graph, cfg.telegram_api = base + "/ig", base + "/fb", base + "/tg"
+            cfg.image_api, cfg.gen_api, cfg.horde_api = base + "/ai/pimg", base + "/ai/pgen", base + "/ai/horde"
+            if not cfg.demo:                           # the demo keeps the real narrator: there it can really be heard
+                self.agent.sim.pack_setup(self.agent.pack, base + "/ai/voice")
         for srv in (self.httpd, self.media_httpd):     # the servers answer first: the simulator is reached over HTTP
             threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True).start()
         if cfg.demo:
@@ -4037,6 +5680,9 @@ class App:
         agent = self.agent
         agent.wipe_page()
         agent.connect(SIM_TOKEN)
+        agent.ai.FREE_URL = "http://127.0.0.1:%d/_sim/ai/ptxt/openai" % self.port
+        agent.sim.ai_text, agent.sim.ai_delay = agent.sim.demo_plan, 0.8
+        agent.sim.free_gap.update(image=self.cfg.free_gap - 1, text=self.cfg.free_gap - 1)
         if not agent.db.get("demo.ready"):
             agent.settings.patch({"auto": {"comment_reply": True, "spam_hide": True, "dm_reply": True},
                                   "brand": {"about": "کافهٔ کوچک محلی با قهوهٔ تازه و کیک خانگی"}})
@@ -4113,7 +5759,7 @@ def main(argv=None):
 
 
 # ───────────────────────────── web panel (the page itself) ─────────────────────────────
-# One self-contained Persian, right-to-left, phone-first page. No outside files, fonts or scripts.
+# One self-contained Persian, right-to-left, phone-first page. No outside files or scripts; its font is embedded below.
 
 UI_HTML = r'''<!doctype html>
 <html lang="fa" dir="rtl">
@@ -4126,6 +5772,7 @@ UI_HTML = r'''<!doctype html>
 <link rel="icon" href="/icon.svg">
 <link rel="apple-touch-icon" href="/icon-192.png">
 <style nonce="__NONCE__">
+@font-face{font-family:Vazirmatn;src:url(/font/vazirmatn.woff2) format("woff2");font-weight:100 900;font-display:swap}
 :root{--bg:#f3f5fa;--card:#fff;--ink:#111827;--mut:#6b7280;--line:#e2e6ee;--soft:#eef1f6;--pri:#ec4899;--ok:#10b981;--warn:#d97706;--bad:#ef4444;--info:#3b82f6;--grad:linear-gradient(135deg,#f59e0b,#ec4899 55%,#8b5cf6)}
 @media (prefers-color-scheme:dark){:root{--bg:#0b0f1a;--card:#141a29;--ink:#f1f5f9;--mut:#94a3b8;--line:#263044;--soft:#1b2335}}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -4247,6 +5894,11 @@ details.box>.col{gap:8px}
 .logline .dot{margin-top:10px}
 .bar{height:8px;border-radius:99px;background:var(--soft);overflow:hidden}
 .bar i{display:block;height:100%;background:var(--grad);border-radius:99px}
+.stage{width:100%;height:auto;border-radius:16px;display:block;background:var(--soft)}
+.stage.tall{width:auto;max-width:100%;max-height:56vh;margin:0 auto}
+.spin{width:30px;height:30px;border:3px solid var(--line);border-top-color:var(--pri);border-radius:50%;display:inline-block;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.empty .bar{width:100%}
 .spark{width:100%;height:70px;direction:ltr}
 .spark polyline{fill:none;stroke:var(--pri);stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round}
 </style>
@@ -4283,10 +5935,15 @@ const ICONS = {
   hash: 'M4 9h16 M4 15h16 M10 3L8 21 M16 3l-2 18', external: 'M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14L21 3',
   alert: 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z M12 9v4 M12 17h.01',
   spark: 'M12 3l1.8 5.6L19.5 10l-5.7 1.6L12 17l-1.8-5.4L4.5 10l5.7-1.4z M19 16v4 M17 18h4', link: 'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71 M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71',
-  help: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3 M12 17h.01', calendar: 'M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M16 2v4 M8 2v4 M3 10h18'
+  help: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3 M12 17h.01',
+  download: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3', play: 'M6 3l14 9-14 9V3z',
+  mic: 'M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z M19 10v2a7 7 0 0 1-14 0v-2 M12 19v4 M8 23h8', copy: 'M11 9h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2z M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1', calendar: 'M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M16 2v4 M8 2v4 M3 10h18'
 };
 const KIND = {image: ['پست', 'image'], carousel: ['چندتایی', 'layers'], reel: ['ریل', 'film'], story: ['استوری', 'story']};
-const STATUS = {draft: ['پیش‌نویس', ''], scheduled: ['زمان‌بندی‌شده', 'info'], publishing: ['در حال انتشار', 'warn'], published: ['منتشرشده', 'ok'], failed: ['ناموفق', 'bad'], missed: ['جامانده', 'warn'], canceled: ['لغوشده', '']};
+const STATUS = {draft: ['پیش‌نویس', ''], scheduled: ['زمان‌بندی‌شده', 'info'], publishing: ['در حال انتشار', 'warn'], published: ['منتشرشده', 'ok'], failed: ['ناموفق', 'bad'], missed: ['جامانده', 'warn'], canceled: ['لغوشده', ''], due: ['وقت انتشار', 'pri']};
+/* without a connected page the owner posts by hand: a scheduled post is a reminder, a published one was posted by the owner */
+const statusOf = p => (p.status === 'scheduled' && !S.st.connected ? ['یادآوری', 'info'] : p.status === 'published' && p.by_hand ? ['منتشرشده (خودت)', 'ok'] : STATUS[p.status]);
+const live = () => S.st.connected || S.st.manual;
 
 /* ───── tiny DOM helpers: every piece of text goes in as a text node, never as HTML ───── */
 function svg(tag) { return D.createElementNS('http://www.w3.org/2000/svg', tag); }
@@ -4366,7 +6023,7 @@ async function loadStatus() {
   stShown = n; S.st = st;
   return true;
 }
-async function refresh() { if (await loadStatus() && S.st.connected) { paintTop(); paintNav(); } }
+async function refresh() { if (await loadStatus() && live()) { paintTop(); paintNav(); } }
 
 /* ───── bottom sheets ───── */
 function sheet(title, o) {
@@ -4411,14 +6068,16 @@ async function saveSettings(patch, msg) { await POST('/api/settings', patch); aw
 const TABS = [['home', 'خانه', 'home'], ['content', 'محتوا', 'grid'], ['inbox', 'گفتگوها', 'chat'], ['stats', 'آمار', 'bars'], ['agent', 'ایجنت', 'bot']];
 function paintTop() {
   const st = S.st, a = st.account;
-  const state = a.invalid ? ['bad', 'اتصال پیج قطع است'] : !st.autopilot ? ['off', 'ایجنت متوقف است'] : st.busy ? ['warn', 'اینستاگرام موقتاً محدود کرده؛ کمی صبر'] : ['', 'ایجنت روشن است'];
+  const state = !st.connected ? ['', 'بدون اتصال؛ انتشار با خودت'] : a.invalid ? ['bad', 'اتصال پیج قطع است'] : !st.autopilot ? ['off', 'ایجنت متوقف است'] : st.busy ? ['warn', 'اینستاگرام موقتاً محدود کرده؛ کمی صبر'] : ['', 'ایجنت روشن است'];
   fill($('#top'), h('img', {src: '/icon.svg', alt: ''}),
-    h('div', {class: 'grow'}, h('h1', null, '@' + a.username), h('div', {class: 'sub'}, h('i', {class: 'dot ' + state[0]}), (st.demo ? 'حالت نمایشی — ' : '') + state[1])),
+    h('div', {class: 'grow'}, h('h1', null, st.connected ? '@' + a.username : st.handle ? '@' + st.handle : 'ایجنت پیج'), h('div', {class: 'sub'}, h('i', {class: 'dot ' + state[0]}), (st.demo ? 'حالت نمایشی — ' : '') + state[1])),
     h('button', {class: 'iconbtn', 'aria-label': 'اعلان‌ها', onclick: notesSheet}, icon('bell'), st.counts.unseen ? h('span', {class: 'badge'}, fa(st.counts.unseen)) : null));
 }
 function paintNav() {
-  const c = S.st.counts, n = c.open_comments + c.open_dms;
-  fill($('#nav'), TABS.map(t => h('button', {class: S.tab === t[0] ? 'on' : '', 'data-tab': t[0], onclick: () => go(t[0])}, icon(t[2]), t[1], t[0] === 'inbox' && n ? h('span', {class: 'badge'}, fa(n)) : null)));
+  const c = S.st.counts, n = {inbox: c.open_comments + c.open_dms, content: c.due};
+  const tabs = TABS.filter(t => S.st.connected || !['inbox', 'stats'].includes(t[0]));      /* no page: nothing to read from Instagram */
+  if (!tabs.some(t => t[0] === S.tab)) S.tab = 'home';
+  fill($('#nav'), tabs.map(t => h('button', {class: S.tab === t[0] ? 'on' : '', 'data-tab': t[0], onclick: () => go(t[0])}, icon(t[2]), t[1], n[t[0]] ? h('span', {class: 'badge'}, fa(n[t[0]])) : null)));
   $('#fab').classList.toggle('hide', S.tab !== 'content' || !!S.st.account.invalid);
   document.body.classList.toggle('hasfab', !$('#fab').classList.contains('hide'));
 }
@@ -4429,8 +6088,8 @@ async function render(fresh) {
   S.seq++;
   if (!S.authed) { chrome(false); return fill(view, loginView()); }
   if (!st) { chrome(false); return fill(view, h('div', {class: 'empty'}, 'در حال اتصال به ایجنت…')); }
-  if (!st.connected) { chrome(false); return fill(view, connectView()); }
-  chrome(true); paintTop(); paintNav();
+  if (!live()) { chrome(false); return fill(view, connectView()); }
+  chrome(true); paintNav(); paintTop();
   const my = S.seq;
   if (fresh) fill(view, h('div', {class: 'empty'}, 'در حال بارگذاری…'));
   try { const kids = await VIEWS[S.tab](); if (my === S.seq) fill(view, kids); }
@@ -4440,8 +6099,8 @@ async function poll() {
   if (D.hidden || !S.authed) return;
   const prev = S.st;
   try { if (!await loadStatus()) return; } catch (e) { return; }
-  if (!prev || prev.connected !== S.st.connected) return render(true);
-  if (!S.st.connected) return;
+  if (!prev || prev.connected !== S.st.connected || prev.manual !== S.st.manual) return render(true);
+  if (!live()) return;
   paintTop(); paintNav();
   const sig = s => JSON.stringify([s.counts, s.autopilot, s.auto, s.account.invalid, s.account.followers, s.next_post && s.next_post.id]);
   const typing = /INPUT|TEXTAREA|SELECT/.test((D.activeElement || {}).tagName || '');
@@ -4474,11 +6133,16 @@ function tokenBox(done) {
 function connectView() {
   const a = (S.st.account || {}), proxy = h('input', {class: 'in ltr', placeholder: 'http://127.0.0.1:10809', 'aria-label': 'پروکسی'});
   GET('/api/settings').then(s => { proxy.value = s.network.proxy; }).catch(() => {});
-  return [h('div', {class: 'hero'}, h('img', {src: '/icon.svg', alt: ''}), h('h2', null, 'پیج را یک بار وصل کن'),
-      h('p', {class: 'muted'}, 'ایجنت فقط از راه رسمی اینستاگرام (توکن) وصل می‌شود و هیچ‌وقت رمز پیج را نمی‌خواهد.')),
-    a.last_username ? h('div', {class: 'card sm'}, 'آخرین پیج وصل‌شده: ', h('b', {class: 'ltr'}, '@' + a.last_username)) : null,
-    h('div', {class: 'card col'}, tokenBox(() => { S.tab = 'home'; render(true); })),
-    h('details', {class: 'box', open: true}, h('summary', null, icon('help'), 'توکن را از کجا بیاورم؟ (حدود ۵ دقیقه، فقط یک بار)'), guide(),
+  const byHand = h('button', {class: 'btn pri block', 'data-manual': '1', onclick: e => run(e.currentTarget, async () => { await POST('/api/settings', {manual: true}); await loadStatus(); S.tab = 'home'; render(true); })}, icon('spark'), 'بدون اتصال شروع کن');
+  return [h('div', {class: 'hero'}, h('img', {src: '/icon.svg', alt: ''}), h('h2', null, 'ایجنت اینستاگرام'),
+      h('p', {class: 'muted'}, 'دو راه برای شروع هست؛ بعداً هم می‌توانی عوضش کنی.')),
+    h('div', {class: 'card col'}, h('b', null, '۱. بدون اتصال: خودم پست می‌کنم'),
+      h('p', {class: 'muted sm'}, 'ایده‌ات را می‌نویسی؛ ایجنت عکس یا ویدیوی کوتاه، کپشن و هشتگ می‌سازد و سر وقت یادآوری می‌کند. انتشار را خودت در اپ اینستاگرام انجام می‌دهی. نه توکن می‌خواهد، نه سایت متا.'), byHand),
+    h('div', {class: 'card col'}, h('b', null, '۲. اتصال با توکن متا: انتشار و پاسخ خودکار'),
+      h('p', {class: 'muted sm'}, 'ایجنت خودش منتشر می‌کند، کامنت و دایرکت را می‌خواند و آمار می‌دهد. فقط از راه رسمی اینستاگرام (توکن) وصل می‌شود و هیچ‌وقت رمز پیج را نمی‌خواهد. سایت توسعه‌دهندگان متا در بعضی کشورها (از جمله ایران) باز نمی‌شود.'),
+      a.last_username ? h('div', {class: 'sm'}, 'آخرین پیج وصل‌شده: ', h('b', {class: 'ltr'}, '@' + a.last_username)) : null,
+      tokenBox(() => { S.tab = 'home'; render(true); })),
+    h('details', {class: 'box'}, h('summary', null, icon('help'), 'توکن را از کجا بیاورم؟ (حدود ۵ دقیقه، فقط یک بار)'), guide(),
       h('p', {class: 'muted sm'}, 'توکن ۶۰ روز اعتبار دارد و ایجنت خودش تمدیدش می‌کند. توکن فقط روی همین دستگاه نگه داشته می‌شود.')),
     h('details', {class: 'box'}, h('summary', null, icon('settings'), 'اینستاگرام بدون فیلترشکن باز نمی‌شود؟'),
       h('div', {class: 'col'}, h('p', {class: 'muted sm'}, 'نشانی پروکسی HTTP فیلترشکن را بنویس (در v2rayNG معمولاً http://127.0.0.1:10809).'),
@@ -4497,7 +6161,30 @@ function logLine(l) {
   return h('div', {class: 'logline'}, h('i', {class: 'dot ' + ({alert: 'bad', warn: 'warn', ok: ''}[l.level] != null ? {alert: 'bad', warn: 'warn', ok: ''}[l.level] : 'off')}),
     h('div', {class: 'grow'}, h('div', {class: 'pre'}, l.text), h('small', {class: 'muted'}, ago(l.ts))));
 }
+async function homeByHand() {
+  const c = S.st.counts, idea = h('textarea', {class: 'in', rows: 2, placeholder: 'مثلاً: تخفیف ۲۰٪ لاتهٔ پاییزی تا آخر هفته', 'aria-label': 'ایده', value: S.typed.idea || ''});
+  idea.addEventListener('input', () => { S.typed.idea = idea.value; });
+  const make = kind => studio({idea: idea.value, kind}, r => { delete S.typed.idea; composer(null, r); });
+  const narrator = S.st.studio.speaker === DEVICE ? packed() : !!S.st.studio.voice;
+  const out = [h('div', {class: 'card col'}, h('h2', null, 'چه چیزی بسازم؟'),
+    h('p', {class: 'muted sm'}, 'ایده‌ات را در یک جمله بنویس؛ ایجنت عکس یا ویدیوی کوتاه' + (narrator ? ' (با صدای گوینده)' : '') + '، کپشن و هشتگ را آماده می‌کند.'), idea,
+    h('div', {class: 'row'}, h('button', {class: 'btn pri grow', 'data-make': 'image', onclick: () => make('image')}, icon('image'), 'عکس بساز'),
+      h('button', {class: 'btn pri grow', 'data-make': 'reel', onclick: () => make('reel')}, icon('film'), 'ویدیو بساز')),
+    narrator ? null : h('div', {class: 'col', 'data-home-voice': '1'}, h('b', {class: 'sm'}, 'ویدیو با صدای گوینده'), packBox(() => render(false))))];
+  const [queue, log] = await Promise.all([GET('/api/posts?group=queue'), GET('/api/log?limit=4')]);
+  const due = queue.items.filter(p => p.status === 'due'), soon = queue.items.filter(p => p.status === 'scheduled');
+  if (due.length) out.push(h('h3', null, 'وقت انتشار این‌ها رسیده'), due.map(postCard));
+  if (soon.length) out.push(h('h3', null, 'یادآوری‌های پیش رو'), soon.slice(0, 3).map(postCard));
+  out.push(h('div', {class: 'card col'}, h('div', {class: 'chips'}, h('span', {class: 'pill info'}, icon('clock'), fa(c.scheduled) + ' یادآوری'), h('span', {class: 'pill'}, icon('edit'), fa(c.drafts) + ' پیش‌نویس'),
+      h('span', {class: 'pill ok'}, icon('check'), fa(c.published_today) + ' انتشار امروز')),
+    h('button', {class: 'btn', onclick: () => composer()}, icon('upload'), 'پست با عکس یا ویدیوی خودم')));
+  out.push(h('div', {class: 'card col'}, h('b', null, 'پیج وصل نیست'), h('div', {class: 'muted sm'}, 'ایجنت محتوا را آماده و یادآوری می‌کند؛ انتشار، کامنت‌ها و آمار در اپ اینستاگرام با خودت است.'),
+    h('button', {class: 'btn sm', onclick: tokenSheet}, icon('link'), 'اتصال با توکن متا')));
+  if (log.items.length) out.push(h('h3', null, 'آخرین رویدادها'), h('div', {class: 'card'}, log.items.map(logLine)));
+  return out;
+}
 VIEWS.home = async () => {
+  if (!S.st.connected) return homeByHand();
   const st = S.st, a = st.account, c = st.counts, au = st.auto, out = [];
   if (a.invalid) out.push(h('div', {class: 'card bad col'}, h('b', null, 'اتصال پیج قطع شده است'), h('div', {class: 'sm'}, a.invalid), h('button', {class: 'btn pri', onclick: tokenSheet}, 'دادن توکن تازه')));
   out.push(h('div', {class: 'card'}, h('div', {class: 'row'}, a.picture ? h('img', {class: 'avatar', src: a.picture, alt: ''}) : h('span', {class: 'avatar'}),
@@ -4510,12 +6197,14 @@ VIEWS.home = async () => {
   if (c.open_comments) todo.push(navRow('chat', fa(c.open_comments) + ' کامنت منتظر پاسخ', () => go('inbox', 'comments')));
   if (c.open_dms) todo.push(navRow('send', fa(c.open_dms) + ' دایرکت منتظر پاسخ', () => go('inbox', 'dm')));
   if (c.failed) todo.push(navRow('alert', fa(c.failed) + ' پست منتشرنشده', () => go('content', 'queue')));
+  if (c.due) todo.push(navRow('send', fa(c.due) + ' پست منتظر انتشار به دست خودت', () => go('content', 'queue')));
   out.push(h('h3', null, 'کارهای منتظر تو'), todo.length ? todo : h('div', {class: 'card muted'}, icon('check'), ' همه‌چیز رسیدگی شده است.'));
   out.push(h('h3', null, 'انتشار'), st.next_post ? postCard(st.next_post) : null,
     h('div', {class: 'card col'}, h('div', {class: 'chips'}, h('span', {class: 'pill info'}, icon('clock'), fa(c.scheduled) + ' در صف'), h('span', {class: 'pill'}, icon('edit'), fa(c.drafts) + ' پیش‌نویس'),
         h('span', {class: 'pill ok'}, icon('check'), fa(c.published_today) + ' انتشار امروز'), st.quota ? h('span', {class: 'pill'}, 'سقف اینستاگرام: ' + fa(st.quota.used) + ' از ' + fa(st.quota.total)) : null),
       st.media.ready ? null : h('div', {class: 'sm down'}, 'برای انتشار از گالری هنوز «لینک عمومی» تنظیم نشده است (ایجنت ← تنظیمات).'),
-      h('button', {class: 'btn pri', onclick: () => composer()}, icon('plus'), 'پست جدید')));
+      h('div', {class: 'row'}, h('button', {class: 'btn pri grow', onclick: () => composer()}, icon('plus'), 'پست جدید'),
+        h('button', {class: 'btn grow', 'data-studio': '1', onclick: () => studio({}, r => composer(null, r))}, icon('spark'), 'بساز از ایده'))));
   const pill = (on, t) => h('span', {class: 'pill ' + (on ? 'ok' : '')}, t + ': ' + (on ? 'روشن' : 'خاموش'));
   out.push(h('h3', null, 'ایجنت امروز'), h('div', {class: 'card col'}, h('div', {class: 'chips'}, h('span', {class: 'pill'}, icon('zap'), fa(c.auto_today) + ' کار خودکار'),
       pill(au.comment_reply, 'پاسخ کامنت'), pill(au.spam_hide, 'ضد اسپم'), pill(au.dm_reply, 'پاسخ دایرکت')),
@@ -4536,9 +6225,9 @@ async function notesSheet() {
 
 /* ───── content: queue, drafts, page ───── */
 function postCard(p) {
-  const m = p.media[0], st = STATUS[p.status];
+  const m = p.media[0], st = statusOf(p);
   const sub = p.status === 'scheduled' ? when(p.scheduled_at) : p.status === 'publishing' ? (p.progress || 'در حال انتشار…') : p.status === 'published' ? ago(p.published_at)
-    : (p.status === 'failed' || p.status === 'missed') ? p.error : 'آخرین تغییر: ' + ago(p.updated_at);
+    : p.status === 'due' ? 'آماده است؛ بازش کن و در اینستاگرام بگذار' : (p.status === 'failed' || p.status === 'missed') ? p.error : 'آخرین تغییر: ' + ago(p.updated_at);
   return h('button', {class: 'card row', 'data-post': p.id, onclick: () => postSheet(p.id)}, thumb(m && !m.missing ? m.preview : '', m ? m.type : 'image'),
     h('div', {class: 'grow'}, h('div', {class: 'chips'}, h('span', {class: 'pill ' + st[1]}, st[0]), h('span', {class: 'pill'}, icon(KIND[p.kind][1]), KIND[p.kind][0])),
       h('div', {class: 'clamp'}, p.caption || '— بدون کپشن —'), h('div', {class: 'muted sm clamp'}, sub)));
@@ -4550,17 +6239,20 @@ function tile(m) {
   return add(t, k ? h('span', {class: 'kind'}, icon(k)) : null, h('span', {class: 'meta'}, icon('heart'), fa(m.like_count), icon('chat'), fa(m.comments_count)));
 }
 VIEWS.content = async () => {
-  const c = S.st.counts, sub = S.sub.content;
-  const seg = segment([['queue', 'صف انتشار', c.scheduled + c.publishing + c.failed], ['drafts', 'پیش‌نویس‌ها'], ['page', 'صفحهٔ من']], sub, v => { S.sub.content = v; render(true); });
+  const c = S.st.counts, hand = !S.st.connected;
+  if (hand && S.sub.content === 'page') S.sub.content = 'queue';
+  const sub = S.sub.content;
+  const seg = segment([['queue', hand ? 'برنامه' : 'صف انتشار', c.due + c.scheduled + c.publishing + c.failed], ['drafts', 'پیش‌نویس‌ها']].concat(hand ? [] : [['page', 'صفحهٔ من']]), sub, v => { S.sub.content = v; render(true); });
   if (sub === 'page') {
     const d = await GET('/api/media');
     return [seg, d.items.length ? h('div', {class: 'grid'}, d.items.map(tile)) : empty('grid', 'هنوز پستی در پیج نیست.')];
   }
   const [d, done] = await Promise.all([GET('/api/posts?group=' + sub), sub === 'queue' ? GET('/api/posts?group=published') : {items: []}]);
-  const fresh = h('button', {class: 'btn pri', onclick: () => composer()}, icon('plus'), 'پست جدید');
+  const fresh = h('div', {class: 'row'}, h('button', {class: 'btn pri', 'data-studio': '1', onclick: () => studio({}, r => composer(null, r))}, icon('spark'), 'بساز'),
+    h('button', {class: 'btn', onclick: () => composer()}, icon('plus'), 'پست جدید'));
   return [seg, sub === 'drafts' ? h('button', {class: 'btn', onclick: planSheet}, icon('spark'), 'چیدن برنامهٔ محتوایی') : null,
-    d.items.length ? d.items.map(postCard) : empty('calendar', sub === 'queue' ? 'چیزی در صف انتشار نیست.' : 'پیش‌نویسی نداری.', fresh),
-    done.items.length ? [h('h3', null, 'منتشرشده از همین پنل'), done.items.slice(0, 6).map(postCard)] : null];
+    d.items.length ? d.items.map(postCard) : empty('calendar', sub === 'queue' ? (hand ? 'چیزی در برنامه نیست.' : 'چیزی در صف انتشار نیست.') : 'پیش‌نویسی نداری.', fresh),
+    done.items.length ? [h('h3', null, hand ? 'منتشرشده' : 'منتشرشده از همین پنل'), done.items.slice(0, 6).map(postCard)] : null];
 };
 async function mediaSheet(id) {
   const s = sheet('پست پیج');
@@ -4580,6 +6272,53 @@ async function threadsSheet(mediaId) {
     fill(s.body, d.items.length ? d.items.map(t => threadCard(t, true)) : empty('chat', 'کامنتی برای این پست ثبت نشده است.'));
   } catch (e) { fill(s.body, h('div', {class: 'card bad'}, e.message)); }
 }
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return; } catch (e) { /* not allowed here: the old way */ }
+  const ta = h('textarea', {class: 'in', value: text});
+  ta.style.position = 'fixed'; ta.style.opacity = '0';
+  D.body.appendChild(ta); ta.select();
+  const ok = D.execCommand('copy');
+  ta.remove();
+  if (!ok) throw new Err('کپی نشد؛ متن را خودت انتخاب و کپی کن.');
+}
+function saveFile(file) {
+  const url = URL.createObjectURL(file), a = h('a', {href: url, download: file.name, class: 'hide'});
+  D.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+/* Posting by hand: the file goes to the Instagram app (or to the gallery), the caption to the clipboard. */
+function handKit(p, again) {
+  const files = p.media.filter(m => m.file && !m.missing), links = p.media.filter(m => m.url);
+  let ready = null;                                    /* fetched ahead, so that "share" still happens right on the tap */
+  const load = () => ready || (ready = Promise.all(files.map(async (m, i) => {
+    const res = await fetch(m.preview, {credentials: 'same-origin'});
+    if (!res.ok) throw new Err('فایل این پست خوانده نشد.');
+    const blob = await res.blob(), ext = {'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov', 'image/jpeg': 'jpg'}[blob.type] || 'bin';
+    return new File([blob], 'insta-' + p.id + (files.length > 1 ? '-' + (i + 1) : '') + '.' + ext, {type: blob.type});
+  })));
+  if (files.length) load().catch(() => { ready = null; });
+  const canShare = !!(navigator.share && navigator.canShare) && files.length > 0;
+  const save = async () => { for (const f of await load()) saveFile(f); toast('در پوشهٔ Download گوشی ذخیره شد'); };
+  const share = async () => {
+    const list = await load();
+    if (!navigator.canShare({files: list})) return save();
+    let copied = false;
+    if (p.caption) { try { await copyText(p.caption); copied = true; } catch (e) { /* the caption can still be copied by its own button */ } }
+    try { await navigator.share({files: list}); }
+    catch (e) { if (e && e.name === 'AbortError') return; throw new Err('این مرورگر نتوانست فایل را به اپ دیگری بدهد؛ «ذخیره» را بزن و از گالری انتخابش کن.'); }
+    if (copied) toast('کپشن کپی شده است؛ در اینستاگرام بچسبانش');
+  };
+  const btn = (label, ic, fn, cls, mark) => h('button', {class: 'btn ' + (cls || ''), 'data-kit': mark, onclick: e => run(e.currentTarget, fn)}, icon(ic), label);
+  return h('div', {class: 'card col', 'data-kit': 'box'}, h('b', null, 'انتشار با خودت'),
+    h('div', {class: 'muted sm'}, !files.length ? (links.length ? 'فایل این پست یک لینک است؛ بازش کن و ذخیره کن.' : 'این یادآوری فایل ندارد؛ عکس یا ویدیو را در خود اینستاگرام انتخاب کن.')
+      : canShare ? 'با «ارسال به اینستاگرام» فایل مستقیم به اپ می‌رود و کپشن کپی می‌شود؛ آنجا بچسبانش.' : 'فایل را ذخیره کن، کپشن را کپی کن و در اپ اینستاگرام بگذار.'),
+    canShare ? btn('ارسال به اینستاگرام', 'send', share, 'pri block', 'share') : null,
+    h('div', {class: 'row'}, files.length ? btn('ذخیره', 'download', save, 'grow', 'save') : null,
+      links.map(m => h('a', {class: 'btn grow', href: m.url, target: '_blank', rel: 'noopener'}, icon('external'), 'باز کردن فایل')),
+      p.caption ? btn('کپی کپشن', 'copy', async () => { await copyText(p.caption); toast('کپشن کپی شد ✓'); }, 'grow', 'copy') : null),
+    S.st.telegram && (files.length || p.caption) ? btn('بفرست به تلگرام خودم', 'send', async () => { await POST('/api/posts/' + p.id + '/telegram'); toast('فایل و کپشن در تلگرام توست ✓'); }, 'block', 'telegram') : null,
+    btn('منتشر کردم', 'check', async () => { await POST('/api/posts/' + p.id + '/done'); toast('ثبت شد ✓'); await again(); }, 'block', 'done'));
+}
 function postSheet(id) {
   let timer = 0, last = '';
   const s = sheet('پست', {onclose: () => clearTimeout(timer)});
@@ -4588,14 +6327,17 @@ function postSheet(id) {
     try { p = await GET('/api/posts/' + id); } catch (e) { s.close(); return; }
     if (last && last !== p.status) render(false);
     last = p.status;
-    const st = STATUS[p.status], again = async () => { await refresh(); render(false); await load(); };
-    fill(s.body, p.media.length ? h('div', {class: 'strip'}, p.media.map(m => thumb(m.missing ? '' : m.preview, m.type, 'mitem'))) : null,
+    const st = statusOf(p), again = async () => { await refresh(); render(false); await load(); };
+    const one = p.media.length === 1 && p.media[0].file && !p.media[0].missing ? p.media[0] : null;
+    const byHand = !['published', 'publishing'].includes(p.status) && (!S.st.connected || p.status === 'due');
+    fill(s.body, one ? (one.type === 'video' ? h('video', {class: 'big', src: one.preview, controls: true, playsinline: true, preload: 'metadata'}) : h('img', {class: 'big', src: one.preview, alt: ''}))
+        : p.media.length ? h('div', {class: 'strip'}, p.media.map(m => thumb(m.missing ? '' : m.preview, m.type, 'mitem'))) : null,
       h('div', {class: 'chips'}, h('span', {class: 'pill ' + st[1]}, st[0]), h('span', {class: 'pill'}, icon(KIND[p.kind][1]), KIND[p.kind][0])),
       p.status === 'scheduled' ? h('div', {class: 'row'}, icon('clock'), when(p.scheduled_at)) : null,
       p.status === 'publishing' ? h('div', {class: 'card'}, p.progress || 'در حال انتشار…', p.error ? h('div', {class: 'muted sm'}, 'آخرین مشکل: ' + p.error) : null) : null,
       (p.status === 'failed' || p.status === 'missed') && p.error ? h('div', {class: 'card bad'}, p.error) : null,
-      p.status === 'published' ? h('div', {class: 'card ok'}, 'منتشر شد ✓ — ' + ago(p.published_at)) : null,
-      h('div', {class: 'pre'}, p.caption || '— بدون کپشن —'));
+      p.status === 'published' ? h('div', {class: 'card ok'}, (p.by_hand ? 'خودت منتشرش کردی ✓ — ' : 'منتشر شد ✓ — ') + ago(p.published_at)) : null,
+      byHand ? handKit(p, again) : null, h('div', {class: 'pre', dir: 'auto'}, p.caption || '— بدون کپشن —'));
     const act = (label, fn, cls, ic) => h('button', {class: 'btn ' + (cls || ''), onclick: e => run(e.currentTarget, fn)}, ic ? icon(ic) : null, label);
     const kids = [];
     if (p.status === 'publishing') {
@@ -4607,8 +6349,8 @@ function postSheet(id) {
     } else {
       kids.push(act('حذف', async () => { if (await ask('این پست حذف شود؟', 'حذف', true)) { await DEL('/api/posts/' + id); s.close(); await refresh(); render(false); } }, 'danger', 'trash'));
       kids.push(act('ویرایش', async () => { s.close(); composer(p); }, '', 'edit'));
-      if (p.status === 'scheduled') kids.push(act('لغو زمان', async () => { await POST('/api/posts/' + id + '/cancel'); toast('به پیش‌نویس‌ها برگشت'); await again(); }));
-      kids.push(act(p.status === 'failed' ? 'تلاش دوباره' : 'انتشار الان', async () => { await POST('/api/posts/' + id + '/publish'); await again(); }, 'pri', 'send'));
+      if (p.status === 'scheduled' || p.status === 'due') kids.push(act(p.status === 'due' ? 'به پیش‌نویس' : S.st.connected ? 'لغو زمان' : 'لغو یادآوری', async () => { await POST('/api/posts/' + id + '/cancel'); toast('به پیش‌نویس‌ها برگشت'); await again(); }));
+      if (S.st.connected) kids.push(act(p.status === 'failed' ? 'تلاش دوباره' : 'انتشار الان', async () => { await POST('/api/posts/' + id + '/publish'); await again(); }, 'pri', 'send'));
     }
     if (kids.length) s.setFoot(kids); else s.foot.classList.add('hide');
   };
@@ -4649,10 +6391,11 @@ async function prepImage(file, kind) {
   if (!blob) throw new Error('تبدیل عکس انجام نشد.');
   return {blob, cropped};
 }
-function composer(post) {
+function composer(post, seed) {
+  const hand = !S.st.connected;
   const p = post ? {id: post.id, kind: post.kind, caption: post.caption, opts: Object.assign({}, post.opts), mode: post.status === 'scheduled' ? 'later' : 'now', at: post.status === 'scheduled' ? post.scheduled_at : 0,
       media: post.media.filter(m => !m.missing).map(m => m.file ? {file: m.file, type: m.type, preview: m.preview} : {url: m.url, type: m.type, preview: m.url})}
-    : {kind: 'image', caption: '', media: [], opts: {share_to_feed: true}, mode: 'now', at: 0};
+    : Object.assign({kind: 'image', caption: '', media: [], opts: {share_to_feed: true}, mode: 'now', at: 0}, seed || {});
   const s = sheet(post ? 'ویرایش پست' : 'پست جدید');
   const file = h('input', {type: 'file', class: 'hide'}), cap = h('textarea', {class: 'in', rows: 5, placeholder: 'کپشن…', 'aria-label': 'کپشن', value: p.caption});
   const counter = h('div', {class: 'muted sm row'}), strip = h('div', {class: 'strip'}), kinds = h('div', {class: 'kinds'}), hint = h('div', {class: 'muted sm'}), timing = h('div', {class: 'card col'});
@@ -4674,6 +6417,13 @@ function composer(post) {
     add(u.body, h('p', {class: 'muted sm'}, 'لینک باید مستقیم و عمومی باشد (اینستاگرام خودش فایل را از این نشانی برمی‌دارد).'), field('لینک فایل', inp), field('نوع فایل', typ));
     u.setFoot(h('button', {class: 'btn pri', onclick: () => { const v = inp.value.trim(); if (!/^https:\/\/\S+$/.test(v)) return toast('لینک باید با https:// شروع شود', 'bad'); p.media.push({url: v, type: typ.value, preview: v}); u.close(); paint(); }}, 'افزودن'));
   };
+  /* the studio makes the picture or the reel from an idea; what it made lands here */
+  const fromStudio = () => studio({kind: p.kind === 'reel' ? 'reel' : 'image', idea: cap.value.split('\n')[0].replace(/#\S+/g, '').trim()}, r => {
+    if (p.kind === 'carousel' && r.kind === 'image') p.media.push(r.media[0]);
+    else { p.kind = r.kind; p.media = r.media.slice(); }
+    if (!cap.value.trim()) cap.value = r.caption;
+    count(); paint();
+  });
   const paintOpts = () => {
     const txt = (key, label, ph, rows) => { const el = h(rows ? 'textarea' : 'input', {class: 'in', placeholder: ph, rows, value: p.opts[key] || ''}); el.addEventListener('input', () => { p.opts[key] = el.value; }); return field(label, el); };
     const sw = (key, label, def) => h('div', {class: 'row'}, h('span', {class: 'grow'}, label), toggle(p.opts[key] == null ? def : p.opts[key], async v => { p.opts[key] = v; }, label));
@@ -4683,7 +6433,7 @@ function composer(post) {
       p.kind !== 'story' ? sw('comments_off', 'بستن کامنت‌های این پست', false) : h('div', {class: 'muted sm'}, 'استوری گزینهٔ دیگری ندارد.'));
   };
   const paintTiming = () => {
-    fill(timing, h('b', null, 'چه زمانی منتشر شود؟'), segment([['now', 'همین حالا'], ['later', 'زمان‌بندی']], p.mode, v => {
+    fill(timing, h('b', null, hand ? 'کی می‌خواهی پستش کنی؟' : 'چه زمانی منتشر شود؟'), segment([['now', 'همین حالا'], ['later', hand ? 'یادآوری کن' : 'زمان‌بندی']], p.mode, v => {
       p.mode = v; if (v === 'later' && !p.at) p.at = Math.ceil((Date.now() / 1000 + 3600) / 900) * 900; paintTiming(); paintFoot(); }));
     if (p.mode !== 'later') return;
     const d = new Date(p.at * 1000), t0 = new Date(), dsel = h('select', {class: 'in', 'aria-label': 'روز'}), time = h('input', {class: 'in ltr', type: 'time', 'aria-label': 'ساعت', value: two(d.getHours()) + ':' + two(d.getMinutes())});
@@ -4698,7 +6448,7 @@ function composer(post) {
     const sync = () => { const t = (time.value || '12:00').split(':'), x = new Date(t0.getFullYear(), t0.getMonth(), t0.getDate() + Number(dsel.value), Number(t[0]), Number(t[1])); p.at = x.getTime() / 1000; fill(label, when(p.at)); };
     dsel.addEventListener('change', sync); time.addEventListener('change', sync);
     GET('/api/slots').then(r => fill(chips, r.items.map(ts => h('button', {class: 'chip', onclick: () => { p.at = ts; paintTiming(); }}, when(ts))))).catch(() => {});
-    add(timing, h('div', {class: 'row when'}, h('div', {class: 'grow'}, dsel), h('div', {class: 'fix'}, time)), label, h('div', {class: 'muted sm'}, 'پیشنهاد ایجنت (ساعت‌هایی که پست‌هایت بهتر دیده شده):'), chips);
+    add(timing, h('div', {class: 'row when'}, h('div', {class: 'grow'}, dsel), h('div', {class: 'fix'}, time)), label, h('div', {class: 'muted sm'}, hand ? 'ساعت‌های پیشنهادی:' : 'پیشنهاد ایجنت (ساعت‌هایی که پست‌هایت بهتر دیده شده):'), chips);
   };
   const paint = () => {
     fill(kinds, Object.keys(KIND).map(k => h('button', {class: p.kind === k ? 'on' : '', 'data-kind': k, onclick: () => { p.kind = k; p.media = p.media.slice(0, max()); paint(); }}, icon(KIND[k][1]), KIND[k][0])));
@@ -4708,7 +6458,8 @@ function composer(post) {
     fill(strip, p.media.map((m, i) => h('div', {class: 'mitem'}, thumb(m.preview, m.type, 'fit'), h('span', {class: 'tag'}, m.type === 'video' ? 'ویدیو' : 'عکس'),
         h('button', {class: 'rm', 'aria-label': 'برداشتن', onclick: () => { p.media.splice(i, 1); paint(); }}, icon('x')))),
       more ? h('button', {class: 'mitem add', 'data-add': 'file', onclick: () => file.click()}, icon('upload'), 'از گالری') : null,
-      more ? h('button', {class: 'mitem add', 'data-add': 'url', onclick: addUrl}, icon('link'), 'با لینک') : null);
+      more && p.kind !== 'story' ? h('button', {class: 'mitem add', 'data-add': 'ai', onclick: fromStudio}, icon('spark'), 'بساز') : null,
+      more && !hand ? h('button', {class: 'mitem add', 'data-add': 'url', onclick: addUrl}, icon('link'), 'با لینک') : null);
     fill(hint, {image: 'یک عکس. خودکار به JPEG تبدیل و اگر لازم باشد به نسبت مجاز (۴:۵ تا ۱٫۹۱:۱) بریده می‌شود.', carousel: '۲ تا ۲۰ عکس یا ویدیو؛ مخاطب ورق می‌زند.',
       reel: 'یک ویدیوی MP4 (عمودی ۹:۱۶ بهتر دیده می‌شود)؛ از ۳ ثانیه تا ۱۵ دقیقه و حداکثر ۳۰۰ مگابایت.', story: 'یک عکس یا ویدیو (۹:۱۶)؛ ویدیو حداکثر ۶۰ ثانیه و ۱۰۰ مگابایت. بدون کپشن فرستاده می‌شود و بعد از ۲۴ ساعت پاک می‌شود.'}[p.kind]);
     capBox.classList.toggle('hide', p.kind === 'story');
@@ -4753,19 +6504,709 @@ function composer(post) {
     add(a.body, field(label, h('div', {class: 'row'}, topic, go_)), list);
   };
   const paintFoot = () => s.setFoot(h('button', {class: 'btn', onclick: e => save(e.currentTarget, 'draft')}, 'پیش‌نویس'),
-    h('button', {class: 'btn pri', 'data-go': '1', onclick: e => save(e.currentTarget, p.mode === 'later' ? 'schedule' : 'now')}, icon(p.mode === 'later' ? 'clock' : 'send'), p.mode === 'later' ? 'زمان‌بندی' : 'انتشار'));
+    h('button', {class: 'btn pri', 'data-go': '1', onclick: e => save(e.currentTarget, p.mode === 'later' ? 'schedule' : 'now')}, icon(p.mode === 'later' ? 'clock' : 'send'),
+      p.mode === 'later' ? (hand ? 'یادآوری' : 'زمان‌بندی') : (hand ? 'آماده کن' : 'انتشار')));
   const save = (btn, action) => run(btn, async () => {
     const body = {kind: p.kind, caption: p.kind === 'story' ? '' : cap.value, media: p.media.map(m => (m.file ? {file: m.file} : {url: m.url, type: m.type})), opts: p.opts, action, scheduled_at: p.at};
     const r = await POST(p.id ? '/api/posts/' + p.id : '/api/posts', body);
     s.close();
-    toast(action === 'draft' ? 'در پیش‌نویس‌ها ذخیره شد' : action === 'schedule' ? 'زمان‌بندی شد ✓' : 'انتشار شروع شد…');
+    toast(action === 'draft' ? 'در پیش‌نویس‌ها ذخیره شد' : action === 'schedule' ? (hand ? 'یادآوری تنظیم شد ✓' : 'زمان‌بندی شد ✓') : hand ? 'آماده است ✓' : 'انتشار شروع شد…');
     await refresh(); S.tab = 'content'; S.sub.content = action === 'draft' ? 'drafts' : 'queue'; render(true);
     if (action === 'now') postSheet(r.id);
   });
   add(capBox, field('کپشن', cap), counter, tagNote, h('div', {class: 'row'}, h('button', {class: 'btn sm grow', onclick: () => helper('کپشن پیشنهادی', 'این پست دربارهٔ چیست؟', '/api/ai/captions', true)}, icon('spark'), 'کپشن پیشنهادی'),
     h('button', {class: 'btn sm grow', onclick: () => helper('هشتگ پیشنهادی', 'موضوع پست', '/api/ai/hashtags', false)}, icon('hash'), 'هشتگ پیشنهادی')));
-  add(s.body, kinds, strip, hint, file, capBox, h('details', {class: 'box'}, h('summary', null, icon('settings'), 'گزینه‌های بیشتر'), optBox), timing);
+  add(s.body, kinds, strip, hint, file, capBox, hand ? null : h('details', {class: 'box'}, h('summary', null, icon('settings'), 'گزینه‌های بیشتر'), optBox), timing);
   count(); paint();
+}
+
+/* ───── studio: a picture or a reel out of one idea ─────
+   The agent writes the words and fetches the pictures; everything is then drawn here, on the phone, so a result
+   exists even when no picture service answered. */
+const FACE = '"Vazirmatn", "Vazir", Tahoma, system-ui, sans-serif';
+const LOOKS = [['#f97316', '#db2777'], ['#0ea5e9', '#4338ca'], ['#10b981', '#065f46'], ['#111827', '#4b5563'], ['#8b5cf6', '#4c1d95'], ['#fde68a', '#fca5a5'], ['#f59e0b', '#b45309'], ['#e0f2fe', '#a5b4fc']];
+const SCENE_SEC = 3.2, FADE_SEC = 0.5, REEL_FPS = 30, AUDIO_RATE = 48000, VOICE_LEAD = 0.35, VOICE_TAIL = 0.6;
+const DEVICE = 'device', DEVICE_NAME = 'گویندهٔ فارسی (مرد) — روی همین گوشی، رایگان';
+const SPEAKERS = [['nova', 'زن (nova)'], ['shimmer', 'زن (shimmer)'], ['alloy', 'خنثی (alloy)'], ['onyx', 'مرد (onyx)'], ['echo', 'مرد (echo)'], ['fable', 'مرد (fable)']];
+const PIC_FROM = {key: 'Pollinations', free: 'Pollinations رایگان', horde: 'AI Horde', custom: 'سرویس خودت'};
+const NO_PLAN = {off: 'دستیار در تنظیمات خاموش است', limit: 'سرویس رایگان متن نوبت نداد', down: 'به سرویس متن دسترسی نبود', format: 'پاسخ سرویس متن قابل‌استفاده نبود'};
+const blank = (w, ht) => Object.assign(D.createElement('canvas'), {width: w, height: ht});
+const pause = ms => new Promise(r => setTimeout(r, ms || 0));
+function loadPic(src) {
+  return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Err('تصویر باز نشد.')); i.src = src; });
+}
+async function faceReady() {
+  if (!D.fonts || !D.fonts.load) return;
+  try { await Promise.all([D.fonts.load('800 80px Vazirmatn'), D.fonts.load('500 40px Vazirmatn')]); } catch (e) { /* the phone's own font is used */ }
+}
+function cover(ctx, img, w, ht, zoom, cx, cy) {
+  const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, s = Math.max(w / iw, ht / ih) * (zoom || 1), dw = iw * s, dh = ih * s;
+  ctx.drawImage(img, (w - dw) * (cx == null ? 0.5 : cx), (ht - dh) * (cy == null ? 0.5 : cy), dw, dh);
+}
+function wrapText(ctx, text, maxW) {
+  const out = [];
+  for (const para of String(text || '').split('\n')) {
+    let line = '';
+    for (const word of para.split(/\s+/).filter(Boolean)) {
+      const next = line ? line + ' ' + word : word;
+      if (line && ctx.measureText(next).width > maxW) { out.push(line); line = word; } else line = next;
+    }
+    if (line) out.push(line);
+  }
+  return out;
+}
+/* the largest size at which the text fits its box */
+function fitText(ctx, text, o) {
+  let size = o.max, lines = [];
+  const set = () => { ctx.font = o.weight + ' ' + Math.round(size) + 'px ' + FACE; lines = wrapText(ctx, text, o.w); };
+  for (set(); size > o.min && (lines.length > o.lines || lines.some(l => ctx.measureText(l).width > o.w)); set()) size -= Math.max(2, size * 0.06);
+  if (lines.length > o.lines) { lines = lines.slice(0, o.lines); lines[o.lines - 1] = lines[o.lines - 1].replace(/\s*\S*$/, '') + '…'; }
+  return {size, lines};
+}
+function paintLines(ctx, lines, cx, top, size, o) {
+  ctx.save();
+  ctx.font = o.weight + ' ' + Math.round(size) + 'px ' + FACE; ctx.direction = 'rtl'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = o.ink;
+  if (o.glow) { ctx.shadowColor = 'rgba(0,0,0,.6)'; ctx.shadowBlur = size * 0.22; ctx.shadowOffsetY = size * 0.04; }
+  lines.forEach((l, i) => ctx.fillText(l, cx, top + size * 1.5 * (i + 0.5)));
+  ctx.restore();
+  return top + size * 1.5 * lines.length;
+}
+/* a drawn background for when there is no picture; returns true when it is a light one (dark words then) */
+function backdrop(ctx, w, ht, look, t) {
+  const pair = LOOKS[look % LOOKS.length], g = ctx.createLinearGradient(0, 0, w, ht), m = Math.min(w, ht), d = Math.sin((t || 0) * 0.7) * m * 0.025;
+  const tone = c => { const n = parseInt(c.slice(1), 16); return (0.2126 * (n >> 16 & 255) + 0.7152 * (n >> 8 & 255) + 0.0722 * (n & 255)) / 255; };
+  const light = tone(pair[0]) + tone(pair[1]) > 1.3, disc = (x, y, r) => { ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill(); };
+  g.addColorStop(0, pair[0]); g.addColorStop(1, pair[1]);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, w, ht);
+  ctx.fillStyle = light ? 'rgba(255,255,255,.35)' : 'rgba(255,255,255,.10)';
+  disc(w * 0.86 + d, ht * 0.11, m * 0.34); disc(w * 0.08 - d, ht * 0.93, m * 0.42);
+  ctx.fillStyle = light ? 'rgba(0,0,0,.05)' : 'rgba(0,0,0,.12)';
+  disc(w * 0.5, ht * 1.08 + d, m * 0.62);
+  return light;
+}
+/* a dark veil, so that words stay readable on any picture */
+function veil(ctx, w, ht, place) {
+  if (place === 'middle') { ctx.fillStyle = 'rgba(0,0,0,.42)'; ctx.fillRect(0, 0, w, ht); return; }
+  const g = place === 'top' ? ctx.createLinearGradient(0, 0, 0, ht * 0.58) : ctx.createLinearGradient(0, ht, 0, ht * 0.38);
+  g.addColorStop(0, 'rgba(0,0,0,.8)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, w, ht);
+}
+/* the words of one picture or one scene: a big line, an optional small one, and the name of the page */
+function words(ctx, w, ht, o) {
+  const u = w / 1080, gap = 20 * u;
+  const head = o.head ? fitText(ctx, o.head, {w: w * 0.84, lines: o.lines, max: o.big * u, min: 50 * u, weight: 800}) : null;
+  const sub = o.sub ? fitText(ctx, o.sub, {w: w * 0.8, lines: 2, max: 54 * u, min: 36 * u, weight: 500}) : null;
+  const all = (head ? head.lines.length * head.size * 1.5 : 0) + (sub ? sub.lines.length * sub.size * 1.5 + gap : 0);
+  let y = o.place === 'top' ? ht * 0.085 : o.place === 'middle' ? (ht - all) / 2 : ht * o.floor - all;
+  const a = o.rise == null ? 1 : o.rise;
+  ctx.save(); ctx.globalAlpha *= a; ctx.translate(0, (1 - a) * 40 * u);
+  if (head) y = paintLines(ctx, head.lines, w / 2, y, head.size, {ink: o.ink, glow: o.glow, weight: 800});
+  if (sub) paintLines(ctx, sub.lines, w / 2, y + gap, sub.size, {ink: o.ink, glow: o.glow, weight: 500});
+  ctx.restore();
+  if (!o.handle) return;
+  ctx.save();
+  ctx.font = '600 ' + Math.round(34 * u) + 'px ' + FACE; ctx.direction = 'ltr'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = o.ink; ctx.globalAlpha *= 0.85 * a;
+  if (o.glow) { ctx.shadowColor = 'rgba(0,0,0,.6)'; ctx.shadowBlur = 8 * u; }
+  ctx.fillText('@' + o.handle, w / 2, ht * o.tag);
+  ctx.restore();
+}
+/* a feed picture. m: {img, head, sub, handle, look, words} */
+function paintPost(cv, m) {
+  const ctx = cv.getContext('2d'), w = cv.width, ht = cv.height;
+  ctx.imageSmoothingQuality = 'high';
+  let ink = '#fff', glow = true, place = ['bottom', 'top', 'middle'][m.look % 3];
+  if (m.img) { cover(ctx, m.img, w, ht); if (m.words && (m.head || m.sub)) veil(ctx, w, ht, place); }
+  else { const light = backdrop(ctx, w, ht, m.look, 0); ink = light ? '#111827' : '#fff'; glow = !light; place = 'middle'; }
+  const show = m.words || !m.img;
+  words(ctx, w, ht, {head: show ? m.head : '', sub: show ? m.sub : '', handle: m.handle, place, floor: 0.9, tag: place === 'bottom' || !m.img ? 0.95 : 0.955, ink, glow, big: m.img ? 104 : 128, lines: m.img ? 3 : 4});
+}
+/* when each scene of a reel begins: a scene with narration lasts as long as its voice */
+function reelTimes(durs) {
+  const starts = []; let t = 0;
+  for (const d of durs) { starts.push(t); t += d; }
+  return {starts, durs, total: t + 0.2};
+}
+/* one frame of a reel at second t. m: {scenes: [{img, text}], starts, durs, sub, handle, look} */
+function paintReel(cv, m, t) {
+  const ctx = cv.getContext('2d'), w = cv.width, ht = cv.height, n = m.scenes.length;
+  let at = n - 1;
+  for (let k = 0; k < n; k++) if (t < m.starts[k] + m.durs[k]) { at = k; break; }
+  ctx.imageSmoothingQuality = 'medium';
+  const one = (k, alpha) => {
+    const sc = m.scenes[k], since = t - m.starts[k] + FADE_SEC, p = Math.max(0, Math.min(1, since / (m.durs[k] + FADE_SEC)));
+    let ink = '#fff', glow = true;
+    ctx.save(); ctx.globalAlpha = alpha;
+    if (sc.img) { cover(ctx, sc.img, w, ht, k % 2 ? 1.16 - 0.1 * p : 1.05 + 0.1 * p, 0.5 + (k % 2 ? 0.08 : -0.08) * (p - 0.5), 0.5); veil(ctx, w, ht, 'bottom'); }
+    else { const light = backdrop(ctx, w, ht, m.look + k, since); ink = light ? '#111827' : '#fff'; glow = !light; }
+    const rise = Math.max(0, Math.min(1, (since - FADE_SEC - 0.1) / 0.45));
+    words(ctx, w, ht, {head: sc.text, sub: k === n - 1 ? m.sub : '', handle: k === n - 1 ? m.handle : '', place: sc.img ? 'bottom' : 'middle', floor: 0.74, tag: 0.79,
+      ink, glow, big: sc.img ? 92 : 112, lines: 3, rise: 1 - Math.pow(1 - rise, 3)});
+    ctx.restore();
+  };
+  one(at, 1);
+  const into = t - (m.starts[at] + m.durs[at] - FADE_SEC);
+  if (at < n - 1 && into > 0) one(at + 1, Math.min(1, into / FADE_SEC));
+}
+
+/* A plain MP4 out of H.264 samples and, when there is sound, one audio track (AAC or Opus). The index comes first, so the
+   file plays while it still loads; picture and sound alternate second by second.
+   v: {samples: [{data, key, ts}], avcC, w, ht, fps, turned, space}     a: {kind, samples: [{data, dur}], desc, rate, channels} or null
+   turned: the frames lie on their side, the way phone cameras store upright video; the track says "turn me back". */
+function mp4File(v, a) {
+  const be = (x, n) => { const o = new Uint8Array(n); for (let i = n - 1; i >= 0; i--) { o[i] = x % 256; x = Math.floor(x / 256); } return o; };
+  const u8 = x => Uint8Array.of(x), u16 = x => be(x, 2), u32 = x => be(x, 4), txt = s => Uint8Array.from(s, c => c.charCodeAt(0)), zero = n => new Uint8Array(n);
+  const join = parts => { const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; } return out; };
+  const box = (type, ...parts) => { const body = join(parts); return join([u32(body.length + 8), txt(type), body]); };
+  const full = (type, flags, ...parts) => box(type, u32(flags), ...parts);
+  const pairs = list => { const runs = []; for (const x of list) { if (runs.length && runs[runs.length - 1][1] === x) runs[runs.length - 1][0]++; else runs.push([1, x]); } return join([u32(runs.length)].concat(runs.map(r => join([u32(r[0]), u32(r[1])])))); };
+  const chunksOf = (count, per) => { const out = []; for (let i = 0; i < count; i += per) out.push(Math.min(per, count - i)); return out; };
+  const stsc = chunks => { const r = [[1, chunks[0]]]; if (chunks.length > 1 && chunks[chunks.length - 1] !== chunks[0]) r.push([chunks.length, chunks[chunks.length - 1]]); return full('stsc', 0, u32(r.length), join(r.map(x => join([u32(x[0]), u32(x[1]), u32(1)])))); };
+  const fps = v.fps, n = v.samples.length, tick = 1000, vms = Math.round(n * 1000 / fps);
+  const an = a ? a.samples.length : 0, alen = a ? a.samples.reduce((sum, x) => sum + x.dur, 0) : 0, ams = a ? Math.round(alen * 1000 / a.rate) : 0, ms = Math.max(vms, ams);
+  const vchunks = chunksOf(n, fps), achunks = a ? chunksOf(an, Math.max(1, Math.round(a.rate / a.samples[0].dur))) : [];
+  /* B-frames are shown later than they are decoded. Offsets may not be negative, so all shift and an edit list takes it back. */
+  const shown = v.samples.map(s => Math.round(s.ts * fps / 1e6));
+  let lead = 0;
+  shown.forEach((p, i) => { lead = Math.max(lead, i - p); });
+  const late = shown.map((p, i) => (p + lead - i) * tick), mixed = lead > 0 || late.some(x => x !== 0);
+  const keys = []; v.samples.forEach((s, i) => { if (s.key) keys.push(i + 1); });
+  const flat = [u32(0x10000), u32(0), u32(0), u32(0), u32(0x10000), u32(0), u32(0), u32(0), u32(0x40000000)];
+  const side = [u32(0), u32(0x10000), u32(0), u32(0xffff0000), u32(0), u32(0), u32(v.ht * 0x10000), u32(0), u32(0x40000000)];
+  const space = v.space, colr = space && space.matrix ? box('colr', txt('nclx'), u16({bt709: 1, bt470bg: 5, smpte170m: 6}[space.primaries] || 1),
+    u16({bt709: 1, smpte170m: 6, 'iec61966-2-1': 13}[space.transfer] || 1), u16({bt709: 1, bt470bg: 5, smpte170m: 6}[space.matrix] || 1), u8(space.fullRange ? 0x80 : 0)) : zero(0);
+  const avc1 = box('avc1', zero(6), u16(1), zero(16), u16(v.w), u16(v.ht), u32(0x480000), u32(0x480000), u32(0), u16(1), zero(32), u16(24), u16(0xffff), box('avcC', v.avcC), colr);
+  const dinf = box('dinf', full('dref', 0, u32(1), full('url ', 1)));
+  const picture = offsets => box('trak',
+    full('tkhd', 3, u32(0), u32(0), u32(1), u32(0), u32(vms), zero(8), u16(0), u16(0), u16(0), u16(0), ...(v.turned ? side : flat), u32(v.w * 0x10000), u32(v.ht * 0x10000)),
+    mixed ? box('edts', full('elst', 0, u32(1), u32(vms), u32(lead * tick), u16(1), u16(0))) : zero(0),
+    box('mdia',
+      full('mdhd', 0, u32(0), u32(0), u32(fps * tick), u32(n * tick), u16(0x55c4), u16(0)),
+      full('hdlr', 0, u32(0), txt('vide'), zero(12), txt('VideoHandler\0')),
+      box('minf', full('vmhd', 1, zero(8)), dinf,
+        box('stbl', full('stsd', 0, u32(1), avc1),
+          full('stts', 0, u32(1), u32(n), u32(tick)),
+          mixed ? full('ctts', 0, pairs(late)) : zero(0),
+          keys.length < n ? full('stss', 0, u32(keys.length), join(keys.map(u32))) : zero(0),
+          stsc(vchunks),
+          full('stsz', 0, u32(0), u32(n), join(v.samples.map(s => u32(s.data.length)))),
+          full('stco', 0, u32(vchunks.length), join(offsets.map(u32)))))));
+  const tag = (t, ...parts) => { const body = join(parts); return join([Uint8Array.of(t, body.length), body]); };      /* an MPEG-4 descriptor; always short here */
+  const sound = offsets => {
+    const entry = [zero(6), u16(1), zero(8), u16(a.channels), u16(16), u16(0), u16(0), u32(a.rate * 65536)];
+    const skip = a.desc && a.desc.length >= 12 ? a.desc[10] + a.desc[11] * 256 : 312;                                  /* Opus: samples to drop at the start */
+    const codec = a.kind === 'aac'
+      ? box('mp4a', ...entry, full('esds', 0, tag(3, u16(0), u8(0), tag(4, u8(0x40), u8(0x15), zero(3), u32(128000), u32(96000), tag(5, a.desc)), tag(6, u8(2)))))
+      : box('Opus', ...entry, box('dOps', u8(0), u8(a.channels), u16(skip), u32(a.rate), u16(0), u8(0)));
+    const cut = a.kind === 'opus' ? skip : 0, heard = Math.round((alen - cut) * 1000 / a.rate);
+    return box('trak',
+      full('tkhd', 3, u32(0), u32(0), u32(2), u32(0), u32(heard), zero(8), u16(0), u16(1), u16(0x100), u16(0), ...flat, u32(0), u32(0)),
+      cut ? box('edts', full('elst', 0, u32(1), u32(heard), u32(cut), u16(1), u16(0))) : zero(0),         /* the encoder's run-in is not played */
+      box('mdia',
+        full('mdhd', 0, u32(0), u32(0), u32(a.rate), u32(alen), u16(0x55c4), u16(0)),
+        full('hdlr', 0, u32(0), txt('soun'), zero(12), txt('SoundHandler\0')),
+        box('minf', full('smhd', 0, zero(4)), dinf,
+          box('stbl', full('stsd', 0, u32(1), codec),
+            full('stts', 0, pairs(a.samples.map(x => x.dur))),
+            stsc(achunks),
+            full('stsz', 0, u32(0), u32(an), join(a.samples.map(x => u32(x.data.length)))),
+            full('stco', 0, u32(achunks.length), join(offsets.map(u32)))))));
+  };
+  const order = [];
+  for (let i = 0; i < Math.max(vchunks.length, achunks.length); i++) { if (i < vchunks.length) order.push([v.samples, vchunks[i], 0]); if (i < achunks.length) order.push([a.samples, achunks[i], 1]); }
+  const lay = start => { const offs = [[], []], next = [0, 0]; let at = start; for (const [list, count, which] of order) { offs[which].push(at); for (let k = 0; k < count; k++) at += list[next[which]++].data.length; } return offs; };
+  const moov = offs => box('moov', full('mvhd', 0, u32(0), u32(0), u32(1000), u32(ms), u32(0x10000), u16(0x100), zero(10), ...flat, zero(24), u32(a ? 3 : 2)), picture(offs[0]), a ? sound(offs[1]) : zero(0));
+  const ftyp = box('ftyp', txt('isom'), u32(512), txt('isomiso2avc1mp41')), head = ftyp.length + moov(lay(0)).length + 8;
+  const data = [], next = [0, 0]; let total = 0;
+  for (const [list, count, which] of order) for (let k = 0; k < count; k++) { const d = list[next[which]++].data; data.push(d); total += d.length; }
+  return new Blob([ftyp, moov(lay(head)), u32(total + 8), txt('mdat')].concat(data), {type: 'video/mp4'});
+}
+async function avcConfig(w, ht, fps) {
+  if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') return null;
+  for (const codec of ['avc1.640028', 'avc1.4d0028', 'avc1.42e028', 'avc1.42001f']) {
+    const cfg = {codec, width: w, height: ht, bitrate: Math.round(w * ht * fps * 0.1), framerate: fps, avc: {format: 'avc'}};
+    try { if ((await VideoEncoder.isConfigSupported(cfg)).supported) return cfg; } catch (e) { /* try the next profile */ }
+  }
+  return null;
+}
+const bytesOf = d => new Uint8Array(d.buffer ? d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength) : d);
+/* Frame by frame through the device's own H.264 encoder; null when this browser has none for that size. */
+async function encodeFrames(stage, paint, seconds, fps, turned, onStep, stop) {
+  const cw = turned ? stage.height : stage.width, ch = turned ? stage.width : stage.height, cfg = await avcConfig(cw, ch, fps);
+  if (!cfg) return null;
+  const lay = turned ? blank(cw, ch) : stage, lctx = turned ? lay.getContext('2d') : null, samples = [], frames = Math.round(seconds * fps);
+  let desc = null, space = null, failed = null;
+  const enc = new VideoEncoder({error: e => { failed = e; }, output: (chunk, meta) => {
+    const dc = meta && meta.decoderConfig;
+    if (dc && dc.description) { desc = bytesOf(dc.description); space = dc.colorSpace || null; }
+    const data = new Uint8Array(chunk.byteLength);
+    chunk.copyTo(data);
+    samples.push({data, key: chunk.type === 'key', ts: chunk.timestamp});
+  }});
+  enc.configure(cfg);
+  try {
+    for (let i = 0; i < frames; i++) {
+      if (stop.on) throw new Err('لغو شد.', 0, true);
+      if (failed) throw failed;
+      paint(i / fps);
+      if (turned) { lctx.setTransform(0, -1, 1, 0, 0, ch); lctx.drawImage(stage, 0, 0); }
+      const frame = new VideoFrame(lay, {timestamp: Math.round(i * 1e6 / fps), duration: Math.round(1e6 / fps)});
+      enc.encode(frame, {keyFrame: i % (fps * 2) === 0});
+      frame.close();
+      while (enc.encodeQueueSize > 4 && !failed) await pause();
+      if (i % 6 === 0) { onStep(i / frames); await pause(); }
+    }
+    await enc.flush();
+    if (failed) throw failed;
+  } finally { try { enc.close(); } catch (e) { /* closed already */ } }
+  if (!desc || samples.length !== frames) throw new Error('the encoder returned ' + samples.length + ' of ' + frames + ' frames');
+  return {samples, avcC: desc, w: cw, ht: ch, fps, turned, space};
+}
+
+/* ── sound: narration clips are decoded, laid on one track and encoded on the device ── */
+async function decodeSound(bytes) {                    /* any format the browser knows → one channel at AUDIO_RATE */
+  return new OfflineAudioContext(1, 1, AUDIO_RATE).decodeAudioData(bytes);
+}
+async function mixSound(clips, seconds) {              /* clips: [{buf, at}] → samples of the whole reel */
+  const oc = new OfflineAudioContext(1, Math.ceil(seconds * AUDIO_RATE), AUDIO_RATE);
+  for (const c of clips) { const src = oc.createBufferSource(); src.buffer = c.buf; src.connect(oc.destination); src.start(Math.max(0, c.at)); }
+  const pcm = (await oc.startRendering()).getChannelData(0);
+  let peak = 0;
+  for (let i = 0; i < pcm.length; i++) { const x = Math.abs(pcm[i]); if (x > peak) peak = x; }
+  const gain = peak > 0.02 ? Math.min(4, 0.85 / peak) : 1;                /* a quiet recording is brought up, a loud one is kept from clipping */
+  if (Math.abs(gain - 1) > 0.05) for (let i = 0; i < pcm.length; i++) pcm[i] *= gain;
+  return pcm;
+}
+/* AAC where the device has an encoder (phones, Windows, macOS), Opus elsewhere; null when this browser has neither */
+async function encodeSound(pcm, stop) {
+  if (typeof AudioEncoder === 'undefined' || typeof AudioData === 'undefined') return null;
+  const tries = [['aac', 'mp4a.40.2', 1, 96000], ['aac', 'mp4a.40.2', 2, 128000], ['opus', 'opus', 1, 64000]].filter(x => !S.audio || S.audio === x[0]);
+  for (const [kind, codec, channels, bitrate] of tries) {
+    const cfg = Object.assign({codec, sampleRate: AUDIO_RATE, numberOfChannels: channels, bitrate}, kind === 'aac' ? {aac: {format: 'aac'}} : {});
+    let ok = false;
+    try { ok = (await AudioEncoder.isConfigSupported(cfg)).supported; } catch (e) { /* not this one */ }
+    if (!ok) continue;
+    const samples = [], step = AUDIO_RATE / 10;
+    let desc = null, failed = null;
+    const enc = new AudioEncoder({error: e => { failed = e; }, output: (chunk, meta) => {
+      const dc = meta && meta.decoderConfig;
+      if (dc && dc.description) desc = bytesOf(dc.description);
+      const data = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(data);
+      samples.push({data, dur: Math.round((chunk.duration || 0) * AUDIO_RATE / 1e6) || (kind === 'aac' ? 1024 : 960)});
+    }});
+    try {
+      enc.configure(cfg);
+      for (let o = 0; o < pcm.length && !failed; o += step) {
+        if (stop.on) throw new Err('لغو شد.', 0, true);
+        const part = pcm.subarray(o, Math.min(pcm.length, o + step)), both = channels === 2 ? new Float32Array(part.length * 2) : part;
+        if (channels === 2) { both.set(part, 0); both.set(part, part.length); }
+        const piece = new AudioData({format: 'f32-planar', sampleRate: AUDIO_RATE, numberOfFrames: part.length, numberOfChannels: channels, timestamp: Math.round(o / AUDIO_RATE * 1e6), data: both});
+        enc.encode(piece); piece.close();
+        if (enc.encodeQueueSize > 20) await pause();
+      }
+      if (!failed) await enc.flush();
+    } catch (e) { if (e && e.silent) { try { enc.close(); } catch (x) { /* closed */ } throw e; } failed = e; }
+    try { enc.close(); } catch (e) { /* closed already */ }
+    /* AAC-LC at 48 kHz is described by two bytes; they are written here when the encoder does not hand them over */
+    if (!failed && samples.length) return {kind, samples, desc: desc || (kind === 'aac' ? Uint8Array.of(0x11, channels === 2 ? 0x90 : 0x88) : null), rate: AUDIO_RATE, channels};
+  }
+  return null;
+}
+/* The fallback: play the reel once on a canvas and let the browser record it (takes as long as the reel itself). */
+function recordLive(stage, paint, seconds, fps, onStep, stop, pcm) {
+  return new Promise((res, rej) => {
+    if (typeof MediaRecorder === 'undefined' || !stage.captureStream) return rej(new Err('این مرورگر نمی‌تواند ویدیو بسازد؛ با Chrome امتحان کن.'));
+    paint(0);
+    const stream = stage.captureStream(fps);
+    let ac = null, voice = null;
+    if (pcm) {
+      try {
+        ac = new (window.AudioContext || window.webkitAudioContext)();
+        const buf = ac.createBuffer(1, pcm.length, AUDIO_RATE), out = ac.createMediaStreamDestination();
+        buf.copyToChannel(pcm, 0);
+        voice = ac.createBufferSource(); voice.buffer = buf; voice.connect(out);
+        stream.addTrack(out.stream.getAudioTracks()[0]);
+      } catch (e) { ac = null; voice = null; }
+    }
+    const kinds = voice ? ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4;codecs=avc1,opus', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
+      : ['video/mp4;codecs=avc1.640028', 'video/mp4;codecs=avc1.4d0028', 'video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+    const type = kinds.find(k => MediaRecorder.isTypeSupported(k));
+    if (!type) return rej(new Err('این مرورگر نمی‌تواند ویدیو بسازد؛ با Chrome امتحان کن.'));
+    const rec = new MediaRecorder(stream, {mimeType: type, videoBitsPerSecond: Math.round(stage.width * stage.height * fps * 0.1)}), parts = [], t0 = performance.now();
+    let broke = null;
+    rec.ondataavailable = e => { if (e.data && e.data.size) parts.push(e.data); };
+    rec.onerror = () => { broke = new Err('ضبط ویدیو متوقف شد.'); };
+    rec.onstop = () => { stream.getTracks().forEach(tr => tr.stop()); if (ac) ac.close().catch(() => {}); if (broke) rej(broke); else res(new Blob(parts, {type: type.split(';')[0]})); };
+    const tick = () => {
+      const t = (performance.now() - t0) / 1000;
+      if (stop.on || D.hidden) broke = stop.on ? new Err('لغو شد.', 0, true) : new Err('صفحه بسته شد و ضبط ناتمام ماند. دوباره بساز و تا پایان، همین صفحه را باز نگه دار.');
+      if (broke || t >= seconds + 0.15) return rec.stop();
+      paint(Math.min(t, seconds)); onStep(Math.min(1, t / seconds));
+      requestAnimationFrame(tick);
+    };
+    rec.start();
+    if (voice) { ac.resume().catch(() => {}); voice.start(); }
+    requestAnimationFrame(tick);
+  });
+}
+/* Full size first; then the same lying on its side (older phones only encode wide pictures); then smaller; then recording.
+   clips: the narration, [{buf, at}]. The answer says how the sound went in: 'aac', 'opus', 'recorded', 'none' (it could not), '' (there was none). */
+async function renderReel(m, clips, onStep, stop) {
+  const seconds = m.total, pcm = clips && clips.length ? await mixSound(clips, seconds) : null;
+  const ways = S.video ? [S.video] : [[1080, false], [1080, true], [720, false], [720, true], 'live'];
+  let last = null;
+  for (const way of ways) {
+    const width = way === 'live' ? 720 : way[0], stage = blank(width, width * 16 / 9), paint = t => paintReel(stage, m, t);
+    try {
+      if (way === 'live') return {blob: await recordLive(stage, paint, seconds, REEL_FPS, onStep, stop, pcm), way: 'live', seconds, sound: pcm ? 'recorded' : ''};
+      const video = await encodeFrames(stage, paint, seconds, REEL_FPS, way[1], p => onStep(pcm ? p * 0.94 : p), stop);
+      if (!video) continue;
+      const audio = pcm ? await encodeSound(pcm, stop) : null;
+      return {blob: mp4File(video, audio), way: width + (way[1] ? ' turned' : ''), seconds, sound: audio ? audio.kind : pcm ? 'none' : ''};
+    } catch (e) { if (e && e.silent) throw e; last = e; }
+  }
+  throw last instanceof Err ? last : new Err('ساخت ویدیو روی این دستگاه انجام نشد' + (last && last.message ? ' (' + last.message + ')' : '') + '.');
+}
+
+/* ── the narrator on the device: a worker runs the downloaded Persian voice; no text leaves the phone ── */
+const Dev = {w: null, n: 0, jobs: {}};
+function devQuit(why) {
+  if (Dev.w) { try { Dev.w.terminate(); } catch (e) { /* gone already */ } Dev.w = null; }
+  const jobs = Dev.jobs;
+  Dev.jobs = {};
+  for (const k in jobs) { clearTimeout(jobs[k].timer); jobs[k].no(new Err(why || 'لغو شد.')); }
+}
+function devRead(texts, onStep) {                      /* → one AudioBuffer per text (none where nothing came out) */
+  return new Promise((ok, no) => {
+    if (typeof Worker === 'undefined' || typeof WebAssembly === 'undefined' || typeof BigInt64Array === 'undefined') return no(new Err('این مرورگر گویندهٔ روی گوشی را اجرا نمی‌کند؛ با Chrome امتحان کن.'));
+    if (!Dev.w) {
+      Dev.w = new Worker('/api/voice/worker.js');
+      Dev.w.onmessage = ev => {
+        const d = ev.data, job = Dev.jobs[d.id];
+        if (!job) return;
+        job.alive();
+        if (d.kind === 'step') { if (job.onStep) job.onStep(d.i, d.pct || 0); return; }
+        if (d.kind === 'clip') {
+          if (d.pcm && d.pcm.length) { const buf = new AudioBuffer({length: d.pcm.length, sampleRate: d.rate, numberOfChannels: 1}); buf.copyToChannel(d.pcm, 0); job.out[d.i] = buf; }
+          return;
+        }
+        clearTimeout(job.timer); delete Dev.jobs[d.id];
+        if (d.kind === 'done') return job.ok(job.out);
+        devQuit();                                     /* after an error the worker starts fresh next time */
+        job.no(new Err('گویندهٔ روی گوشی نتوانست بخواند (' + String(d.error).slice(0, 140) + ').'));
+      };
+      Dev.w.onerror = ev => { if (ev && ev.preventDefault) ev.preventDefault(); devQuit('گویندهٔ روی گوشی اجرا نشد' + (ev && ev.message ? ' (' + String(ev.message).slice(0, 140) + ')' : '') + '.'); };
+    }
+    const id = ++Dev.n, job = {ok, no, onStep, out: [], timer: 0};
+    job.alive = () => { clearTimeout(job.timer); job.timer = setTimeout(() => devQuit('گویندهٔ روی گوشی جواب نداد؛ شاید حافظهٔ گوشی کم باشد. برنامه‌های دیگر را ببند و دوباره امتحان کن.'), 150000); };
+    Dev.jobs[id] = job; job.alive();
+    Dev.w.postMessage({id, texts});
+  });
+}
+const packed = () => S.st.studio.pack.state === 'ready';
+/* the one-time download of that narrator: where it stands, and the button; again() redraws the caller once it is there */
+function packBox(again) {
+  const box = h('div', {class: 'col'});
+  let timer = 0, was = S.st.studio.pack.state;
+  const poll = async () => { if (!box.isConnected) return; try { draw(await GET('/api/studio/pack')); } catch (e) { timer = setTimeout(poll, 3000); } };
+  const act = (path, del) => e => run(e.currentTarget, async () => draw(await (del ? DEL(path) : POST(path))));
+  const draw = pk => {
+    S.st.studio.pack = pk; box.setAttribute('data-pack', pk.state);
+    clearTimeout(timer);
+    if (pk.state === 'ready' && was !== 'ready' && again) { was = pk.state; return again(); }
+    was = pk.state;
+    if (pk.state === 'loading') {
+      const bar = h('i'); bar.style.width = pk.pct + '%';
+      fill(box, h('div', {class: 'sm'}, 'در حال دانلود گویندهٔ فارسی… ' + fa(pk.pct) + '٪'), h('div', {class: 'bar'}, bar),
+        h('div', {class: 'row'}, h('span', {class: 'grow muted sm'}, 'ایجنت را باز نگه دار. تا تمام شود می‌توانی ویدیوی بی‌صدا بسازی.'), h('button', {class: 'btn sm', 'data-pack-do': 'stop', onclick: act('/api/studio/pack/cancel')}, 'توقف')));
+      timer = setTimeout(poll, 1000);
+    } else if (pk.state === 'ready') fill(box, h('div', {class: 'row sm'}, h('i', {class: 'dot'}), h('span', {class: 'grow'}, 'گویندهٔ فارسی روی این دستگاه نصب است (' + fa(pk.mb) + ' مگابایت).'),
+      h('button', {class: 'btn sm danger', 'data-pack-do': 'remove', onclick: act('/api/studio/pack', true)}, 'حذف')));
+    else fill(box, pk.state === 'failed' ? h('div', {class: 'sm down'}, 'دانلود گوینده کامل نشد: ' + pk.why) : null,
+      h('div', {class: 'muted sm'}, 'گویندهٔ فارسیِ رایگان یک بار دانلود می‌شود (حدود ' + fa(pk.fetch_mb) + ' مگابایت) و بعد روی همین دستگاه، بدون کلید و بدون هزینه، متن ویدیو را می‌خواند.'),
+      h('div', {class: 'row'}, h('button', {class: 'btn sm', 'data-pack-do': 'get', onclick: act('/api/studio/pack')}, icon('download'), pk.state === 'failed' ? 'ادامهٔ دانلود' : 'دانلود گویندهٔ فارسی')));
+  };
+  draw(S.st.studio.pack);
+  return box;
+}
+
+function studio(init, done) {
+  init = init || {};
+  const m = {kind: init.kind === 'reel' ? 'reel' : 'image', style: 'photo', scenes: 4, pics: S.st.studio.image !== 'off', look: Math.floor(Math.random() * LOOKS.length), words: true, shots: [],
+    narr: true, speaker: S.st.studio.speaker || DEVICE, voice: 'none', own: null};
+  const canRead = () => (m.speaker === DEVICE ? packed() : !!S.st.studio.voice);        /* is the chosen narrator there? */
+  const stop = {on: false}, handle = () => (S.st.connected ? S.st.account.username : S.st.handle) || '';
+  let timer = 0, anim = 0, jobId = '', player = null;
+  const hush = () => { if (player) { const p = player; player = null; p.ac.close().catch(() => {}); } };
+  const quit = () => { clearTimeout(timer); cancelAnimationFrame(anim); hush(); if (jobId) { POST('/api/studio/job/' + jobId + '/cancel').catch(() => {}); jobId = ''; } };
+  const s = sheet('بساز', {onclose: () => { stop.on = true; quit(); devQuit(); }});
+  const idea = h('textarea', {class: 'in', rows: 3, placeholder: 'مثلاً: تخفیف ۲۰٪ لاتهٔ پاییزی تا آخر هفته', 'aria-label': 'ایدهٔ پست', value: init.idea || ''});
+  const demo = () => (S.st.demo ? h('div', {class: 'muted sm'}, (m.speaker === DEVICE && packed() ? 'حالت نمایشی: متن‌ها و تصویرها ساختگی‌اند (صدای گوینده واقعی است)'
+    : 'حالت نمایشی: متن‌ها، تصویرها و صدای گوینده ساختگی‌اند') + '؛ در اجرای واقعی از سرویس‌های هوش مصنوعی می‌آیند.') : null);
+
+  const form = () => {
+    quit();
+    const styles = [['photo', 'عکس واقعی'], ['art', 'تصویرسازی'], ['minimal', 'مینیمال'], ['3d', 'سه‌بعدی']];
+    const off = S.st.studio.image === 'off', can = canRead(), dev = m.speaker === DEVICE;
+    fill(s.body, field('ایده‌ات را بنویس', idea),
+      segment([['image', 'عکس'], ['reel', 'ویدیو (ریل)']], m.kind, v => { m.kind = v; form(); }),
+      m.kind === 'reel' ? [h('label', {class: 'f'}, 'چند صحنه؟'), segment([[3, '۳'], [4, '۴'], [5, '۵']], m.scenes, v => { m.scenes = v; form(); })] : null,
+      h('label', {class: 'f'}, 'سبک تصویر'), h('div', {class: 'chips'}, styles.map(x => h('button', {class: 'chip' + (m.style === x[0] ? ' on' : ''), 'data-style': x[0], onclick: () => { m.style = x[0]; form(); }}, x[1]))),
+      h('div', {class: 'row', 'data-opt': 'pics'}, h('div', {class: 'grow'}, h('b', null, 'تصویر با هوش مصنوعی'),
+          h('div', {class: 'muted sm'}, off ? 'در تنظیمات خاموش است؛ طرح‌های خود برنامه استفاده می‌شود.' : S.st.studio.pollen || S.st.studio.custom ? 'با کلید خودت ساخته می‌شود.'
+            : m.kind === 'reel' ? 'سرویس‌های رایگان کند و کوچک‌اند؛ برای ریل یکی دو دقیقه صبر لازم است.' : 'از سرویس رایگان می‌آید؛ چند ثانیه تا یک دقیقه طول می‌کشد.')),
+        off ? null : toggle(m.pics, async v => { m.pics = v; }, 'تصویر با هوش مصنوعی')),
+      m.kind === 'reel' ? [h('div', {class: 'row', 'data-opt': 'voice'}, h('div', {class: 'grow'}, h('b', null, 'گوینده (صداگذاری)'),
+          h('div', {class: 'muted sm'}, !can ? (dev ? 'گویندهٔ فارسی هنوز روی این دستگاه نیست. بدون آن ویدیو بی‌صدا ساخته می‌شود و بعد می‌توانی صدای خودت را رویش ضبط کنی.'
+              : 'این گوینده کلید Pollinations می‌خواهد (تنظیمات ← ساخت عکس و ویدیو).')
+            : dev ? 'متن هر صحنه نوشته می‌شود و گویندهٔ فارسی آن را روی همین گوشی می‌خواند.' : 'متن هر صحنه نوشته می‌شود و گویندهٔ هوش مصنوعی آن را می‌خواند.')),
+        can ? toggle(m.narr, async v => { m.narr = v; }, 'گوینده') : null), !can && dev ? packBox(form) : null] : null, demo());
+    s.setFoot(h('button', {class: 'btn pri', 'data-studio-go': '1', onclick: e => run(e.currentTarget, start)}, icon('spark'), m.kind === 'reel' ? 'ویدیو را بساز' : 'عکس را بساز'));
+  };
+  const working = job => {
+    const got = job.pictures.filter(p => p.file).length, read = job.voices.filter(x => x.file).length;
+    fill(s.body, h('div', {class: 'empty'}, h('i', {class: 'spin'}), h('b', null, job.step || 'در حال ساختن…'),
+      job.voices.length > 1 ? h('div', {class: 'muted sm'}, fa(read) + ' از ' + fa(job.voices.length) + ' صدا آماده است') : null,
+      job.pictures.length > 1 ? h('div', {class: 'muted sm'}, fa(got) + ' از ' + fa(job.pictures.length) + ' تصویر آماده است') : null,
+      h('div', {class: 'muted sm'}, 'همین صفحه را باز نگه دار.')),
+      got ? h('div', {class: 'strip'}, job.pictures.filter(p => p.file).map(p => thumb(p.preview, 'image', 'mitem'))) : null);
+    s.setFoot(h('button', {class: 'btn', onclick: () => (m.plan ? result() : form())}, icon('x'), 'لغو'));
+  };
+  const watch = (job, then) => {
+    cancelAnimationFrame(anim); hush();
+    jobId = job.id; working(job);
+    const back = () => (m.plan ? result() : form());
+    const look = async () => {
+      if (stop.on || jobId !== job.id) return;
+      try { job = await GET('/api/studio/job/' + job.id); } catch (e) { jobId = ''; toast(e.message, 'bad'); return back(); }
+      if (stop.on || jobId !== job.id) return;
+      if (job.status === 'running') { working(job); timer = setTimeout(look, 900); return; }
+      jobId = '';
+      if (job.status !== 'done') { if (job.status === 'failed') toast(job.error || 'ساخته نشد', 'bad'); return back(); }
+      try { await then(job); } catch (e) { toast((e && e.message) || 'خطا', 'bad'); back(); }
+    };
+    timer = setTimeout(look, 500);
+  };
+  const more = notes => { m.notes = (m.notes || []).concat(notes.filter(x => !(m.notes || []).includes(x))); };
+  /* the narration clips of a job go to their scenes; texts: what each of them was asked to say */
+  const reading = (i, n, pct) => {
+    fill(s.body, h('div', {class: 'empty', 'data-reading': i}, h('i', {class: 'spin'}),
+      h('b', null, i < 0 ? 'گویندهٔ روی گوشی آماده می‌شود…' + (pct ? ' ' + fa(pct) + '٪' : '') : n === 1 ? 'گوینده در حال خواندن است…' : 'گوینده در حال خواندن صحنهٔ ' + fa(i + 1) + ' از ' + fa(n) + '…'),
+      h('div', {class: 'muted sm'}, i < 0 ? 'بار اول چند ثانیه بیشتر طول می‌کشد.' : 'صدا روی همین گوشی ساخته می‌شود؛ صفحه را باز نگه دار.')));
+    s.setFoot(h('button', {class: 'btn', onclick: () => devQuit()}, icon('x'), 'لغو'));
+  };
+  const loadVoices = async (voices, idxs, texts) => {
+    await Promise.all(voices.map(async (v, j) => {
+      const sh = m.shots[idxs[j]];
+      sh.vwhy = v.why || '';
+      if (!v.preview) return;
+      try {
+        const res = await fetch(v.preview, {credentials: 'same-origin'});
+        if (!res.ok) throw new Error('missing');
+        const buf = await decodeSound(await res.arrayBuffer());
+        sh.clip = {buf, dur: buf.duration, text: texts[j]};
+      } catch (e) { sh.vwhy = 'صدای این صحنه باز نشد.'; }
+    }));
+    const dev = voices.map((v, j) => j).filter(j => voices[j].source === DEVICE && voices[j].say);      /* these the device reads itself */
+    if (!dev.length || stop.on) return;
+    const tell = why => dev.forEach(j => { m.shots[idxs[j]].vwhy = why; });
+    if (!packed()) return tell('گویندهٔ فارسی هنوز روی این دستگاه دانلود نشده است.');
+    try {
+      const bufs = await devRead(dev.map(j => voices[j].say), (i, pct) => { if (!stop.on) reading(i, dev.length, pct); });
+      dev.forEach((j, k) => { const sh = m.shots[idxs[j]]; if (bufs[k]) { sh.clip = {buf: bufs[k], dur: bufs[k].duration, text: texts[j]}; sh.vwhy = ''; } else sh.vwhy = 'صدای این صحنه ساخته نشد.'; });
+    } catch (e) { tell((e && e.message) || 'صدا ساخته نشد.'); }
+  };
+  const start = async () => {
+    const text = idea.value.trim();
+    if (text.length < 3) { toast('ایده‌ات را در یک جمله بنویس', 'bad'); return; }
+    m.plan = null;
+    watch(await POST('/api/studio/make', {idea: text, kind: m.kind, scenes: m.scenes, style: m.style, pictures: m.pics, voice: m.kind === 'reel' && m.narr && canRead(), speaker: m.speaker}), async job => {
+      const plan = job.plan;
+      Object.assign(m, {notes: job.notes, head: plan.headline, sub: plan.sub, caption: (plan.caption + '\n\n' + plan.hashtags.join(' ')).trim(), own: null, voice: 'none'});
+      m.shots = job.pictures.map((p, i) => ({prompt: p.prompt, src: p.preview, from: p.source, why: p.why, img: null, clip: null, vwhy: '',
+        text: plan.scenes[i] ? plan.scenes[i].text : '', say: plan.scenes[i] ? (plan.scenes[i].say || plan.scenes[i].text || '').trim() : ''}));
+      await Promise.all(m.shots.map(async sh => { if (sh.src) { try { sh.img = await loadPic(sh.src); } catch (e) { sh.src = ''; sh.why = 'تصویر باز نشد.'; } } }));
+      await loadVoices(job.voices, job.voices.map((x, i) => i), m.shots.map(x => x.say));
+      if (m.shots.some(x => x.clip)) m.voice = 'ai';
+      await faceReady();
+      m.plan = plan;
+      result();
+    });
+  };
+  /* one more picture for shot i, from the description as it stands now */
+  const redo = (i, prompt) => run(null, async () => {
+    watch(await POST('/api/studio/picture', {prompt, shape: m.kind === 'reel' ? 'reel' : 'post', style: m.style}), async job => {
+      const p = job.pictures[0], sh = m.shots[i];
+      sh.prompt = p.prompt || prompt;
+      if (p.file) Object.assign(sh, {src: p.preview, from: p.source, why: '', img: await loadPic(p.preview)});
+      else toast(p.why || 'تصویر ساخته نشد', 'bad');
+      more(job.notes);
+      result();
+    });
+  });
+  /* the narrator reads the given scenes (again); then() runs when every one of them has its voice */
+  const readScenes = (idxs, then) => run(null, async () => {
+    const texts = idxs.map(i => m.shots[i].say);
+    watch(await POST('/api/studio/voice', {texts, speaker: m.speaker}), async job => {
+      await loadVoices(job.voices, idxs, texts);
+      more(job.notes);
+      const got = idxs.filter((i, j) => m.shots[i].clip && m.shots[i].clip.text === texts[j]).length;
+      if (m.shots.some(x => x.clip)) m.voice = 'ai';
+      if (got < idxs.length) toast((m.shots.find(x => x.vwhy) || {}).vwhy || 'صدا ساخته نشد', 'bad');
+      if (then && got === idxs.length) return then();
+      result();
+    });
+  });
+  const spoken = sh => (m.voice === 'ai' && sh.clip && sh.say ? sh.clip : null);
+  /* how long every scene lasts: with narration as long as its voice; with the owner's own recording, shared out by the length of the lines */
+  const reel = () => {
+    let durs;
+    if (m.voice === 'mine' && m.own) {
+      const wt = m.shots.map(x => Math.max(8, (x.say || x.text || '').length)), sum = wt.reduce((a, b) => a + b, 0), all = m.own.dur + VOICE_LEAD + VOICE_TAIL;
+      durs = wt.map(x => Math.max(1.6, all * x / sum));
+    } else durs = m.shots.map(x => (spoken(x) ? Math.max(SCENE_SEC, spoken(x).dur + VOICE_LEAD + VOICE_TAIL) : SCENE_SEC));
+    return Object.assign(reelTimes(durs), {scenes: m.shots.map(x => ({img: x.img, text: x.text})), sub: m.sub, handle: handle(), look: m.look});
+  };
+  const clipsOf = mdl => (m.voice === 'mine' && m.own ? [{buf: m.own.buf, at: VOICE_LEAD}]
+    : m.shots.map((x, i) => (spoken(x) ? {buf: x.clip.buf, at: mdl.starts[i] + VOICE_LEAD} : null)).filter(Boolean));
+  const play = async () => {
+    hush();
+    const mdl = reel(), pcm = await mixSound(clipsOf(mdl), mdl.total), ac = new (window.AudioContext || window.webkitAudioContext)();
+    const buf = ac.createBuffer(1, pcm.length, AUDIO_RATE), node = ac.createBufferSource();
+    buf.copyToChannel(pcm, 0); node.buffer = buf; node.connect(ac.destination);
+    await ac.resume();
+    node.onended = () => { if (player && player.ac === ac) hush(); };
+    node.start();
+    player = {ac, t0: ac.currentTime, total: mdl.total};
+  };
+  const recordSheet = () => {
+    hush();
+    const r = sheet('ضبط صدای خودم'), lines = m.shots.map(x => x.say || x.text).filter(Boolean);
+    const clock = h('b', null, '۰ ثانیه'), status = h('div', {class: 'muted sm'}, 'متن را یک بار مرور کن. بعد «شروع ضبط» را بزن و آرام و پیوسته بخوان؛ صحنه‌ها با صدای تو هماهنگ می‌شوند.'), audio = h('audio', {controls: true, class: 'hide'});
+    let rec = null, stream = null, parts = [], t0 = 0, tick = 0, take = null;
+    const free = () => { clearInterval(tick); if (stream) stream.getTracks().forEach(tr => tr.stop()); stream = null; };
+    r.onclose = () => { if (rec && rec.state === 'recording') { rec.onstop = null; rec.stop(); } free(); };
+    const foot = st => r.setFoot(st === 'rec' ? h('button', {class: 'btn danger', 'data-rec': 'stop', onclick: () => rec.stop()}, icon('x'), 'پایان ضبط')
+      : [h('button', {class: 'btn', 'data-rec': 'start', onclick: e => run(e.currentTarget, begin)}, icon('mic'), st === 'done' ? 'دوباره' : 'شروع ضبط'),
+        st === 'done' ? h('button', {class: 'btn pri', 'data-rec': 'use', onclick: () => { m.own = take; m.voice = 'mine'; r.close(); result(); }}, icon('check'), 'همین خوبه') : null]);
+    const begin = async () => {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') throw new Err('این مرورگر ضبط صدا ندارد؛ با Chrome امتحان کن.');
+      try { stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: true, noiseSuppression: true}}); }
+      catch (e) { throw new Err(e && e.name === 'NotAllowedError' ? 'اجازهٔ میکروفون داده نشد. در تنظیمات مرورگر به این صفحه اجازهٔ میکروفون بده.' : 'میکروفون در دسترس نیست.'); }
+      parts = []; rec = new MediaRecorder(stream);
+      rec.ondataavailable = e => { if (e.data && e.data.size) parts.push(e.data); };
+      rec.onstop = async () => {
+        free();
+        try {
+          const blob = new Blob(parts, {type: rec.mimeType || 'audio/webm'}), buf = await decodeSound(await blob.arrayBuffer());
+          if (buf.duration < 1) throw new Error('too short');
+          take = {buf, dur: buf.duration};
+          audio.src = URL.createObjectURL(blob); audio.classList.remove('hide');
+          fill(status, 'ضبط شد: ' + fa(Math.round(buf.duration)) + ' ثانیه. گوش بده؛ اگر خوب بود «همین خوبه» را بزن.'); foot('done');
+        } catch (e) { fill(status, 'این ضبط خوانده نشد یا خیلی کوتاه بود؛ دوباره امتحان کن.'); foot('idle'); }
+      };
+      rec.start(); t0 = performance.now(); audio.classList.add('hide'); foot('rec');
+      fill(status, 'در حال ضبط… متن پایین را بخوان و در پایان «پایان ضبط» را بزن.');
+      tick = setInterval(() => { const sec = (performance.now() - t0) / 1000; fill(clock, fa(Math.floor(sec)) + ' ثانیه'); if (sec > 90 && rec.state === 'recording') rec.stop(); }, 250);
+    };
+    add(r.body, status, h('div', {class: 'card col'}, lines.map((l, i) => h('div', {class: 'line', dir: 'auto'}, fa(i + 1) + '. ' + l))), h('div', {class: 'row'}, icon('clock'), clock), audio);
+    foot('idle');
+  };
+  const facts = () => {
+    const drawn = m.shots.filter(x => x.img).length, why = (m.shots.find(x => !x.img && x.why) || {}).why;
+    return [m.plan.source === 'offline' ? h('div', {class: 'sm amber'}, 'متن‌ها الگوی آماده‌اند (' + (NO_PLAN[m.plan.why] || 'دستیار جواب نداد') + '). می‌توانی خودت عوضشان کنی.') : null,
+      h('div', {class: 'muted sm', 'data-pics': drawn}, m.shots.length === 1 ? (drawn ? 'تصویر: هوش مصنوعی (' + (PIC_FROM[m.shots[0].from] || '') + ')' : 'تصویر: طرح خود برنامه')
+        : drawn === m.shots.length ? 'هر ' + fa(drawn) + ' تصویر را هوش مصنوعی ساخته است.' : !drawn ? 'زمینه‌ها طرح خود برنامه‌اند.'
+        : fa(drawn) + ' از ' + fa(m.shots.length) + ' تصویر را هوش مصنوعی ساخته؛ بقیه طرح خود برنامه‌اند.'),
+      !drawn || drawn < m.shots.length ? (why ? h('div', {class: 'muted sm'}, why) : null) : null,
+      (m.notes || []).map(x => h('div', {class: 'sm amber'}, x)), demo()];
+  };
+  const describe = i => {
+    const sh = m.shots[i], ta = h('textarea', {class: 'in', dir: 'auto', rows: 3, 'aria-label': 'توصیف تصویر', value: sh.prompt});
+    return h('details', {class: 'box'}, h('summary', null, icon('image'), m.shots.length > 1 ? 'تصویر صحنهٔ ' + fa(i + 1) : 'تصویر دیگر'),
+      h('div', {class: 'col'}, h('div', {class: 'muted sm'}, 'بنویس تصویر چه چیزی را نشان بدهد. فارسی هم می‌شود (دستیار به انگلیسی برمی‌گرداند)، ولی انگلیسی سریع‌تر و دقیق‌تر است.'), ta,
+        h('button', {class: 'btn', 'data-redo': i, onclick: () => redo(i, ta.value.trim())}, icon('refresh'), 'تصویر تازه بساز')));
+  };
+  /* what the narrator says on scene i; a changed line is read again when the video is made */
+  const sayField = i => {
+    const sh = m.shots[i], el = h('textarea', {class: 'in', rows: 2, dir: 'auto', 'aria-label': 'متن گوینده ' + (i + 1), value: sh.say || ''});
+    const stale = h('div', {class: 'sm amber hide'}, 'متن عوض شد؛ موقع ساخت ویدیو دوباره خوانده می‌شود.');
+    el.addEventListener('input', () => { sh.say = el.value.trim(); stale.classList.toggle('hide', !(sh.say && (!sh.clip || sh.clip.text !== sh.say))); });
+    return [h('label', {class: 'f'}, 'متن گوینده، صحنهٔ ' + fa(i + 1) + (spoken(sh) ? ' (' + fa(Math.round(sh.clip.dur * 10) / 10) + ' ثانیه)' : '')), el, stale,
+      sh.vwhy && !sh.clip ? h('div', {class: 'sm down'}, sh.vwhy) : null];
+  };
+  const voiceCard = () => {
+    const can = canRead(), dev = m.speaker === DEVICE, total = fa(Math.round(reel().total)) + ' ثانیه', all = m.shots.map((x, i) => i);
+    const names = [[DEVICE, DEVICE_NAME]].concat(S.st.studio.voice || !dev ? SPEAKERS : []);
+    const who = h('select', {class: 'in', 'aria-label': 'گوینده'}, names.concat(names.some(x => x[0] === m.speaker) ? [] : [[m.speaker, m.speaker]]).map(x => h('option', {value: x[0]}, x[1])));
+    who.value = m.speaker;
+    who.addEventListener('change', () => { m.speaker = who.value; hush(); if (canRead()) readScenes(all.filter(i => m.shots[i].say)); else { m.voice = m.voice === 'ai' ? 'none' : m.voice; result(); } });
+    return h('div', {class: 'card col', 'data-voice': m.voice}, h('div', {class: 'row'}, h('b', {class: 'grow'}, 'صدا'),
+        m.voice !== 'none' ? h('button', {class: 'btn sm', 'data-voice-do': 'play', onclick: e => run(e.currentTarget, play)}, icon('play'), 'پخش با صدا') : null),
+      h('div', {class: 'muted sm'}, m.voice === 'ai' ? (dev ? 'گویندهٔ فارسی متن هر صحنه را می‌خواند؛ ویدیو ' : 'گویندهٔ هوش مصنوعی متن هر صحنه را می‌خواند؛ ویدیو ') + total + ' می‌شود.'
+        : m.voice === 'mine' ? 'صدای خودت روی ویدیو می‌نشیند؛ ویدیو ' + total + ' می‌شود.'
+        : 'ویدیو بی‌صداست. ' + (can ? 'گوینده را روشن کن یا صدای خودت را ضبط کن.' : dev ? 'گویندهٔ فارسی را دانلود کن یا صدای خودت را ضبط کن.' : 'این گوینده کلید Pollinations می‌خواهد (تنظیمات ← ساخت عکس و ویدیو)؛ بدون کلید می‌توانی صدای خودت را ضبط کنی.')),
+      m.voice === 'ai' || S.st.studio.voice ? field('گوینده', who) : null,
+      m.voice === 'ai' ? [m.shots.map((sh, i) => sayField(i)), S.st.demo && !dev ? h('div', {class: 'muted sm'}, 'حالت نمایشی: این گوینده به‌جای صدا بوق می‌زند.') : null,
+        dev ? h('div', {class: 'muted sm'}, 'اگر گوینده واژه‌ای را بد خواند، متن همان صحنه را عوض کن (کسره هم می‌شود گذاشت: «کوچکِ») و دوباره «پخش با صدا» را بزن.') : null] : null,
+      m.voice !== 'ai' && !can && dev ? packBox(() => readScenes(all.filter(i => m.shots[i].say))) : null,   /* once it is there it reads at once */
+      h('div', {class: 'row wrap'},
+        can && m.voice !== 'ai' ? h('button', {class: 'btn sm', 'data-voice-do': 'ai', onclick: () => readScenes(all.filter(i => m.shots[i].say))}, icon('spark'), dev ? 'گویندهٔ فارسی' : 'گویندهٔ هوش مصنوعی') : null,
+        h('button', {class: 'btn sm', 'data-voice-do': 'record', onclick: recordSheet}, icon('mic'), m.own ? 'ضبط دوباره' : 'ضبط صدای خودم'),
+        m.voice !== 'mine' && m.own ? h('button', {class: 'btn sm', 'data-voice-do': 'mine', onclick: () => { hush(); m.voice = 'mine'; result(); }}, 'صدای ضبط‌شدهٔ خودم') : null,
+        m.voice !== 'none' ? h('button', {class: 'btn sm', 'data-voice-do': 'off', onclick: () => { hush(); m.voice = 'none'; result(); }}, 'بی‌صدا') : null));
+  };
+  const result = () => {
+    cancelAnimationFrame(anim); hush();
+    const text = (label, key, obj) => { const el = h('input', {class: 'in', 'aria-label': label, value: obj[key] || ''}); el.addEventListener('input', () => { obj[key] = el.value; paint(); }); return field(label, el); };
+    const stage = m.kind === 'reel' ? blank(540, 960) : blank(1080, 1350), t0 = performance.now();
+    stage.className = 'stage' + (m.kind === 'reel' ? ' tall' : '');
+    const paint = () => { if (m.kind === 'image') paintPost(stage, {img: m.shots[0].img, head: m.head, sub: m.sub, handle: handle(), look: m.look, words: m.words}); };
+    const loop = () => {
+      if (!stage.isConnected) return;
+      const mdl = reel();
+      paintReel(stage, mdl, player ? Math.min(mdl.total, player.ac.currentTime - player.t0) : ((performance.now() - t0) / 1000) % mdl.total);
+      anim = requestAnimationFrame(loop);
+    };
+    const next = h('button', {class: 'btn sm', 'data-look': '1', onclick: () => { m.look++; paint(); }}, icon('refresh'), m.kind === 'reel' || m.shots[0].img ? 'چیدمان دیگر' : 'رنگ دیگر');
+    fill(s.body, stage, facts(),
+      m.kind === 'image' ? [text('نوشتهٔ روی تصویر', 'head', m), text('خط دوم (اختیاری)', 'sub', m),
+          h('div', {class: 'row'}, m.shots[0].img ? [h('span', {class: 'grow'}, 'نوشته روی تصویر باشد'), toggle(m.words, async v => { m.words = v; paint(); }, 'نوشته روی تصویر')] : h('span', {class: 'grow'}), next), describe(0)]
+        : [voiceCard(), m.shots.map((sh, i) => text('نوشتهٔ صحنهٔ ' + fa(i + 1), 'text', sh)), text('خط آخر (اختیاری)', 'sub', m), h('div', {class: 'row'}, h('span', {class: 'grow muted sm'}, 'آهنگ زمینه را موقع انتشار در اینستاگرام اضافه کن.'), next),
+          m.shots.map((sh, i) => describe(i))],
+      h('label', {class: 'f'}, 'کپشن (در مرحلهٔ بعد می‌توانی عوضش کنی)'), h('div', {class: 'card pre sm', dir: 'auto', 'data-caption': '1'}, m.caption));
+    s.setFoot(h('button', {class: 'btn', onclick: form}, 'از نو'), h('button', {class: 'btn pri', 'data-studio-done': '1', onclick: e => run(e.currentTarget, m.kind === 'reel' ? film : finish)}, icon('check'), m.kind === 'reel' ? 'ساخت ویدیو' : 'ادامه'));
+    if (m.kind === 'reel') loop(); else paint();
+  };
+  const finish = async () => {
+    const cv = $('canvas.stage', s.body), blob = await new Promise(r => cv.toBlob(r, 'image/jpeg', 0.92));
+    if (!blob) throw new Err('تصویر ساخته نشد.');
+    const up = await api('POST', '/api/upload?name=studio.jpg', blob, true);
+    s.close();
+    done({kind: 'image', caption: m.caption, media: [{file: up.id, type: up.type, preview: up.preview}]});
+  };
+  const film = async () => {
+    cancelAnimationFrame(anim); hush();
+    const stale = m.voice === 'ai' ? m.shots.map((x, i) => i).filter(i => m.shots[i].say && (!m.shots[i].clip || m.shots[i].clip.text !== m.shots[i].say)) : [];
+    if (stale.length) return readScenes(stale, film);                   /* lines that were changed are read first */
+    devQuit();                                                          /* the narrator has done its part; encoding the video needs the memory */
+    const model = reel(), sound = clipsOf(model), bar = h('i'), pct = h('b', null, '۰٪'), halt = {on: false};
+    fill(s.body, h('div', {class: 'empty'}, h('i', {class: 'spin'}), h('div', null, 'در حال ساخت ویدیو… ', pct), h('div', {class: 'bar grow'}, bar), h('div', {class: 'muted sm'}, 'همین صفحه را باز و روشن نگه دار.')));
+    s.setFoot(h('button', {class: 'btn', onclick: () => { halt.on = true; }}, icon('x'), 'لغو'));
+    let made;
+    try { made = await renderReel(model, sound, p => { bar.style.width = Math.round(p * 100) + '%'; fill(pct, fa(Math.round(p * 100)) + '٪'); }, {get on() { return halt.on || stop.on; }}); }
+    catch (e) { if (!stop.on) result(); if (e && e.silent) return; throw e; }
+    fill(pct, '۱۰۰٪');
+    const mp4 = made.blob.type === 'video/mp4', up = await api('POST', '/api/upload?name=studio.' + (mp4 ? 'mp4' : 'webm'), made.blob, true);
+    S.made = {way: made.way, type: made.blob.type, size: made.blob.size, seconds: made.seconds, file: up.id, sound: made.sound, voice: m.voice};
+    s.close();
+    if (!mp4) toast('این مرورگر ویدیو را به شکل WebM ساخت و اینستاگرام شاید آن را نپذیرد؛ با Chrome دوباره بساز.', 'bad');
+    else if (made.sound === 'none') toast('این مرورگر نتوانست صدا را روی ویدیو بگذارد و ویدیو بی‌صدا ساخته شد؛ با Chrome امتحان کن.', 'bad');
+    else if (made.sound === 'opus') toast('صدا با قالب Opus روی ویدیو نشست، چون این مرورگر AAC نمی‌سازد. اگر اینستاگرام صدا را پخش نکرد، ویدیو را با Chrome گوشی بساز.', 'bad');
+    done({kind: 'reel', caption: m.caption, media: [{file: up.id, type: up.type, preview: up.preview}]});
+  };
+  form();
+  if (idea.value.trim().length >= 3 && init.kind) run(null, start);
 }
 
 /* ───── comments & direct ───── */
@@ -4914,6 +7355,12 @@ function ruleSheet(r) {
   s.setFoot(r.id ? h('button', {class: 'btn danger', onclick: async e => { const b = e.currentTarget; if (await ask('این قانون حذف شود؟', 'حذف', true)) run(b, async () => { await DEL('/api/rules/' + r.id); s.close(); render(false); }); }}, icon('trash'), 'حذف') : null, save);
 }
 VIEWS.agent = async () => {
+  if (!S.st.connected) return [
+    h('div', {class: 'card col'}, h('b', null, 'بدون اتصال به پیج'), h('div', {class: 'muted sm'}, 'ایجنت عکس، ویدیو و کپشن را می‌سازد و سر وقت یادآوری می‌کند؛ انتشار با خودت است. خواندن کامنت و دایرکت، پاسخ خودکار و آمار به اتصال پیج (توکن متا) نیاز دارد.'),
+      h('div', {class: 'row wrap'}, h('button', {class: 'btn sm', onclick: tokenSheet}, icon('link'), 'اتصال با توکن متا'))),
+    h('div', {class: 'row'}, h('button', {class: 'btn grow', onclick: assistantSheet}, icon('spark'), 'دستیار'), h('button', {class: 'btn grow', id: 'open-settings', onclick: settingsSheet}, icon('settings'), 'تنظیمات'),
+      h('button', {class: 'btn grow', onclick: helpSheet}, icon('help'), 'راهنما')),
+    h('p', {class: 'muted sm center'}, 'ایجنت اینستاگرام — نسخهٔ __VERSION__')];
   const [set, rules] = await Promise.all([GET('/api/settings'), GET('/api/rules')]), st = S.st, au = set.auto, lim = set.limits;
   const sw = (key, title, desc) => h('div', {class: 'row line'}, h('div', {class: 'grow'}, h('b', null, title), h('div', {class: 'muted sm'}, desc)), toggle(au[key], v => saveSettings({auto: {[key]: v}}, false), title));
   const ruleCard = r => h('button', {class: 'card row' + (r.enabled ? '' : ' off'), 'data-rule': r.id, onclick: () => ruleSheet(r)}, h('div', {class: 'grow'}, h('b', null, r.name),
@@ -4963,19 +7410,47 @@ async function settingsSheet() {
   let tempOk = set.media.temp_ok;
   const tgToken = inp('', {class: 'in ltr', type: 'password', autocomplete: 'off', placeholder: set.telegram.token_set ? '•••••• (ذخیره شده)' : '123456:ABC…'}), tgChat = inp(set.telegram.chat_id, {class: 'in ltr', placeholder: '123456789'});
   const proxy = inp(set.network.proxy, {class: 'in ltr', placeholder: 'http://127.0.0.1:10809'});
+  const handle = inp(set.brand.handle, {class: 'in ltr', placeholder: 'my.page', 'aria-label': 'نام کاربری پیج'});
+  const picMode = sel(set.studio.image, [['auto', 'خودکار (رایگان‌ها به نوبت)'], ['pollinations', 'فقط Pollinations'], ['horde', 'فقط AI Horde'], ['custom', 'فقط سرویس خودم'], ['off', 'خاموش (طرح‌های خود برنامه)']]);
+  const pollen = inp('', {class: 'in ltr', type: 'password', autocomplete: 'off', 'aria-label': 'کلید Pollinations', placeholder: set.studio.pollen_set ? '•••••• (ذخیره شده)' : 'sk_…'});
+  const picUrl = inp(set.studio.url, {class: 'in ltr', placeholder: 'https://…/v1'}), picModel = inp(set.studio.model, {class: 'in ltr', placeholder: 'gpt-image-1'});
+  const picKey = inp('', {class: 'in ltr', type: 'password', autocomplete: 'off', placeholder: set.studio.key_set ? '•••••• (ذخیره شده)' : 'کلید API'});
+  const voices = [['', 'خودکار (بدون کلید: گویندهٔ روی گوشی)'], [DEVICE, DEVICE_NAME]].concat(SPEAKERS.map(x => [x[0], x[1] + ' — با کلید']));
+  const speaker = sel(set.studio.speaker, voices.concat(voices.some(x => x[0] === set.studio.speaker) ? [] : [[set.studio.speaker, set.studio.speaker]]));
+  speaker.setAttribute('aria-label', 'گوینده');
+  const ttsModel = inp(set.studio.tts_model, {class: 'in ltr', placeholder: 'tts-1', 'aria-label': 'نام مدل صدا'});
+  const testKey = async () => {                        /* a key that was just typed is saved first, then Pollinations is asked about it */
+    if (pollen.value.trim()) { await saveSettings({studio: {pollen: pollen.value}}, false); pollen.value = ''; pollen.placeholder = '•••••• (ذخیره شده)'; }
+    const r = await POST('/api/studio/key'), credit = r.balance == null ? '' : ' اعتبار: ' + fa(Math.round(r.balance * 100) / 100) + ' پولن.';
+    if (!r.audio) toast('کلید پذیرفته شد، ولی اجازهٔ ساخت صدا ندارد. موقع ساختن کلید، دسترسی صدا (audio) را هم روشن کن.' + credit, 'bad');
+    else if (r.balance != null && r.balance <= 0) toast('کلید پذیرفته شد، ولی اعتباری ندارد.' + credit, 'bad');
+    else toast('کلید پذیرفته شد ✓' + credit);
+  };
   const state = (on, text) => h('div', {class: 'row sm'}, h('i', {class: 'dot ' + (on ? '' : 'off')}), h('span', {class: 'grow'}, text));
   add(s.body,
-    box('brand', 'home', 'معرفی پیج (برای کپشن‌ها و پاسخ‌ها)', [field('پیج دربارهٔ چیست؟', about), field('لحن نوشتن', tone), field('هشتگ‌های همیشگی پیج', tags)], () => ({brand: {about: about.value, tone: tone.value, hashtags: tags.value}})),
-    box('ai', 'spark', 'هوش مصنوعی', [field('سرویس', aiMode, 'در حالت رایگان، متن کامنت/موضوع برای نوشتن پاسخ به یک سرویس عمومی فرستاده می‌شود.'), field('نشانی سرویس خودم', aiUrl), field('نام مدل', aiModel), field('کلید', aiKey)],
+    box('brand', 'home', 'معرفی پیج (برای کپشن‌ها و پاسخ‌ها)', [field('پیج دربارهٔ چیست؟', about), field('لحن نوشتن', tone), field('هشتگ‌های همیشگی پیج', tags),
+        field('نام کاربری پیج (اختیاری)', handle, 'بدون @. زیر عکس‌ها و در پایان ویدیوهایی که ایجنت می‌سازد نوشته می‌شود.')],
+      () => ({brand: {about: about.value, tone: tone.value, hashtags: tags.value, handle: handle.value}})),
+    box('studio', 'image', 'ساخت عکس و ویدیو', [h('p', {class: 'muted sm'}, 'ایجنت تصویر را از سرویس‌های هوش مصنوعی می‌گیرد و عکس نهایی و ویدیو را روی همین دستگاه می‌سازد. بدون ثبت‌نام از دو سرویس رایگان استفاده می‌کند: Pollinations (هر ۴۵ ثانیه یک تصویر، با نشان کوچک خودش در گوشه) و AI Horde (تصویر کوچک‌تر، گاهی با صف). اگر هیچ‌کدام جواب ندهند، طرح خود برنامه کشیده می‌شود.'),
+        field('سرویس تصویر', picMode),
+        field('کلید Pollinations (اختیاری)', pollen, 'با کلید خودت (از enter.pollinations.ai) تصویرها بزرگ‌تر، بدون انتظار و بدون نشان می‌شوند، متن‌ها را مدل بهتری می‌نویسد و گوینده‌های آن سرویس هم برای ویدیو در دسترس‌اند. بدون کلید، گویندهٔ فارسیِ روی همین دستگاه کار می‌کند.'),
+        field('گوینده', speaker, 'صدایی که متن ویدیو را می‌خواند. در خود «بساز» هم می‌توانی عوضش کنی و گوش بدهی.'),
+        h('div', {class: 'card col', 'data-sec': 'pack'}, h('b', null, 'گویندهٔ فارسیِ روی همین دستگاه'), packBox()),
+        h('details', {class: 'box'}, h('summary', null, icon('link'), 'سرویس خودم (سازگار با OpenAI)'), h('div', {class: 'col'}, field('نشانی', picUrl), field('نام مدل تصویر', picModel), field('کلید', picKey),
+          field('نام مدل صدا (اختیاری)', ttsModel, 'اگر سرویس خودت گوینده هم دارد (audio/speech)، نام مدلش را بنویس. خالی یعنی گویندهٔ Pollinations.')))],
+      () => ({studio: {image: picMode.value, pollen: pollen.value, url: picUrl.value, model: picModel.value, key: picKey.value, speaker: speaker.value, tts_model: ttsModel.value}}),
+      [h('button', {class: 'btn', 'data-key-test': '1', onclick: e => run(e.currentTarget, testKey)}, 'آزمایش کلید'),
+        set.studio.pollen_set ? h('button', {class: 'btn danger', onclick: e => run(e.currentTarget, async () => { await saveSettings({studio: {pollen_clear: true}}, 'کلید برداشته شد'); pollen.placeholder = 'sk_…'; e.target.remove(); })}, 'حذف کلید') : null]),
+    box('ai', 'spark', 'هوش مصنوعی (متن)', [field('سرویس', aiMode, 'در حالت رایگان، متن کامنت/موضوع برای نوشتن پاسخ به یک سرویس عمومی فرستاده می‌شود و هر ۴۵ ثانیه یک پاسخ می‌دهد (با کلید Pollinations در بخش «ساخت عکس و ویدیو» این محدودیت نیست).'), field('نشانی سرویس خودم', aiUrl), field('نام مدل', aiModel), field('کلید', aiKey)],
       () => ({ai: {mode: aiMode.value, url: aiUrl.value, model: aiModel.value, key: aiKey.value}})),
     box('media', 'upload', 'انتشار از گالری (لینک عمومی)', [h('p', {class: 'muted sm'}, 'اینستاگرام فایل را خودش از یک نشانی اینترنتی برمی‌دارد. برای عکس و ویدیویی که از گالری انتخاب می‌کنی، ایجنت باید چند دقیقه یک لینک عمومی برایش بسازد:'),
         state(m.tunnel, m.tunnel ? 'تونل cloudflared: آماده است (فایل از خود گوشی و فقط در لحظهٔ انتشار در دسترس قرار می‌گیرد؛ پنل هیچ‌وقت بیرون نمی‌آید).' : 'تونل cloudflared: نصب نیست. در ترموکس یک بار بزن: pkg install cloudflared و ایجنت را دوباره اجرا کن.'),
         h('div', {class: 'row sm'}, h('i', {class: 'dot ' + (tempOk ? '' : 'off')}), h('span', {class: 'grow'}, 'میزبان موقت: فایل یک ساعت روی سرویس عمومی litterbox.catbox.moe گذاشته می‌شود (بدون نصب چیزی).'), toggle(tempOk, async v => { tempOk = v; }, 'میزبان موقت')),
         state(m.public, 'نشانی عمومی خودم: اگر ایجنت روی سرور یا پشت دامنهٔ خودت است.'), field('روش', method), field('نشانی عمومی (اختیاری)', pub)],
       () => ({media: {method: method.value, public_url: pub.value, temp_ok: tempOk}})),
-    box('telegram', 'send', 'اعلان در تلگرام', [h('p', {class: 'muted sm'}, 'با @BotFather یک ربات بساز، توکنش را اینجا بگذار و شناسهٔ عددی خودت را (مثلاً از @userinfobot) بنویس. هشدارها و گزارش روزانه برایت فرستاده می‌شود.'), field('توکن ربات', tgToken), field('شناسهٔ چت', tgChat)],
+    box('telegram', 'send', 'اعلان در تلگرام', [h('p', {class: 'muted sm'}, 'با @BotFather یک ربات بساز، توکنش را اینجا بگذار و شناسهٔ عددی خودت را (مثلاً از @userinfobot) بنویس. هشدارها و گزارش روزانه برایت فرستاده می‌شود؛ در انتشار دستی، سر وقتِ هر یادآوری فایل و کپشن هم به همین گفتگو می‌آید.'), field('توکن ربات', tgToken), field('شناسهٔ چت', tgChat)],
       () => ({telegram: {token: tgToken.value, chat_id: tgChat.value}}), h('button', {class: 'btn', onclick: e => run(e.currentTarget, async () => { await POST('/api/telegram/test'); toast('پیام آزمایشی فرستاده شد ✓'); })}, 'آزمایش')),
-    box('network', 'link', 'پروکسی (فیلترشکن)', [h('p', {class: 'muted sm'}, 'اگر اینستاگرام فقط با فیلترشکن باز می‌شود، نشانی پروکسی HTTP آن را بنویس. خالی یعنی اتصال مستقیم.'), field('پروکسی HTTP', proxy)], () => ({network: {proxy: proxy.value}})));
+    box('network', 'link', 'پروکسی (فیلترشکن)', [h('p', {class: 'muted sm'}, 'اگر اینستاگرام، تلگرام یا سرویس‌های هوش مصنوعی فقط با فیلترشکن باز می‌شوند و فیلترشکنت برای همهٔ برنامه‌ها روشن نیست، نشانی پروکسی HTTP آن را بنویس. خالی یعنی اتصال مستقیم.'), field('پروکسی HTTP', proxy)], () => ({network: {proxy: proxy.value}})));
 }
 function assistantSheet() {
   const s = sheet('دستیار'), box = h('div', {class: 'chat'}), ta = h('textarea', {class: 'in', rows: 1, placeholder: 'بپرس…', 'aria-label': 'پیام به دستیار'}), hist = [];
@@ -4995,7 +7470,14 @@ function assistantSheet() {
 function helpSheet() {
   const s = sheet('راهنما'), sec = (title, ...lines) => h('div', {class: 'card col'}, h('b', null, title), lines.map(l => h('div', {class: 'sm'}, l)));
   add(s.body,
-    sec('ایجنت چه کارهایی می‌کند؟', 'پست، پست چندتایی، ریل و استوری را همین حالا یا در زمان دلخواه منتشر می‌کند.', 'کامنت‌ها و دایرکت‌ها را در یک صندوق نشان می‌دهد و می‌توانی از همین‌جا جواب بدهی، مخفی یا حذف کنی.',
+    sec('ساختن پست از روی یک ایده', 'در «بساز» ایده‌ات را بنویس: ایجنت کپشن و هشتگ می‌نویسد، تصویر را از سرویس هوش مصنوعی می‌گیرد و عکس نهایی یا ریل را روی همین دستگاه می‌سازد.',
+      'سرویس‌های رایگان تصویر کند و کوچک‌اند و گاهی جواب نمی‌دهند؛ آن وقت ایجنت طرح خودش را می‌کشد. با کلید Pollinations (در تنظیمات) نتیجه بهتر و سریع‌تر است.',
+      'ریل از چند تصویر با حرکت و نوشته ساخته می‌شود و گوینده متن هر صحنه را رویش می‌خواند. گویندهٔ فارسیِ رایگان یک بار دانلود می‌شود (حدود ۸۵ مگابایت) و بعد روی همین گوشی، بدون کلید و بدون اینترنت، کار می‌کند؛ تلفظش همیشه بی‌نقص نیست، برای همین متن هر صحنه را می‌توانی عوض کنی و دوباره بشنوی.',
+      'به‌جای گوینده می‌توانی صدای خودت را ضبط کنی، یا با کلید Pollinations از گوینده‌های آن سرویس استفاده کنی. آهنگ زمینه را موقع انتشار در اینستاگرام اضافه کن.',
+      'فیلمی که خودِ هوش مصنوعی از صفر بسازد (آدم و صحنهٔ متحرک) فقط در سرویس‌های پولی هست و در این ایجنت نیست.'),
+    sec('انتشار با خودت (بدون اتصال پیج)', 'پست آماده را باز کن: «ارسال به اینستاگرام» فایل را به اپ می‌دهد و کپشن را کپی می‌کند؛ آنجا بچسبانش. اگر این دکمه نبود، «ذخیره» و «کپی کپشن» را بزن.',
+      'برای هر پست می‌توانی یادآوری بگذاری؛ سر وقت در پنل (و در تلگرام، اگر وصلش کرده باشی) خبر می‌دهد. بعد از انتشار «منتشر کردم» را بزن.'),
+    sec('ایجنت چه کارهایی می‌کند؟', 'با اتصال پیج: پست، پست چندتایی، ریل و استوری را همین حالا یا در زمان دلخواه منتشر می‌کند.', 'کامنت‌ها و دایرکت‌ها را در یک صندوق نشان می‌دهد و می‌توانی از همین‌جا جواب بدهی، مخفی یا حذف کنی.',
       'طبق قانون‌هایی که می‌نویسی خودش جواب می‌دهد و کامنت‌های تبلیغاتی را مخفی می‌کند.', 'آمار پیج و بهترین ساعت انتشار را نشان می‌دهد و در نوشتن کپشن و هشتگ کمک می‌کند.'),
     sec('چه چیزهایی شدنی نیست؟', 'اینستاگرام از راه رسمی اجازهٔ فالو/آنفالو، دیدن فهرست دنبال‌کننده‌ها، ویرایش کپشن یا بیو و گذاشتن استیکر و لینک روی استوری را نمی‌دهد؛ ایجنت هم سراغ راه‌های غیررسمی (که پیج را در خطر بسته‌شدن می‌گذارد) نمی‌رود.',
       'لایک‌کردن و حذف پست هم در این ایجنت نیست (متا برای این دو مجوز جداگانه می‌خواهد)؛ این دو را از خود اپ اینستاگرام انجام بده.',
@@ -5018,6 +7500,568 @@ $('#fab').addEventListener('click', () => composer());
 </body>
 </html>
 '''
+
+
+# ───────────────────────────── the typeface ─────────────────────────────
+# Vazirmatn 33.0.3, the Persian typeface of the panel and of the pictures and reels it draws: the variable-weight
+# (100-900) Persian/Arabic subset as WOFF2, embedded unchanged.
+# Copyright 2015 The Vazirmatn Project Authors (https://github.com/rastikerdar/vazirmatn).
+# Licensed under the SIL Open Font License, Version 1.1 (see OFL-Vazirmatn.txt next to this file, or
+# https://openfontlicense.org); the font file itself also carries this notice.
+FONT_WOFF2 = (
+    "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"
+)
 
 
 if __name__ == "__main__":

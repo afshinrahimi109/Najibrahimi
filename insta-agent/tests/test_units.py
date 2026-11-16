@@ -1,7 +1,10 @@
 """Small pieces that need no running agent."""
+import base64
 import contextlib
 import io
 import os
+import shutil
+import struct
 import tempfile
 import unittest
 
@@ -104,7 +107,79 @@ class ErrorTests(unittest.TestCase):
         self.assertNotIn("تعداد هشتگ", ia.GraphError("hashtag", 190).fa)    # other kinds keep their own explanation
 
 
+class StudioHelperTests(unittest.TestCase):
+    def test_shorten_cuts_at_a_word(self):
+        self.assertEqual(ia.shorten("  سلام   دنیا  ", 40), "سلام دنیا")
+        self.assertEqual(ia.shorten("تخفیف بیست درصدی لاتهٔ پاییزی تا آخر هفته", 24), "تخفیف بیست درصدی لاتهٔ…")
+        self.assertEqual(ia.shorten("abcdefghijklmnop", 8), "abcdefgh…")
+        self.assertEqual(ia.shorten(None, 8), "")
+
+    def test_loose_json_finds_the_object_in_an_answer(self):
+        self.assertEqual(ia.loose_json('حتماً!\n```json\n{"a": 1, "b": {"c": [2]}}\n```\nموفق باشید'), {"a": 1, "b": {"c": [2]}})
+        for bad in ("", "no braces", "{not json}", "[1, 2]", '{"a": 1', None):
+            self.assertIsNone(ia.loose_json(bad), bad)
+
+    def test_picture_descriptions_ask_for_no_writing(self):
+        cases = {
+            'A hand holding a card that reads "20% OFF" beside a latte, cozy café interior.': "A hand holding a card beside a latte, cozy cafe interior",
+            "A medium shot of a latte with a small sign showing 20% off, autumn decor, soft lighting": "A medium shot of a latte, autumn decor, soft lighting",
+            "An inviting cafe doorway with a sign, warm glow, autumn leaves outside": "An inviting cafe doorway, warm glow, autumn leaves outside",
+            'An inviting café entrance with the word "کافه" above it, warm lighting': "An inviting cafe entrance, warm lighting",
+            "a display board with the text '20% off this week', customers in the background": "a display board, customers in the background",
+            "A latte with 20% off this week, warm light": "A latte, warm light",
+            "A cup labeled SALE, on a table; a ribbon saying Welcome": "A cup, on a table; a ribbon",
+            "a menu written in bold letters, autumn leaves": "a menu, autumn leaves",
+            "fresh carrot cake on a wooden table, top-down shot, no text or people in frame": "fresh carrot cake on a wooden table, top-down shot, no text or people in frame",
+        }
+        for asked, want in cases.items():
+            self.assertEqual(ia.no_writing(asked), want)
+        self.assertEqual(ia.no_writing(None), "")
+        self.assertEqual(ia.no_writing("کیک هویج خانگی"), "")           # nothing an English-only service could read
+
+    def test_a_service_that_says_not_now(self):
+        said = ('{"status":402,"success":false,"error":{"code":"FREE_LIMIT","message":"Free limit reached: 1 image every 45 seconds per IP. '
+                'Retry after 41s, or get unlimited images with a pollen key"}}')
+        self.assertEqual(ia.Studio.refusal({}, said.encode())[1], 41)
+        plain = "Free limit reached: 1 reply every 45 seconds per IP. Please wait 39 seconds or get unlimited replies, then try again."
+        self.assertEqual(ia.Studio.refusal({}, plain.encode())[1], 39)
+        self.assertEqual(ia.Studio.refusal({"retry-after": "10"}, b'{"error":{"code":"SERVICE_UNAVAILABLE","message":"at its limit"}}')[1], 10)
+        self.assertEqual(ia.Studio.refusal({}, b"<html>Bad Gateway</html>")[1], 0)
+
+    def test_what_counts_as_a_picture(self):
+        self.assertTrue(ia.Studio.is_picture(ia.fake_picture("x", 200, 300)))
+        self.assertTrue(ia.Studio.is_picture(jpeg()))
+        self.assertTrue(ia.Studio.is_picture(b"RIFF\x24\x00\x00\x00WEBPVP8 " + b"\x00" * 40))
+        for raw in (b"", b"GIF89a" + b"\x00" * 40, mp4(), b'{"error": "x"}', b"<html>"):
+            self.assertFalse(ia.Studio.is_picture(raw), raw[:12])
+
+    def test_the_stand_in_picture_depends_on_the_request(self):
+        a, b = ia.fake_picture("latte 1", 300, 400), ia.fake_picture("bicycle 2", 300, 400)
+        self.assertEqual(a[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertNotEqual(a, b)
+        self.assertEqual(a, ia.fake_picture("latte 1", 300, 400))
+        self.assertEqual(struct.unpack(">II", a[16:24]), (300, 400))
+        self.assertEqual(struct.unpack(">II", ia.fake_picture("x", 5000, 5000)[16:24]), (640, 1136))     # never huge
+
+    def test_the_embedded_typeface_is_a_woff2_file(self):
+        raw = base64.b64decode(ia.FONT_WOFF2)
+        self.assertEqual(raw[:4], b"wOF2")
+        self.assertEqual(struct.unpack(">I", raw[8:12])[0], len(raw))      # the length the file states about itself
+
+
 class FileTests(unittest.TestCase):
+    def test_webm_and_webp(self):
+        self.assertEqual(ia.sniff(b"\x1a\x45\xdf\xa3" + b"\x00" * 60), ("video", "webm", "video/webm"))
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        cases = {"lossy": b"RIFF\x00\x00\x00\x00WEBPVP8 \x00\x00\x00\x00\x00\x00\x00\x9d\x01\x2a\x01\x02\x81\x02",        # 513x641
+                 "lossless": b"RIFF\x00\x00\x00\x00WEBPVP8L\x00\x00\x00\x00\x2f\x00\x02\xa0\x00" + b"\x00" * 6,                # 513x641
+                 "extended": b"RIFF\x00\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00\x10\x00\x00\x00\x00\x02\x00\x80\x02\x00"}       # 513x641
+        for name, head in cases.items():
+            path = os.path.join(tmp, name + ".webp")
+            with open(path, "wb") as fh:
+                fh.write(head + b"\x00" * 8)
+            self.assertEqual(ia.image_size(path), (513, 641), name)
+
     def test_sniff_knows_what_instagram_accepts(self):
         self.assertEqual(ia.sniff(jpeg()[:64]), ("image", "jpg", "image/jpeg"))
         self.assertEqual(ia.sniff(png()[:64])[1], "png")
@@ -122,6 +197,58 @@ class FileTests(unittest.TestCase):
                 with open(path, "wb") as fh:
                     fh.write(data)
                 self.assertEqual(ia.image_size(path), want, name)
+
+
+class SpeechTests(unittest.TestCase):
+    """What the narrator is given to read, and the stand-in voice of the simulator."""
+
+    def test_numbers_in_persian_words(self):
+        for n, words in ((0, "صفر"), (7, "هفت"), (13, "سیزده"), (20, "بیست"), (21, "بیست و یک"), (99, "نود و نه"), (100, "صد"),
+                         (101, "صد و یک"), (110, "صد و ده"), (999, "نهصد و نود و نه"), (1000, "هزار"), (1001, "هزار و یک"),
+                         (2000, "دو هزار"), (12345, "دوازده هزار و سیصد و چهل و پنج"), (100000, "صد هزار"), (1000000, "یک میلیون"),
+                         (2500000, "دو میلیون و پانصد هزار")):
+            self.assertEqual(ia.number_words(n), words, n)
+        self.assertTrue(ia.number_words(999999999).startswith("نهصد و نود و نه میلیون و نهصد"))
+
+    def test_a_line_as_it_is_read_aloud(self):
+        for text, said in (
+                ("۲۰٪ تخفیف لاتهٔ پاییزی ☕️ تا آخر هفته!", "بیست درصد تخفیف لاتهٔ پاییزی تا آخر هفته!"),
+                ("ساعت ۸:۳۰ تا ۲۲", "ساعت هشت و سی تا بیست و دو"),
+                ("قیمت ۱٬۲۵۰٬۰۰۰ تومان", "قیمت یک میلیون و دویست و پنجاه هزار تومان"),
+                ("150000 تومان", "صد و پنجاه هزار تومان"),
+                ("تماس: 09121234567", "تماس: صفر نه یک دو یک دو سه چهار پنج شش هفت"),
+                ("۰۲۱-۱۲۳۴۵۶۷۸", "صفر دو یک یک دو سه چهار پنج شش هفت هشت"),
+                ("۴٫۵ ستاره #کافه_ما @my.page https://x.y/z", "چهار ممیز پنج ستاره کافه ما my.page"),
+                ("تا 1403/08/25 فرصت دارید", "تا هزار و چهارصد و سه هشت بیست و پنج فرصت دارید"),
+                ("❤️\u200d🔥 عالیه 👍🏽", "عالیه"),
+                ("  چند   فاصله\nو خط تازه  ", "چند فاصله و خط تازه"),
+                (None, ""), ("☕️", "")):
+            self.assertEqual(ia.spoken(text), said, text)
+        self.assertEqual(ia.spoken("می\u200cخواهم"), "می\u200cخواهم")                 # the half-space Persian words need stays
+        self.assertEqual(len(ia.spoken("سلام " * 500)), ia.SAY_MAX)
+
+    def test_sound_files_are_known_by_their_first_bytes(self):
+        for head, kind in ((b"ID3\x04\x00\x00", "mp3"), (b"\xff\xfb\x90\x64", "mp3"), (b"\xff\xf3\x44\xc4", "mp3"), (b"\xff\xf1\x4c\x80", "aac"),
+                           (b"RIFF\x24\x00\x00\x00WAVEfmt ", "wav"), (b"OggS\x00\x02", "ogg"), (b"fLaC\x00\x00", "flac"),
+                           (b"\x00\x00\x00\x1cftypM4A ", "m4a")):
+            self.assertEqual(ia.sniff_audio(head)[0], kind, head)
+        for head in (b"", b"\xff", b"<html>", b"{\"error\": 1}", b"\x89PNG\r\n\x1a\n", b"RIFF\x24\x00\x00\x00WEBPVP8 "):
+            self.assertIsNone(ia.sniff_audio(head), head)
+
+    def test_the_stand_in_voice_is_a_wav_as_long_as_the_line(self):
+        short, long = ia.fake_speech("سلام"), ia.fake_speech("سلام " * 12)
+        for wav, text in ((short, "سلام"), (long, "سلام " * 12)):
+            self.assertEqual(ia.sniff_audio(wav[:64]), ("wav", "audio/wav"))
+            fmt, channels, rate, _, _, bits = struct.unpack("<HHIIHH", wav[20:36])
+            self.assertEqual((fmt, channels, rate, bits), (1, 1, 16000, 16))
+            size = struct.unpack("<I", wav[40:44])[0]
+            self.assertEqual(size, len(wav) - 44)
+            self.assertAlmostEqual(size / 2 / 16000.0, 0.35 + 0.07 * len(text), delta=0.011)
+            self.assertGreater(max(abs(x[0]) for x in struct.iter_unpack("<h", wav[44:])), 5000)       # it can be heard
+        self.assertEqual(ia.fake_speech("سلام"), short)                    # the same line sounds the same
+        self.assertNotEqual(ia.fake_speech("درود"), short)
+        self.assertAlmostEqual((len(ia.fake_speech("")) - 44) / 32000.0, 0.6, delta=0.001)
+        self.assertAlmostEqual((len(ia.fake_speech("ب" * 2000)) - 44) / 32000.0, 20.0, delta=0.001)
 
 
 class ConfigTests(unittest.TestCase):

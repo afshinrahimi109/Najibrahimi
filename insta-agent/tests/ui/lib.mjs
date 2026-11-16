@@ -2,14 +2,16 @@
 import chromium from '@sparticuz/chromium';
 import puppeteer from 'puppeteer-core';
 import fs from 'node:fs';
-export const BASE = process.env.BASE, KEY = process.env.KEY, TOKEN = process.env.TOKEN;
+export const BASE = process.env.BASE, KEY = process.env.KEY, TOKEN = process.env.TOKEN, AI_KEY = process.env.AI_KEY;
 export const ASSETS = process.env.ASSETS || '.', out = process.env.SHOTS || './shots';
 fs.mkdirSync(out, {recursive: true});
 export const sleep = ms => new Promise(r => setTimeout(r, ms));
 export async function start(opts = {}) {
   const own = process.env.CHROME_PATH;                 // an installed browser, if you have one
-  const browser = await puppeteer.launch(own ? {executablePath: own, headless: true, args: ['--no-sandbox']}
-    : {args: [...chromium.args, '--no-sandbox', '--disable-gpu'], executablePath: await chromium.executablePath(), headless: 'shell'});
+  // a made-up microphone (it beeps) and no question about using it: the "record my own voice" path needs both
+  const media = ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--autoplay-policy=no-user-gesture-required'];
+  const browser = await puppeteer.launch(own ? {executablePath: own, headless: true, args: ['--no-sandbox', ...media]}
+    : {args: [...chromium.args, '--no-sandbox', '--disable-gpu', ...media], executablePath: await chromium.executablePath(), headless: 'shell'});
   const page = await browser.newPage();
   await page.setViewport({width: opts.width || 390, height: 844, deviceScaleFactor: 2, isMobile: true, hasTouch: true});
   if (opts.dark) await page.emulateMediaFeatures([{name: 'prefers-color-scheme', value: 'dark'}]);

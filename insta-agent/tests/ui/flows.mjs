@@ -241,6 +241,25 @@ try {
   t.check('drafts are listed', await page.evaluate(() => document.querySelectorAll('button[data-post]').length >= 5));
   await t.shot('51-drafts');
 
+  // the studio with a connected page: a picture made from an idea is published by the agent itself
+  await page.click('#fab'); await sleep(400);
+  await page.click('.sheet [data-add="ai"]'); await sleep(400);
+  await t.type('textarea[aria-label="ایدهٔ پست"]', 'معرفی کیک هویج خانگی');
+  await page.click('.sheet [data-studio-go]');
+  await page.waitForSelector('.sheet canvas.stage', {timeout: 60000});
+  await sleep(500);
+  t.check('the demo says its words and pictures are made up', await t.waitText('حالت نمایشی: متن‌ها، تصویرها و صدای گوینده ساختگی‌اند', 3000));
+  await t.shot('52-studio');
+  await page.click('.sheet [data-studio-done]');
+  await page.waitForFunction(() => !document.querySelector('.sheet canvas.stage') && document.querySelector('.sheet .mitem img'), {timeout: 20000});
+  const studioOut = await t.inTop(s => ({caption: s.querySelector('textarea[aria-label="کپشن"]').value, tags: s.querySelectorAll('.mitem .tag').length, go: s.querySelector('[data-go]').textContent}));
+  t.check('the studio fills the composer', studioOut.caption.includes("کیک هویج") && studioOut.tags === 1 && studioOut.go.includes("انتشار"), studioOut);
+  await page.click('.sheet [data-go]');
+  t.check('the made picture is published', await t.waitText('منتشر شد ✓ —', 20000));
+  media = await t.api('/api/media?refresh=1');
+  t.check('and leads the page grid', media.items[0].caption.includes('کیک هویج'), media.items[0].caption);
+  await t.closeSheet();
+
   // master switch
   await t.tab('home');
   await page.click('.sw'); await sleep(1200);
