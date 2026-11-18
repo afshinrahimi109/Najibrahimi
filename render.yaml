@@ -1,0 +1,23 @@
+# Blueprint دیپلوی یک‌کلیکی برای Render
+# https://render.com/deploy?repo=https://github.com/afshinrahimi109/Najibrahimi
+#
+# اپ در پوشه‌ی call/ است. تنها متغیرهای اختیاری:
+#   CALL_CODE         → اگر بگذاری، ورود فقط با کد ممکن است
+#   VAPID_PUBLIC_KEY  / VAPID_PRIVATE_KEY → برای پایدار ماندن اعلان‌ها
+#     (با `npx web-push generate-vapid-keys` بساز)
+#   TURN_URL / TURN_USER / TURN_PASS → برای تماس در شبکه‌های سخت
+services:
+  - type: web
+    name: bishomare
+    runtime: node
+    plan: free
+    rootDir: call
+    buildCommand: npm install --omit=dev
+    startCommand: node server.js
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: VAPID_SUBJECT
+        value: mailto:admin@example.com

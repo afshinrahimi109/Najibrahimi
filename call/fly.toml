@@ -1,0 +1,20 @@
+# استقرار روی Fly.io:  fly launch --copy-config --dockerfile Dockerfile  →  fly deploy
+app = "bishomare"
+primary_region = "fra"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

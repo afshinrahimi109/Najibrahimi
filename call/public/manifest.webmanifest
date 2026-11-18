@@ -1,0 +1,20 @@
+{
+  "name": "بی‌شماره — تماس بدون سیم‌کارت",
+  "short_name": "بی‌شماره",
+  "description": "تماس صوتی و تصویری رمزنگاری‌شده بدون سیم‌کارت و بدون شماره تلفن؛ فقط با یک لینک یا یک شماره‌ی ۶ رقمی.",
+  "lang": "fa",
+  "dir": "rtl",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "portrait",
+  "background_color": "#060a11",
+  "theme_color": "#060a11",
+  "categories": ["communication", "social"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
